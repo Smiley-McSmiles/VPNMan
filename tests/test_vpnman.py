@@ -317,6 +317,29 @@ class InstallTests(unittest.TestCase):
             self.assertIn(key, text)
 
 
+class DesktopIntegrationTests(unittest.TestCase):
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def test_wm_class_matches_launcher(self):
+        """Cinnamon/MATE/XFCE (X11) match windows to dock entries via WM_CLASS == StartupWMClass."""
+        desktop = open(os.path.join(self.ROOT, "data/io.github.smiley_mcsmiles.VPNMan.desktop")).read()
+        wm = [l.split("=", 1)[1].strip() for l in desktop.splitlines() if l.startswith("StartupWMClass=")][0]
+        icon = [l.split("=", 1)[1].strip() for l in desktop.splitlines() if l.startswith("Icon=")][0]
+        from vpnman import APP_ID
+        self.assertEqual(wm, APP_ID)
+        self.assertEqual(icon, APP_ID)
+        import subprocess
+        py = next((p for p in ("python3", "python3.12", "python3.11", "python3.13", "python3.10")
+                   if shutil_which(p) and subprocess.run([shutil_which(p), "-c", "import gi;gi.require_version('Gtk','4.0');gi.require_version('Adw','1')"],
+                                                          capture_output=True).returncode == 0), None)
+        if not py:
+            self.skipTest("needs PyGObject with GTK 4 + libadwaita")
+        code = ("import sys; sys.path.insert(0, %r)\nfrom gi.repository import GLib\nfrom vpnman.gui import app\n"
+                "app.set_process_identity(); print(GLib.get_prgname())" % os.path.abspath(self.ROOT))
+        r = subprocess.run([shutil_which(py), "-c", code], capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), wm, r.stderr[-500:])
+
+
 class CreditsTests(unittest.TestCase):
     def test_attribution_and_donation_options(self):
         from vpnman import credits

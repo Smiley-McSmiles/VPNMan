@@ -1325,14 +1325,14 @@ class Application(Adw.Application):
             self.win.toast("Copied to clipboard.")
 
 
-def run(argv=None):
-    # X11 desktops (Cinnamon, MATE, XFCE, ...) match a window to its launcher/dock entry by WM_CLASS, which GTK derives
-    # from the program name. Run as `python3 -m vpnman` that would be "python3", so the window would not match the
-    # .desktop file (StartupWMClass) -> duplicate dock icon and no icon on the running app. Wayland uses the app id.
+def set_process_identity():
+    """X11 desktops (Cinnamon, MATE, XFCE, ...) match a window to its launcher/dock entry by WM_CLASS, which GTK derives
+    from the program name. Started as `python3 -m vpnman` that would be "python3", so the window would not match the
+    .desktop file (StartupWMClass) -> a duplicate dock icon and no icon on the running app. Wayland uses the app id."""
     GLib.set_prgname(APP_ID)
     GLib.set_application_name(APP_NAME)
+
+
+def run(argv=None):
+    set_process_identity()
     return Application().run(argv if argv is not None else sys.argv)
-
-
-if __name__ == "__main__":
-    sys.exit(run())

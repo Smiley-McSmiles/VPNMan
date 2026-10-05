@@ -129,7 +129,10 @@ session inside is still authenticated); a warning is logged.
   itself. It works on KDE Plasma, XFCE, Cinnamon, MATE, LXQt, Budgie, Deepin and Pantheon out of the box, and on
   **GNOME with the "AppIndicator and KStatusNotifierItem Support" extension** (preinstalled on Ubuntu; Fedora/Arch:
   `gnome-shell-extension-appindicator`). Closing the window hides it to the tray; the VPN lives in the daemon and is never
-  affected. If no tray host exists (stock GNOME), VPNMan detects that and behaves like a normal window app: closing quits
+  affected. **Cinnamon** shows StatusNotifier icons through `xapp-sn-watcher` and its panel *System Tray / XApp Status*
+  applet (the `xapp` package; on Void: `xbps-install xapp`) - left-clicking such an icon opens its menu (which has *Show VPNMan*).
+  The window class matches the launcher's `StartupWMClass`, so docks/panels on X11 desktops group the running app with its
+  launcher instead of showing a second icon. If no tray host exists (stock GNOME), VPNMan detects that and behaves like a normal window app: closing quits
   the GUI, `--background` shows the window instead of hiding it, and if the tray disappears while hidden the window comes back.
 
 ## Install

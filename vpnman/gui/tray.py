@@ -119,6 +119,7 @@ class Tray:
         self._conn = None
         self._watcher = None
         self._registered = False
+        self._name_owned = False
         self._name = "org.kde.StatusNotifierItem-%d-1" % os.getpid()
         self._sni = Gio.DBusNodeInfo.new_for_xml(SNI_XML).interfaces[0]
         self._menu = Gio.DBusNodeInfo.new_for_xml(MENU_XML).interfaces[0]
@@ -132,7 +133,9 @@ class Tray:
             return False
         self._conn.register_object(ITEM_PATH, self._sni, self._sni_call, self._sni_get, None)
         self._conn.register_object(MENU_PATH, self._menu, self._menu_call, self._menu_get, None)
-        Gio.bus_own_name_on_connection(self._conn, self._name, Gio.BusNameOwnerFlags.NONE, None, None)
+        # register with a watcher only once the name is really ours: watchers read our properties immediately
+        Gio.bus_own_name_on_connection(self._conn, self._name, Gio.BusNameOwnerFlags.NONE,
+                                       self._name_acquired, None)
         for w in WATCHERS:
             Gio.bus_watch_name_on_connection(self._conn, w, Gio.BusNameWatcherFlags.NONE,
                                              self._watcher_appeared, self._watcher_vanished)
@@ -141,14 +144,23 @@ class Tray:
     def stop(self):
         self._set_available(False)
 
+    def _name_acquired(self, conn, name):
+        self._name_owned = True
+        self._register()
+
     def _watcher_appeared(self, conn, name, owner):
         self._watcher = name
-        self._conn.call(name, WATCHER_PATH, name, "RegisterStatusNotifierItem",
-                        GLib.Variant("(s)", (self._name,)), None, Gio.DBusCallFlags.NONE, 5000, None,
-                        self._registered_cb)
         # hosts can appear after the watcher
         self._conn.signal_subscribe(name, name, "StatusNotifierHostRegistered", WATCHER_PATH, None,
                                     Gio.DBusSignalFlags.NONE, lambda *_: self._check_host())
+        self._register()
+
+    def _register(self):
+        if not (self._watcher and self._name_owned):
+            return
+        self._conn.call(self._watcher, WATCHER_PATH, self._watcher, "RegisterStatusNotifierItem",
+                        GLib.Variant("(s)", (self._name,)), None, Gio.DBusCallFlags.NONE, 5000, None,
+                        self._registered_cb)
 
     def _watcher_vanished(self, conn, name):
         if self._watcher == name:
@@ -267,11 +279,19 @@ class Tray:
             ids = params.unpack()[0]
             items = self._items or self._build()
             out = [(i, self._props(items[i - 1])) for i in ids if 1 <= i <= len(items)]
+            if not ids:
+                ids = list(range(0, len(items) + 1))
+                out = [(i, self._props(items[i - 1])) for i in ids if i >= 1]
+            if 0 in ids or not params.unpack()[0]:
+                out.insert(0, (0, {"children-display": GLib.Variant("s", "submenu")}))
             invocation.return_value(GLib.Variant("(a(ia{sv}))", (out,)))
         elif method == "GetProperty":
             i, name = params.unpack()
             items = self._items or self._build()
-            val = self._props(items[i - 1]).get(name) if 1 <= i <= len(items) else None
+            if i == 0:
+                val = {"children-display": GLib.Variant("s", "submenu")}.get(name)
+            else:
+                val = self._props(items[i - 1]).get(name) if 1 <= i <= len(items) else None
             invocation.return_value(GLib.Variant("(v)", (val or GLib.Variant("s", ""),)))
         elif method == "Event":
             i, event, _data, _ts = params.unpack()
