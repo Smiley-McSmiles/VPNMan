@@ -62,7 +62,7 @@ VPNMan starts stunnel in client mode on a free `127.0.0.1` port, rewrites the ru
 lets the kill switch allow only the stunnel server. Without a CA file the TLS layer is not verified (the OpenVPN
 session inside is still authenticated); a warning is logged.
 
-## Eddie-style feature set
+## Feature set
 
 | Feature | Status |
 |---------|--------|
