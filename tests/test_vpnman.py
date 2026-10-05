@@ -628,6 +628,18 @@ class SettingsDnsTests(unittest.TestCase):
 
 
 class EndToEnd(unittest.TestCase):
+    def test_schedule_and_bypass_rpc(self):
+        st = self.c.call("schedule.set", entries=[{"name": "Work", "days": [0, 1], "start": "08:00", "end": "17:00"}])
+        self.assertEqual(st["entries"][0]["summary"], "Mon, Tue · 08:00 → 17:00")
+        with self.assertRaises(ipc.RpcError):
+            self.c.call("schedule.set", entries=[{"days": [], "start": "08:00"}])
+        self.assertEqual(self.c.call("schedule.set", entries=[])["entries"], [])
+        sp = self.c.call("split.set", apps=[{"id": "x", "name": "Steam", "match": ["steam"]}])
+        self.assertEqual(sp["apps"][0]["match"], ["steam"])
+        with self.assertRaises(ipc.RpcError):
+            self.c.call("split.set", apps=[{"name": "bad", "match": []}])
+        self.c.call("split.set", apps=[])
+
     """Real daemon + manager + CLI client with a fake `openvpn` executable."""
 
     @classmethod
@@ -692,6 +704,35 @@ while :; do sleep 0.1; done
         self.c.call("profiles.remove", ident="lab")
         self.assertEqual(self.c.call("profiles.list"), [])
 
+    def test_bypass_starts_with_the_tunnel_and_stops_with_it(self):
+        calls = []
+        real_start, real_stop = self.mgr._split.start, self.mgr._split.stop
+
+        def fake_start(gw, dev, dns=()):
+            calls.append(("start", dev))
+            self.mgr._split.active = True
+
+        def fake_stop():
+            calls.append(("stop",))
+            self.mgr._split.active = False
+
+        self.mgr._split.start, self.mgr._split.stop = fake_start, fake_stop
+        try:
+            self.c.call("profiles.import", name="byp", text=OVPN.replace("auth-user-pass\n", ""), filename="byp.ovpn",
+                        files={})
+            self.c.call("split.set", apps=[{"id": "s", "name": "Steam", "match": ["steam"]}])
+            self.c.call("connect", ident="byp")
+            self.wait("connected")
+            self.assertEqual([c[0] for c in calls][:1], ["start"])
+            self.assertTrue(self.c.call("split.status")["active"])
+            self.c.call("split.set", apps=[])                      # emptying the list stops it on the live tunnel
+            self.assertFalse(self.c.call("split.status")["active"])
+            self.c.call("disconnect")
+        finally:
+            self.mgr._split.start, self.mgr._split.stop = real_start, real_stop
+            self.c.call("split.set", apps=[])
+            self.c.call("profiles.remove", ident="byp")
+
     def test_openvpn_over_stunnel(self):
         opts = {"stunnel": {"enabled": True, "host": "127.0.0.1", "port": 8443, "sni": "cdn.example.com"}}
         self.c.call("profiles.import", name="tls", text=OVPN.replace("auth-user-pass\n", ""),
@@ -720,6 +761,197 @@ while :; do sleep 0.1; done
             self.c.call("settings.set", key="bogus", value=1)
 
 
+
+
+class ScheduleTests(unittest.TestCase):
+    @staticmethod
+    def at(wday, h, m):
+        return time.struct_time((2026, 1, 1, h, m, 0, wday, 1, -1))
+
+    def test_windows_including_overnight(self):
+        from vpnman import schedule as sc
+        e = sc.clean({"days": [0, 1, 2, 3, 4], "start": "22:00", "end": "06:00"})
+        for args, want in (((0, 23, 0), True), ((1, 5, 59), True), ((1, 6, 0), False), ((5, 1, 0), True),
+                           ((5, 23, 0), False), ((6, 1, 0), False), ((0, 21, 59), False)):
+            self.assertEqual(sc.is_active(e, self.at(*args)), want, args)
+        self.assertEqual(sc.next_start(e, self.at(5, 23, 0)), 2820)         # Saturday 23:00 -> Monday 22:00
+        self.assertFalse(sc.is_active(dict(e, enabled=False), self.at(0, 23, 0)))
+
+    def test_validation_and_description(self):
+        from vpnman import schedule as sc
+        for bad in ({"days": [], "start": "08:00"}, {"days": [7], "start": "08:00"}, {"days": [1], "start": "8am"},
+                    {"days": [1], "start": "08:00", "end": "25:00"}):
+            with self.assertRaises(ValueError):
+                sc.clean(bad)
+        e = sc.clean({"days": [5, 6], "start": "9:05"})
+        self.assertEqual((e["start"], e["end"]), ("09:05", ""))
+        self.assertEqual(sc.describe(e), "Weekends · at 09:05")
+
+    def test_scheduler_acts_on_edges_and_respects_manual_disconnect(self):
+        from vpnman import schedule as sc
+
+        class FakeMgr:
+            def __init__(self):
+                self.settings = settings.Settings(TMP + "/sched.json")
+                self.state, self.calls = "disconnected", []
+                self.log = type("L", (), {"add": lambda *_: None})()
+
+            def status(self):
+                return {"state": self.state}
+
+            def connect(self, ident=None, fastest=False, last=False, persistent=False):
+                self.calls.append(("connect", ident, fastest, last))
+                self.state = "connected"
+                return {"profile": "alpha"}
+
+            def disconnect(self):
+                self.calls.append(("disconnect",))
+                self.state = "disconnected"
+
+        m = FakeMgr()
+        e = sc.clean({"id": "w", "days": [0], "start": "08:00", "end": "09:00", "profile": "fastest"})
+        m.settings.update({"schedule": {"enabled": True, "entries": [e]}})
+        s = sc.Scheduler(m)
+        s.tick(self.at(0, 7, 59))
+        self.assertEqual(m.calls, [])
+        s.tick(self.at(0, 8, 0))
+        self.assertEqual(m.calls, [("connect", "fastest", True, False)])
+        s.tick(self.at(0, 8, 30))                                  # inside the window: nothing new
+        self.assertEqual(len(m.calls), 1)
+        s.tick(self.at(0, 9, 0))                                   # window closed: scheduler-made connection ends
+        self.assertEqual(m.calls[-1], ("disconnect",))
+        # a connection the user made by hand is never cut off
+        m.calls.clear()
+        m.state = "connected"
+        s.tick(self.at(0, 7, 59))
+        s.tick(self.at(0, 8, 0))
+        s.tick(self.at(0, 9, 0))
+        self.assertEqual(m.calls, [])
+        # a manual disconnect inside the window sticks until the next window
+        m.state = "disconnected"
+        s.tick(self.at(0, 8, 0))
+        self.assertEqual(m.calls[-1][0], "connect")
+        m.state = "disconnected"
+        s.tick(self.at(0, 8, 10))
+        s.tick(self.at(0, 8, 20))
+        self.assertEqual(len([c for c in m.calls if c[0] == "connect"]), 1)
+        m.settings.set("schedule.enabled", False)
+        s.tick(self.at(1, 8, 0))
+        self.assertEqual(len([c for c in m.calls if c[0] == "connect"]), 1)
+
+
+class SplitTests(unittest.TestCase):
+    def test_ruleset_marks_cgroup_and_routes_around_the_tunnel(self):
+        from vpnman import split
+        text = split.ruleset(["192.168.1.1", "2001:db8::1"])
+        self.assertIn('socket cgroupv2 level 1 "vpnman-bypass" meta mark set 0x5652', text)
+        self.assertIn("dnat ip to 192.168.1.1", text)
+        self.assertNotIn("2001:db8", text)
+        self.assertIn("masquerade", text)
+        cmds = split.route_commands("192.168.1.1", "eth0", ["192.168.1.0/24"])
+        self.assertIn(["route", "add", "default", "via", "192.168.1.1", "dev", "eth0", "table", "5652"], cmds)
+        self.assertEqual(cmds[-1][:4], ["rule", "add", "fwmark", "0x5652"])
+
+    def test_kill_switch_lets_bypassed_traffic_through_only_when_asked(self):
+        plain = netlock.nft_ruleset(netlock.Spec(endpoints=["1.2.3.4"], ifaces=["tun0"]))
+        marked = netlock.nft_ruleset(netlock.Spec(endpoints=["1.2.3.4"], ifaces=["tun0"], split_mark=0x5652))
+        self.assertNotIn("0x5652", plain)
+        self.assertIn("meta mark 0x5652 accept", marked)
+        self.assertIn("ct mark 0x5652 accept", marked)
+        cmds = netlock.ipt_commands(netlock.Spec(ifaces=["tun0"], split_mark=0x5652))
+        self.assertIn(["-A", "VPNMAN_OUT", "-m", "mark", "--mark", "0x5652", "-j", "ACCEPT"], cmds)
+
+    def _fake_proc(self, procs):
+        root = tempfile.mkdtemp(dir=TMP)
+        for pid, (comm, ppid, argv) in procs.items():
+            d = os.path.join(root, str(pid))
+            os.makedirs(d)
+            open(os.path.join(d, "stat"), "w").write("%d (%s) S %d 1 1 0" % (pid, comm, ppid))
+            open(os.path.join(d, "cmdline"), "wb").write(b"\0".join(a.encode() for a in argv) + b"\0")
+            open(os.path.join(d, "cgroup"), "w").write("0::/user.slice/app-%d.scope\n" % pid)
+        return root
+
+    def test_matching_finds_programs_and_their_children(self):
+        from vpnman import split
+        root = self._fake_proc({
+            100: ("steam", 1, ["/usr/bin/steam"]),
+            101: ("steamwebhelper", 100, ["steamwebhelper"]),
+            102: ("game", 101, ["/games/game"]),
+            200: ("bash", 1, ["/bin/bash", "/usr/bin/firefox"]),          # launcher script
+            201: ("Web Content", 200, ["/usr/lib/firefox/firefox", "-contentproc"]),
+            300: ("vim", 1, ["vim", "firefox.txt"]),                      # an argument is not a program
+            400: ("sleep", 1, ["sleep", "5"]),
+        })
+        self.assertEqual(split.matching_pids({"steam"}, root), {100, 101, 102})
+        self.assertEqual(split.matching_pids({"firefox"}, root), {200, 201})
+        self.assertEqual(split.matching_pids({"nothing"}, root), set())
+        self.assertEqual(split.matching_pids(set(), root), set())
+
+    def test_scan_moves_matches_into_the_cgroup_and_releases_them(self):
+        from vpnman import split
+        root = self._fake_proc({100: ("steam", 1, ["steam"]), 101: ("kid", 100, ["kid"]), 5: ("sshd", 1, ["sshd"])})
+        cg = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(cg, "vpnman-bypass"))
+        st = split.SplitTunnel(lambda: ["steam"], proc=root, root=cg)
+        self.assertEqual(sorted(st.scan_once()), [100, 101])
+        self.assertEqual(st.moved[100], "/user.slice/app-100.scope")
+        self.assertNotIn(5, st.moved)
+        self.assertEqual(st.scan_once() and 0, 0)
+        st._release()                                    # everything goes back where it came from (fake fs: no-op moves)
+        self.assertEqual(st.moved, {})
+        self.assertEqual(split.names_from_settings({"apps": [{"match": ["a", "b"]}, {"match": ["b", "c"]}]}), ["a", "b", "c"])
+
+
+class AppsTests(unittest.TestCase):
+    def test_exec_names(self):
+        from vpnman import apps
+        self.assertEqual(apps.exec_names("env GDK_BACKEND=x /usr/bin/firefox %u", "org.mozilla.firefox.desktop"),
+                         ["firefox", "org.mozilla.firefox"])
+        self.assertIn("com.valvesoftware.Steam", apps.exec_names(
+            "flatpak run --branch=stable --arch=x86_64 com.valvesoftware.Steam @@u %U @@", "com.valvesoftware.Steam.desktop"))
+        self.assertEqual(apps.exec_names("snap run vlc", "vlc_vlc.desktop")[0], "vlc")
+
+    def test_discover_reads_launchers_and_skips_hidden_ones(self):
+        from vpnman import apps
+        d = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(d, "applications"))
+        def w(name, body):
+            open(os.path.join(d, "applications", name), "w").write("[Desktop Entry]\nType=Application\n" + body)
+        w("steam.desktop", "Name=Steam\nExec=/usr/bin/steam %U\nIcon=steam\n")
+        w("hidden.desktop", "Name=Hidden\nExec=hidden\nNoDisplay=true\n")
+        w("broken.desktop", "Name=NoExec\n")
+        found = apps.discover([d])
+        names = [a["name"] for a in found]
+        self.assertIn("Steam", names)
+        self.assertNotIn("Hidden", names)
+        self.assertNotIn("NoExec", names)
+        steam = [a for a in found if a["name"] == "Steam"][0]
+        self.assertEqual(steam["match"], ["steam"])
+        self.assertEqual(apps.custom_entry("/usr/bin/qbittorrent")["match"], ["qbittorrent"])
+        with self.assertRaises(ValueError):
+            apps.custom_entry("  ")
+
+    def test_cli_day_parsing(self):
+        from vpnman import cli
+        self.assertEqual(cli._parse_days("weekdays"), [0, 1, 2, 3, 4])
+        self.assertEqual(cli._parse_days("mon-wed,sat"), [0, 1, 2, 5])
+        self.assertEqual(cli._parse_days("fri-mon"), [0, 4, 5, 6])
+        self.assertEqual(cli._parse_days(None), list(range(7)))
+
+
+class PagesGuiTests(unittest.TestCase):
+    def test_schedule_and_apps_pages(self):
+        import subprocess
+        xvfb, runner = shutil_which("xvfb-run"), shutil_which("dbus-run-session")
+        py = next((p for p in ("python3", "python3.12", "python3.11", "python3.13", "python3.10")
+                   if shutil_which(p) and subprocess.run([shutil_which(p), "-c", "import gi;gi.require_version('Gtk','4.0');gi.require_version('Adw','1');from gi.repository import Adw"],
+                                                          capture_output=True).returncode == 0), None)
+        if not xvfb or not py or not runner:
+            self.skipTest("needs xvfb-run, dbus-run-session and PyGObject with GTK 4 + libadwaita")
+        env = dict(os.environ, GSK_RENDERER="cairo", GTK_A11Y="none", VPNMAN_SOCKET=TMP + "/none.sock")
+        r = subprocess.run([xvfb, "-a", runner, "--", shutil_which(py), os.path.join(os.path.dirname(__file__), "pages_check.py")],
+                           capture_output=True, text=True, timeout=90, env=env)
+        self.assertIn("PAGES-OK", r.stdout, r.stdout + r.stderr[-1500:])
 
 
 class AccessTests(unittest.TestCase):

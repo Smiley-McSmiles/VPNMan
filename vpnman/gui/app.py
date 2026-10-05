@@ -17,6 +17,7 @@ except (ImportError, ValueError) as exc:  # pragma: no cover
 import json
 
 from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof
+from .pages import BypassPage, SchedulePage
 from .tray import HelperTray, Tray, wants_helper
 from ..settings import DNS_PRESETS, DEFAULTS
 from ..ipc import Client, DaemonUnavailable, RpcError
@@ -412,6 +413,10 @@ class MainWindow(Adw.ApplicationWindow):
         self.stack.add_titled_with_icon(self._build_overview(), "overview", "Connection", "network-vpn-symbolic")
         self.stack.add_titled_with_icon(self._build_servers(), "servers", "Servers", "network-server-symbolic")
         self.stack.add_titled_with_icon(self._build_lock(), "lock", "Network Lock", "changes-prevent-symbolic")
+        self.sched_page = SchedulePage(self, rpc)
+        self.bypass_page = BypassPage(self, rpc)
+        self.stack.add_titled_with_icon(self.sched_page, "schedule", "Schedule", "alarm-symbolic")
+        self.stack.add_titled_with_icon(self.bypass_page, "bypass", "Apps", "view-app-grid-symbolic")
         self.stack.add_titled_with_icon(self._build_log(), "log", "Log", "utilities-terminal-symbolic")
         self.switcher_title.set_stack(self.stack)
         bar = Adw.ViewSwitcherBar(stack=self.stack)
@@ -895,12 +900,16 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ---- data refresh --------------------------------------------------
     def _tick(self):
-        self.refresh()
+        self._ticks = getattr(self, "_ticks", 0) + 1
+        self.refresh(slow=self._ticks % 20 == 0)
         return True
 
-    def refresh(self, full=False):
+    def refresh(self, full=False, slow=False):
         rpc("status", self._on_status, self._fail)
         rpc("logs", self._on_logs, None, since=self._log_seq)
+        if full or slow:
+            rpc("schedule.status", self.sched_page.update, None)
+            rpc("split.status", self.bypass_page.update, None)
         if full:
             rpc("profiles.list", self._on_profiles, None)
             rpc("settings.get", self._on_settings, None)

@@ -37,6 +37,14 @@ DEFAULTS = {
         "mode": "session",         # session: root + groups + active local users | group: root + groups only
         "groups": ["vpnman", "wheel", "sudo"],
     },
+    "schedule": {
+        "enabled": True,
+        "entries": [],             # see schedule.py: {id, name, enabled, days, start, end, profile}
+    },
+    "split": {
+        "enabled": True,           # apps below keep using the normal connection while the VPN is up
+        "apps": [],                # [{id, name, match: [process names], icon}]
+    },
     "routes": [],                  # [{"ip": "10.0.0.0/8", "action": "out"}]  out = bypass the VPN
     "events": {
         "pre_connect": "",

@@ -1,4 +1,4 @@
-.TH VPNMAN 1 "2026" "vpnman 1.0.2" "User Commands"
+.TH VPNMAN 1 "2026" "vpnman 1.0.3" "User Commands"
 .SH NAME
 vpnman \- multi-protocol VPN manager with a kill switch
 .SH SYNOPSIS
@@ -17,6 +17,12 @@ Manage profiles and the connection.
 .TP
 lock on|off|status
 Engage or release the network lock (kill switch).
+.TP
+schedule [list|add|remove|enable|disable|on|off]
+Connect (and optionally disconnect) at set times; see vpnman schedule --help.
+.TP
+bypass [list|add|remove|available|on|off]
+Applications that keep using the normal connection while the VPN is up (split tunnel, Linux).
 .TP
 get, set
 Read or change settings (dotted keys such as netlock.allow_lan).

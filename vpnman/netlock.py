@@ -24,19 +24,20 @@ class Spec:
     """Everything the firewall needs to know."""
 
     def __init__(self, endpoints=(), ifaces=(), allow_lan=True, allow_dhcp=True, allow_ping=False,
-                 block_ipv6=True, whitelist_in=(), whitelist_out=()):
+                 block_ipv6=True, whitelist_in=(), whitelist_out=(), split_mark=0):
         self.endpoints = sorted({_norm(e) for e in endpoints})
         self.ifaces = sorted({i for i in ifaces if IFACE_RE.match(i)})
         self.allow_lan, self.allow_dhcp, self.allow_ping = allow_lan, allow_dhcp, allow_ping
         self.block_ipv6 = block_ipv6
         self.whitelist_in = sorted({_norm(e) for e in whitelist_in})
         self.whitelist_out = sorted({_norm(e) for e in whitelist_out})
+        self.split_mark = int(split_mark or 0)       # packets of apps that bypass the VPN (see split.py)
 
     @classmethod
-    def from_settings(cls, s, endpoints=(), ifaces=()):
+    def from_settings(cls, s, endpoints=(), ifaces=(), split_mark=0):
         n = s.get("netlock")
         return cls(endpoints, ifaces, n["allow_lan"], n["allow_dhcp"], n["allow_ping"], n["block_ipv6"],
-                   n["whitelist_in"], n["whitelist_out"])
+                   n["whitelist_in"], n["whitelist_out"], split_mark)
 
 
 def _norm(addr):
@@ -63,6 +64,9 @@ def nft_ruleset(spec):
     if spec.block_ipv6:
         out.append("meta nfproto ipv6 drop")
         inn.append("meta nfproto ipv6 drop")
+    if spec.split_mark:
+        out.append("meta mark 0x%x accept" % spec.split_mark)
+        inn.append("ct mark 0x%x accept" % spec.split_mark)
     inn.append("ct state established,related accept")
     if ifs:
         out.append("oifname { %s } accept" % ifs)
@@ -132,6 +136,9 @@ def ipt_commands(spec, v6=False):
         c.append(["-A", O, "-j", "DROP"])
         c.append(["-A", I, "-j", "DROP"])
         return _ipt_wrap(c)
+    if spec.split_mark:
+        c.append(["-A", O, "-m", "mark", "--mark", "0x%x" % spec.split_mark, "-j", "ACCEPT"])
+        c.append(["-A", I, "-m", "connmark", "--mark", "0x%x" % spec.split_mark, "-j", "ACCEPT"])
     c.append(["-A", I, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"])
     for i in spec.ifaces:
         c.append(["-A", O, "-o", i, "-j", "ACCEPT"])
