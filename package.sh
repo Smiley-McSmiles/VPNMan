@@ -145,6 +145,12 @@ DESTDIR=%{buildroot} ./install.sh --prefix /usr --init systemd --no-post
 getent group vpnman >/dev/null || groupadd -r vpnman
 mkdir -p /etc/vpnman && chmod 700 /etc/vpnman
 %systemd_post vpnmand.service
+# the distro preset leaves unknown services disabled, so enable and start explicitly
+if [ -d /run/systemd/system ]; then
+    systemctl enable vpnmand.service >/dev/null 2>&1 || :
+    systemctl start vpnmand.service >/dev/null 2>&1 || :
+fi
+echo "Add yourself to the vpnman group to use the CLI/GUI without sudo: sudo usermod -aG vpnman \$USER" >&2
 
 %preun
 %systemd_preun vpnmand.service
@@ -154,6 +160,7 @@ mkdir -p /etc/vpnman && chmod 700 /etc/vpnman
 
 %files
 %license LICENSE
+%dir %attr(0700,root,root) /etc/vpnman
 /usr/bin/vpnman
 /usr/bin/vpnmand
 /usr/bin/vpnman-gtk

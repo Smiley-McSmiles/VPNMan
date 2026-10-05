@@ -517,7 +517,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _set_daemon(self, ok, msg=""):
         self._daemon_ok = ok
-        self.banner.set_title("VPNMan daemon unavailable: %s" % msg if not ok else "")
+        self.banner.set_title("VPNMan daemon unavailable: %s. Start it with: sudo vpnman service enable" % msg if not ok else "")
         self.banner.set_revealed(not ok)
         for w in (self.main_btn, self.lock_switch, self.lock_now):
             w.set_sensitive(ok)
