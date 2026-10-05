@@ -29,17 +29,6 @@ Project GitHub: [https://github.com/Smiley-McSmiles/VPNMan](https://github.com/S
 
 The same credits are in the app (*main menu → About VPNMan*) and on the command line (`vpnman about`).
 
-## ☕ Support the project
-
-If VPNMan is useful to you, you can support its development. In the app open *main menu → About VPNMan → Donate* and
-tap an option to copy it to the clipboard; `vpnman about` prints them too.
-
-| Option | Copy |
-|--------|------|
-| BTC | `bc1qy2gtdhnfxp9dcs6v9jda748npmsjx3jgwp99mx` |
-| XMR | `82xtMVSmesuLjPtgHfBCEhM5Fpqh1SLLNf9pzHRRNPqQZsvrnmoM1ZGC7AiLyPfsufdyrMWHrWYV2hsC8jc5rEBVLMHWTLy` |
-| CashApp | `$SmileyMcSmiles` |
-
 ## Architecture
 
 ```
