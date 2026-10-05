@@ -391,6 +391,17 @@ class Cli:
             except RuntimeError as e:
                 print("Firewall:  %s" % red(str(e)))
         print("Root:      %s" % ("yes" if plat.is_root() else "no"))
+        from . import icons
+        print("Icons:")
+        for ok, msg in icons.check():
+            print("  %s %s" % (green("✔") if ok else red("✘"), msg))
+        if getattr(a, "fix", False):
+            if not plat.is_root():
+                print(red("  --fix needs root: sudo vpnman doctor --fix"))
+            else:
+                for m in icons.fix():
+                    print("  " + green("fixed: ") + m)
+                print("  Log out and back in (or restart GNOME Shell) so the desktop re-reads the icons.")
         print()
         return self.cmd_protocols(a)
 
@@ -597,7 +608,8 @@ def build_parser():
     s = add("logs", "show daemon log"); s.add_argument("-f", "--follow", action="store_true")
     s.add_argument("-n", "--lines", type=int, default=50)
     add("protocols", "list supported protocols and whether their tools are installed")
-    add("doctor", "check the system")
+    s = add("doctor", "check the system (icons, daemon, protocols)")
+    s.add_argument("--fix", action="store_true", help="rebuild stale icon caches (root)")
     s = add("service", "install/control the background service")
     s.add_argument("action", choices=["install", "uninstall", "enable", "disable", "start", "stop", "restart", "status"])
     s.add_argument("--init", choices=["systemd", "runit", "openrc", "sysv", "openbsd-rc", "bsd-rc"],

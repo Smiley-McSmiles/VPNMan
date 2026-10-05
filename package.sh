@@ -81,8 +81,11 @@ if [ "$1" = configure ]; then
     getent group vpnman >/dev/null || addgroup --system vpnman >/dev/null 2>&1 || groupadd -r vpnman
     mkdir -p /etc/vpnman && chmod 700 /etc/vpnman
 # GTK only validates icon-theme.cache against the mtime of hicolor/ itself, so new icons stay invisible until it is rebuilt
-    for t in gtk4-update-icon-cache gtk-update-icon-cache; do
-        if command -v $t >/dev/null 2>&1; then $t -q -f -t /usr/share/icons/hicolor >/dev/null 2>&1 && break; fi
+    for d in /usr/share/icons/hicolor /usr/local/share/icons/hicolor; do
+        [ -d "$d" ] || continue
+        for t in gtk4-update-icon-cache gtk-update-icon-cache; do
+            if command -v $t >/dev/null 2>&1; then $t -q -f -t "$d" >/dev/null 2>&1 && break; fi
+        done
     done
     if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || :; fi
     if [ -d /run/systemd/system ]; then
@@ -113,8 +116,11 @@ if [ "$1" = remove ] || [ "$1" = purge ]; then
 fi
 if [ "$1" = remove ] || [ "$1" = purge ]; then
 # GTK only validates icon-theme.cache against the mtime of hicolor/ itself, so new icons stay invisible until it is rebuilt
-for t in gtk4-update-icon-cache gtk-update-icon-cache; do
-    if command -v $t >/dev/null 2>&1; then $t -q -f -t /usr/share/icons/hicolor >/dev/null 2>&1 && break; fi
+for d in /usr/share/icons/hicolor /usr/local/share/icons/hicolor; do
+    [ -d "$d" ] || continue
+    for t in gtk4-update-icon-cache gtk-update-icon-cache; do
+        if command -v $t >/dev/null 2>&1; then $t -q -f -t "$d" >/dev/null 2>&1 && break; fi
+    done
 done
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || :; fi
 fi
@@ -158,8 +164,11 @@ mkdir -p %{buildroot}/etc/vpnman
 getent group vpnman >/dev/null || groupadd -r vpnman
 mkdir -p /etc/vpnman && chmod 700 /etc/vpnman
 # GTK only validates icon-theme.cache against the mtime of hicolor/ itself, so new icons stay invisible until it is rebuilt
-for t in gtk4-update-icon-cache gtk-update-icon-cache; do
-    if command -v \$t >/dev/null 2>&1; then \$t -q -f -t /usr/share/icons/hicolor >/dev/null 2>&1 && break; fi
+for d in /usr/share/icons/hicolor /usr/local/share/icons/hicolor; do
+    [ -d "\$d" ] || continue
+    for t in gtk4-update-icon-cache gtk-update-icon-cache; do
+        if command -v \$t >/dev/null 2>&1; then \$t -q -f -t "\$d" >/dev/null 2>&1 && break; fi
+    done
 done
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || :; fi
 # plain systemctl (no distro macros) so the spec builds on any rpm-based distro;
@@ -180,8 +189,11 @@ if [ -d /run/systemd/system ]; then
     systemctl daemon-reload >/dev/null 2>&1 || :
 fi
 # GTK only validates icon-theme.cache against the mtime of hicolor/ itself, so new icons stay invisible until it is rebuilt
-for t in gtk4-update-icon-cache gtk-update-icon-cache; do
-    if command -v \$t >/dev/null 2>&1; then \$t -q -f -t /usr/share/icons/hicolor >/dev/null 2>&1 && break; fi
+for d in /usr/share/icons/hicolor /usr/local/share/icons/hicolor; do
+    [ -d "\$d" ] || continue
+    for t in gtk4-update-icon-cache gtk-update-icon-cache; do
+        if command -v \$t >/dev/null 2>&1; then \$t -q -f -t "\$d" >/dev/null 2>&1 && break; fi
+    done
 done
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || :; fi
 
@@ -200,7 +212,8 @@ fi
 /usr/share/vpnman
 /usr/share/applications/io.github.smiley_mcsmiles.VPNMan.desktop
 /usr/share/metainfo/io.github.smiley_mcsmiles.VPNMan.metainfo.xml
-/usr/share/icons/hicolor/*/apps/io.github.smiley_mcsmiles.VPNMan*.svg
+/usr/share/icons/hicolor/*/apps/io.github.smiley_mcsmiles.VPNMan*
+/usr/share/pixmaps/io.github.smiley_mcsmiles.VPNMan.svg
 /usr/share/man/man1/vpnman.1*
 
 %changelog

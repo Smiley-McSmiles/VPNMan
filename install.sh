@@ -153,9 +153,14 @@ install_init() {
 }
 
 refresh_icon_cache() {
-    for t in gtk4-update-icon-cache gtk-update-icon-cache; do
-        if have "$t"; then "$t" -q -f -t "$SHAREDIR/icons/hicolor" 2>/dev/null && break; fi
-    done
+    theme=$SHAREDIR/icons/hicolor
+    if [ -d "$theme" ] && [ -z "$(find "$theme" -type f ! -name 'icon-theme.cache' ! -name index.theme 2>/dev/null | head -n 1)" ]; then
+        rm -f "$theme/icon-theme.cache"      # nothing left: a stale cache would advertise icons that are gone
+    else
+        for t in gtk4-update-icon-cache gtk-update-icon-cache; do
+            if have "$t"; then "$t" -q -f -t "$theme" 2>/dev/null && break; fi
+        done
+    fi
     if have update-desktop-database; then update-desktop-database -q "$SHAREDIR/applications" 2>/dev/null; fi
     return 0
 }
@@ -175,8 +180,10 @@ uninstall() {
     rm -f "$D$SHAREDIR/applications/io.github.smiley_mcsmiles.VPNMan.desktop" \
           "$D$SHAREDIR/metainfo/io.github.smiley_mcsmiles.VPNMan.metainfo.xml" \
           "$D$SHAREDIR/icons/hicolor/scalable/apps/io.github.smiley_mcsmiles.VPNMan.svg" \
+          "$D$SHAREDIR/pixmaps/io.github.smiley_mcsmiles.VPNMan.svg" \
           "$D$MANDIR/vpnman.1"
-    rm -f "$D$SHAREDIR"/icons/hicolor/symbolic/apps/io.github.smiley_mcsmiles.VPNMan*.svg
+    rm -f "$D$SHAREDIR"/icons/hicolor/symbolic/apps/io.github.smiley_mcsmiles.VPNMan*.svg \
+          "$D$SHAREDIR"/icons/hicolor/*/apps/io.github.smiley_mcsmiles.VPNMan.png
     if [ -z "$DESTDIR" ]; then refresh_icon_cache; fi
     rm -f "$D/etc/systemd/system/vpnmand.service" "$D/usr/lib/systemd/system/vpnmand.service" \
           "$D/etc/init.d/vpnmand" "$D/etc/rc.d/vpnmand" "$D/usr/local/etc/rc.d/vpnmand"
@@ -221,8 +228,15 @@ cp "$SRC/data/io.github.smiley_mcsmiles.VPNMan.desktop" "$D$SHAREDIR/application
 cp "$SRC/data/io.github.smiley_mcsmiles.VPNMan.metainfo.xml" "$D$SHAREDIR/metainfo/"
 cp "$SRC/data/icons/hicolor/scalable/apps/"*.svg "$D$SHAREDIR/icons/hicolor/scalable/apps/"
 cp "$SRC/data/icons/hicolor/symbolic/apps/"*.svg "$D$SHAREDIR/icons/hicolor/symbolic/apps/"
+for sz in 48x48 64x64 128x128 256x256; do
+    mkdir -p "$D$SHAREDIR/icons/hicolor/$sz/apps"
+    cp "$SRC/data/icons/hicolor/$sz/apps/"*.png "$D$SHAREDIR/icons/hicolor/$sz/apps/"
+done
 # A private, cache-free copy: GTK trusts a stale icon-theme.cache (it only checks the mtime of hicolor/ itself),
 # so the app falls back to this copy - and hands it to the tray host - when the system theme misses the icons.
+# Flat fallback with no cache at all: used by GTK/GNOME Shell when the themed lookup fails
+mkdir -p "$D$SHAREDIR/pixmaps"
+cp "$SRC/data/icons/hicolor/scalable/apps/io.github.smiley_mcsmiles.VPNMan.svg" "$D$SHAREDIR/pixmaps/"
 mkdir -p "$D$SHAREDIR/vpnman/icons"
 cp -R "$SRC/data/icons/hicolor" "$D$SHAREDIR/vpnman/icons/"
 cp "$SRC/data/vpnman.1" "$D$MANDIR/vpnman.1"
