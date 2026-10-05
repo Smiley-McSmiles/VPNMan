@@ -9,7 +9,7 @@ try:
     import gi
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
-    from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango
+    from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 except (ImportError, ValueError) as exc:  # pragma: no cover
     print("The GUI needs PyGObject, GTK 4 and libadwaita >= 1.4: %s" % exc, file=sys.stderr)
     raise SystemExit(1)
@@ -96,6 +96,33 @@ class UserConfig:
                 json.dump(self.data, fh)
         except OSError:
             pass
+
+
+ICON_NAMES = [APP_ID] + ["%s-%s-symbolic" % (APP_ID, k) for k in ("connected", "connecting", "error", "disconnected")]
+
+
+def private_icon_dir():
+    """Cache-free copy of our icons shipped next to the program (installed or run from a checkout)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for d in (os.path.join(os.environ.get("VPNMAN_DATA_DIR", "/nonexistent"), "icons"),
+              os.path.normpath(os.path.join(here, "..", "..", "data", "icons")),
+              "/usr/share/vpnman/icons", "/usr/local/share/vpnman/icons"):
+        if os.path.isdir(os.path.join(d, "hicolor")):
+            return d
+    return ""
+
+
+def ensure_icons():
+    """GTK ignores icons added to a theme dir whose icon-theme.cache is stale (package installs do this).
+    If any of ours is missing from the system theme, add the private copy to the search path."""
+    display = Gdk.Display.get_default()
+    if not display:
+        return
+    theme = Gtk.IconTheme.get_for_display(display)
+    d = private_icon_dir()
+    if d and not all(theme.has_icon(n) for n in ICON_NAMES):
+        theme.add_search_path(d)
+    Gtk.Window.set_default_icon_name(APP_ID)
 
 
 TRAY_ICONS = {"connected": "connected", "connecting": "connecting", "reconnecting": "connecting",
@@ -1108,6 +1135,7 @@ class Application(Adw.Application):
 
     def do_startup(self):
         Adw.Application.do_startup(self)
+        ensure_icons()
         for name, cb, accel in (("preferences", self.on_prefs, "<primary>comma"), ("about", self.on_about, None),
                                 ("quit", lambda *_: self.quit(), "<primary>q")):
             act = Gio.SimpleAction.new(name, None)
@@ -1130,10 +1158,9 @@ class Application(Adw.Application):
 
     # ---- tray ----------------------------------------------------------
     def _setup_tray(self):
-        here = os.path.dirname(os.path.abspath(__file__))
-        theme = os.path.normpath(os.path.join(here, "..", "..", "data", "icons"))
+        # IconThemePath lets the tray host find our icons even when the system icon cache is stale
         self.tray = Tray(APP_ID, APP_NAME, lambda: self.win.present(), self.win.tray_menu,
-                         self._on_tray_availability, theme if os.path.isdir(theme) else "")
+                         self._on_tray_availability, private_icon_dir())
         self.tray.set_state("%s-disconnected-symbolic" % APP_ID, "VPNMan")
         self.tray.start()
 

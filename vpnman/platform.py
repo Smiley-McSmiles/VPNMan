@@ -73,6 +73,9 @@ def init_system():
 
     One of: systemd, openrc, runit, sysv, openbsd-rc, bsd-rc, launchd, unknown.
     """
+    forced = os.environ.get("VPNMAN_INIT")
+    if forced:
+        return forced
     fam = os_family()
     if fam == "openbsd":
         return "openbsd-rc"

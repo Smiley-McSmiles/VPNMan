@@ -152,6 +152,14 @@ install_init() {
     esac
 }
 
+refresh_icon_cache() {
+    for t in gtk4-update-icon-cache gtk-update-icon-cache; do
+        if have "$t"; then "$t" -q -f -t "$SHAREDIR/icons/hicolor" 2>/dev/null && break; fi
+    done
+    if have update-desktop-database; then update-desktop-database -q "$SHAREDIR/applications" 2>/dev/null; fi
+    return 0
+}
+
 uninstall() {
     say "Removing VPNMan"
     INIT_NOW=$INIT; [ "$INIT_NOW" = auto ] && INIT_NOW=$(detect_init)
@@ -169,6 +177,7 @@ uninstall() {
           "$D$SHAREDIR/icons/hicolor/scalable/apps/io.github.smiley_mcsmiles.VPNMan.svg" \
           "$D$MANDIR/vpnman.1"
     rm -f "$D$SHAREDIR"/icons/hicolor/symbolic/apps/io.github.smiley_mcsmiles.VPNMan*.svg
+    if [ -z "$DESTDIR" ]; then refresh_icon_cache; fi
     rm -f "$D/etc/systemd/system/vpnmand.service" "$D/usr/lib/systemd/system/vpnmand.service" \
           "$D/etc/init.d/vpnmand" "$D/etc/rc.d/vpnmand" "$D/usr/local/etc/rc.d/vpnmand"
     rm -rf "$D/etc/sv/vpnmand" "$D/etc/runit/sv/vpnmand"
@@ -212,6 +221,10 @@ cp "$SRC/data/io.github.smiley_mcsmiles.VPNMan.desktop" "$D$SHAREDIR/application
 cp "$SRC/data/io.github.smiley_mcsmiles.VPNMan.metainfo.xml" "$D$SHAREDIR/metainfo/"
 cp "$SRC/data/icons/hicolor/scalable/apps/"*.svg "$D$SHAREDIR/icons/hicolor/scalable/apps/"
 cp "$SRC/data/icons/hicolor/symbolic/apps/"*.svg "$D$SHAREDIR/icons/hicolor/symbolic/apps/"
+# A private, cache-free copy: GTK trusts a stale icon-theme.cache (it only checks the mtime of hicolor/ itself),
+# so the app falls back to this copy - and hands it to the tray host - when the system theme misses the icons.
+mkdir -p "$D$SHAREDIR/vpnman/icons"
+cp -R "$SRC/data/icons/hicolor" "$D$SHAREDIR/vpnman/icons/"
 cp "$SRC/data/vpnman.1" "$D$MANDIR/vpnman.1"
 # the launcher must find the wrapper on PATH even for non-default prefixes
 sed -i.bak "s|^Exec=.*|Exec=$BINDIR/vpnman-gtk|" "$D$SHAREDIR/applications/io.github.smiley_mcsmiles.VPNMan.desktop" 2>/dev/null \
@@ -244,9 +257,7 @@ if [ "$DO_POST" -eq 1 ] && [ -z "$DESTDIR" ]; then
         elif have pw; then pw groupmod "$GROUP" -m "$TARGET_USER"
         fi
     fi
-    have gtk4-update-icon-cache && gtk4-update-icon-cache -qtf "$SHAREDIR/icons/hicolor" 2>/dev/null || true
-    have gtk-update-icon-cache && gtk-update-icon-cache -qtf "$SHAREDIR/icons/hicolor" 2>/dev/null || true
-    have update-desktop-database && update-desktop-database -q "$SHAREDIR/applications" 2>/dev/null || true
+    refresh_icon_cache
     case "$INIT" in
         systemd) systemctl daemon-reload; systemctl enable --now vpnmand ;;
         runit)

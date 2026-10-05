@@ -80,6 +80,11 @@ set -e
 if [ "$1" = configure ]; then
     getent group vpnman >/dev/null || addgroup --system vpnman >/dev/null 2>&1 || groupadd -r vpnman
     mkdir -p /etc/vpnman && chmod 700 /etc/vpnman
+# GTK only validates icon-theme.cache against the mtime of hicolor/ itself, so new icons stay invisible until it is rebuilt
+    for t in gtk4-update-icon-cache gtk-update-icon-cache; do
+        if command -v $t >/dev/null 2>&1; then $t -q -f -t /usr/share/icons/hicolor >/dev/null 2>&1 && break; fi
+    done
+    if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || :; fi
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload || true
         systemctl enable --now vpnmand || true
@@ -105,6 +110,13 @@ set -e
 if [ "$1" = remove ] || [ "$1" = purge ]; then
     command -v nft >/dev/null 2>&1 && nft delete table inet vpnman 2>/dev/null || true
     [ -d /run/systemd/system ] && systemctl daemon-reload || true
+fi
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+# GTK only validates icon-theme.cache against the mtime of hicolor/ itself, so new icons stay invisible until it is rebuilt
+for t in gtk4-update-icon-cache gtk-update-icon-cache; do
+    if command -v $t >/dev/null 2>&1; then $t -q -f -t /usr/share/icons/hicolor >/dev/null 2>&1 && break; fi
+done
+if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || :; fi
 fi
 if [ "$1" = purge ]; then rm -rf /etc/vpnman; fi
 exit 0
@@ -145,6 +157,11 @@ mkdir -p %{buildroot}/etc/vpnman
 %post
 getent group vpnman >/dev/null || groupadd -r vpnman
 mkdir -p /etc/vpnman && chmod 700 /etc/vpnman
+# GTK only validates icon-theme.cache against the mtime of hicolor/ itself, so new icons stay invisible until it is rebuilt
+for t in gtk4-update-icon-cache gtk-update-icon-cache; do
+    if command -v \$t >/dev/null 2>&1; then \$t -q -f -t /usr/share/icons/hicolor >/dev/null 2>&1 && break; fi
+done
+if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || :; fi
 # plain systemctl (no distro macros) so the spec builds on any rpm-based distro;
 # the distro preset would leave an unknown service disabled, so enable and start explicitly
 if [ -d /run/systemd/system ]; then
@@ -162,6 +179,12 @@ fi
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload >/dev/null 2>&1 || :
 fi
+# GTK only validates icon-theme.cache against the mtime of hicolor/ itself, so new icons stay invisible until it is rebuilt
+for t in gtk4-update-icon-cache gtk-update-icon-cache; do
+    if command -v \$t >/dev/null 2>&1; then \$t -q -f -t /usr/share/icons/hicolor >/dev/null 2>&1 && break; fi
+done
+if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || :; fi
+
 if [ "\$1" -eq 0 ] && command -v nft >/dev/null 2>&1; then
     nft delete table inet vpnman >/dev/null 2>&1 || :
 fi

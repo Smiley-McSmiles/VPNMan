@@ -399,7 +399,7 @@ class Cli:
         if not plat.is_root():
             print("Run as root: sudo vpnman service %s" % a.action, file=sys.stderr)
             return 1
-        init = plat.init_system()
+        init = a.init or plat.init_system()
         if a.action == "install":
             print("Installed %s service definition." % service.install(init))
             return 0
@@ -600,6 +600,8 @@ def build_parser():
     add("doctor", "check the system")
     s = add("service", "install/control the background service")
     s.add_argument("action", choices=["install", "uninstall", "enable", "disable", "start", "stop", "restart", "status"])
+    s.add_argument("--init", choices=["systemd", "runit", "openrc", "sysv", "openbsd-rc", "bsd-rc"],
+                   help="force the init system instead of auto-detecting it")
     add("daemon", "run the daemon in the foreground (root)")
     s = add("gui", "open the GTK4/libadwaita app")
     s.add_argument("--background", action="store_true", help="start minimised to the system tray")

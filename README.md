@@ -108,6 +108,9 @@ sudo ./install.sh --prefix /usr --uninstall [--purge]
 After installing (script, `.deb` or `.rpm`) just open **VPNMan** from your application menu.
 `install.sh` is POSIX `sh` (works on OpenBSD's ksh), detects systemd / runit / OpenRC / SysV / OpenBSD rc.d /
 FreeBSD rc.d, creates the `vpnman` group, adds `$SUDO_USER` to it, and enables and starts the service.
+Init systems were exercised for real: **runit** (under `runsvdir`: enable/start/stop/restart/disable with `svlogd` logging)
+and **SysV** (the init script via `start-stop-daemon` and via the plain `nohup` fallback, plus `update-rc.d` enable/disable).
+Force a system when auto-detection is wrong: `vpnman service enable --init runit`.
 Service control later: `sudo vpnman service enable|disable|start|stop|restart|status|install|uninstall`.
 
 ### Packages

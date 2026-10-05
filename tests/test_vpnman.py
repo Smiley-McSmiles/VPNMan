@@ -235,6 +235,45 @@ class AutostartTests(unittest.TestCase):
             mgr.disconnect()
 
 
+class InstallTests(unittest.TestCase):
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def stage(self, init):
+        import subprocess
+        dest = tempfile.mkdtemp(dir=TMP)
+        r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", "/usr", "--init", init, "--no-post"],
+                           env=dict(os.environ, DESTDIR=dest), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return dest
+
+    def test_icons_system_and_private_copy(self):
+        d = self.stage("systemd")
+        for base in ("usr/share/icons", "usr/share/vpnman/icons"):
+            for rel in ("hicolor/scalable/apps/io.github.smiley_mcsmiles.VPNMan.svg",
+                        "hicolor/symbolic/apps/io.github.smiley_mcsmiles.VPNMan-connected-symbolic.svg"):
+                self.assertTrue(os.path.exists(os.path.join(d, base, rel)), base + "/" + rel)
+        self.assertTrue(os.path.isdir(os.path.join(d, "etc/vpnman")))
+        mode = stat.S_IMODE(os.stat(os.path.join(d, "etc/vpnman")).st_mode)
+        self.assertEqual(mode, 0o700)
+
+    def test_init_files_per_system(self):
+        for init, path, needle in (("runit", "etc/sv/vpnmand/run", "exec /usr/bin/vpnmand"),
+                                   ("sysv", "etc/init.d/vpnmand", "DAEMON=/usr/bin/vpnmand"),
+                                   ("openrc", "etc/init.d/vpnmand", "command=\"/usr/bin/vpnmand\""),
+                                   ("systemd", "usr/lib/systemd/system/vpnmand.service", "ExecStart=/usr/bin/vpnmand")):
+            d = self.stage(init)
+            p = os.path.join(d, path)
+            self.assertIn(needle, open(p).read(), init)
+            if init != "systemd":
+                self.assertTrue(os.access(p, os.X_OK), init)
+        self.assertTrue(os.access(os.path.join(self.stage("runit"), "etc/sv/vpnmand/log/run"), os.X_OK))
+
+    def test_sysv_script_is_valid_lsb(self):
+        text = open(os.path.join(self.ROOT, "data/init/vpnmand.sysv")).read()
+        for key in ("Provides:", "Required-Start:", "Default-Start:", "Short-Description:"):
+            self.assertIn(key, text)
+
+
 class TrayTests(unittest.TestCase):
     def test_status_notifier_protocol(self):
         import subprocess

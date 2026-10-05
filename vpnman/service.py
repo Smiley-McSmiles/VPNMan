@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import time
 
 from . import platform as plat
 
@@ -87,7 +88,14 @@ def control(action, init=None):
         if action == "enable":
             if not os.path.lexists(link):
                 os.symlink(target, link)
-            return True, "linked %s -> %s (runsvdir starts it within ~5s)" % (link, target)
+            # runsvdir only scans every ~5s; once its runsv exists, make sure the service is up
+            # (a previous `disable` may have left a lingering runsv in the "down" state)
+            for _ in range(24):
+                ok, out = _sh(["sv", "up", link])
+                if ok:
+                    return True, "enabled and started: %s" % out
+                time.sleep(0.5)
+            return True, "linked %s -> %s (runsvdir will start it within a few seconds)" % (link, target)
         if action == "disable":
             _sh(["sv", "down", link])
             if os.path.islink(link):
@@ -100,16 +108,14 @@ def control(action, init=None):
         if action in ("enable", "disable"):
             if init == "openrc":
                 ok, out = _sh(["rc-update", "add" if action == "enable" else "del", "vpnmand", "default"])
-                if action == "enable":
-                    _sh([script, "start"])
+                _sh([script, "start" if action == "enable" else "stop"])
                 return ok, out
             for tool, args in (("update-rc.d", ["vpnmand", "defaults"] if action == "enable" else ["-f", "vpnmand", "remove"]),
                                ("chkconfig", ["--add", "vpnmand"] if action == "enable" else ["--del", "vpnmand"]),
                                ("rc-update", ["add", "vpnmand"] if action == "enable" else ["del", "vpnmand"])):
                 if plat.which(tool):
                     ok, out = _sh([plat.which(tool)] + args)
-                    if action == "enable":
-                        _sh([script, "start"])
+                    _sh([script, "start" if action == "enable" else "stop"])
                     return ok, out
             if action == "enable":
                 for lvl in ("2", "3", "4", "5"):
