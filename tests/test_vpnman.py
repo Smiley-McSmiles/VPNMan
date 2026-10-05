@@ -287,6 +287,21 @@ class InstallTests(unittest.TestCase):
             self.assertIn(key, text)
 
 
+class GuiTests(unittest.TestCase):
+    def test_server_dropdown(self):
+        import subprocess
+        xvfb = shutil_which("xvfb-run")
+        py = next((p for p in ("python3", "python3.12", "python3.11", "python3.13", "python3.10")
+                   if shutil_which(p) and subprocess.run([shutil_which(p), "-c", "import gi;gi.require_version('Gtk','4.0');gi.require_version('Adw','1');from gi.repository import Adw"],
+                                                          capture_output=True).returncode == 0), None)
+        if not xvfb or not py:
+            self.skipTest("needs xvfb-run and PyGObject with GTK 4 + libadwaita")
+        env = dict(os.environ, GSK_RENDERER="cairo", VPNMAN_SOCKET=TMP + "/none.sock")
+        r = subprocess.run([xvfb, "-a", shutil_which(py), os.path.join(os.path.dirname(__file__), "gui_check.py")],
+                           capture_output=True, text=True, timeout=90, env=env)
+        self.assertIn("GUI OK", r.stdout, r.stdout + r.stderr[-1500:])
+
+
 class TrayTests(unittest.TestCase):
     def test_status_notifier_protocol(self):
         import subprocess

@@ -480,10 +480,13 @@ class MainWindow(Adw.ApplicationWindow):
         self.hero = Hero("network-vpn-disabled-symbolic", "Not Connected", "Choose a server and connect.")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER)
         self.server_row = Adw.ComboRow(title="Server", model=Gtk.StringList.new([]))
-        self.server_row.set_size_request(320, -1)
-        self.server_row.add_css_class("card")
         self.server_row.connect("notify::selected", self._on_server_selected)
-        box.append(self.server_row)
+        # a ComboRow only reacts to clicks inside a GtkListBox (the list delivers the activation)
+        pick = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        pick.add_css_class("boxed-list")
+        pick.set_size_request(340, -1)
+        pick.append(self.server_row)
+        box.append(pick)
         self.main_btn = Gtk.Button(label="Connect", halign=Gtk.Align.CENTER)
         self.main_btn.add_css_class("pill")
         self.main_btn.add_css_class("suggested-action")
@@ -958,6 +961,14 @@ class MainWindow(Adw.ApplicationWindow):
         self.lock_now.set_active(st["netlock"]["engaged"])
         self._quiet = False
         self.server_row.set_sensitive(not active)
+        pid = st.get("profile_id")
+        if active and pid and pid != self.sel_id:
+            self.sel_id = pid             # opened mid-connection: show the server actually in use
+            ids = [p["id"] for p in self.profiles]
+            if pid in ids:
+                self._quiet = True
+                self.server_row.set_selected(ids.index(pid))
+                self._quiet = False
         if state == "connected":
             self.hero.set_icon_name("network-vpn-symbolic")
             self.hero.set_title("Connected")
