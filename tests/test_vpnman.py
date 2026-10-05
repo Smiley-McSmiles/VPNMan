@@ -1,0 +1,281 @@
+import base64
+import os
+import stat
+import tempfile
+import threading
+import time
+import unittest
+
+TMP = tempfile.mkdtemp(prefix="vpnman-test-")
+os.environ.update({
+    "VPNMAN_CONFIG_DIR": TMP + "/etc", "VPNMAN_RUN_DIR": TMP + "/run", "VPNMAN_LOG_FILE": TMP + "/log",
+    "VPNMAN_SOCKET": TMP + "/run/s.sock", "VPNMAN_RESOLV_CONF": TMP + "/resolv.conf",
+    "VPNMAN_ALLOW_UNPRIVILEGED": "1",
+})
+os.makedirs(TMP + "/run")
+os.makedirs(TMP + "/bin")
+os.environ["PATH"] = TMP + "/bin" + os.pathsep + os.environ["PATH"]
+
+from vpnman import backends, daemon, dns, ipc, netlock, profiles, settings  # noqa: E402
+from vpnman.manager import Manager  # noqa: E402
+
+OVPN = "client\ndev tun\nproto udp\nremote vpn.example.net 1194\nremote 192.0.2.7 443 tcp\nca ca.crt\nauth-user-pass\n"
+WG = """[Interface]
+PrivateKey = AAAA
+Address = 10.0.0.2/32
+DNS = 10.0.0.1, example.org
+
+[Peer]
+PublicKey = BBBB
+AllowedIPs = 0.0.0.0/0
+Endpoint = 198.51.100.4:51820
+"""
+
+
+class NetlockTests(unittest.TestCase):
+    def spec(self, **kw):
+        return netlock.Spec(["198.51.100.4", "2001:db8::1"], ["tun0"], **kw)
+
+    def test_nft_contains_essentials(self):
+        r = netlock.nft_ruleset(self.spec())
+        self.assertIn("policy drop", r)
+        self.assertIn('oifname { "tun0" } accept', r)
+        self.assertIn("198.51.100.4/32", r)
+        self.assertIn("meta nfproto ipv6 drop", r)
+        self.assertIn("delete table inet vpnman", r)
+
+    def test_lan_toggle(self):
+        self.assertNotIn("192.168.0.0/16", netlock.nft_ruleset(self.spec(allow_lan=False)))
+        self.assertIn("192.168.0.0/16", netlock.nft_ruleset(self.spec(allow_lan=True)))
+        self.assertNotIn("192.168.0.0/16", netlock.pf_ruleset(self.spec(allow_lan=False)))
+
+    def test_bad_input_rejected(self):
+        with self.assertRaises(ValueError):
+            netlock.Spec(["1.2.3.4; rm -rf /"])
+        self.assertEqual(netlock.Spec([], ["bad iface!", "wg0"]).ifaces, ["wg0"])
+
+    def test_pf_and_ipt(self):
+        s = self.spec(block_ipv6=False)
+        self.assertIn("block drop all", netlock.pf_ruleset(s))
+        self.assertIn("pass out quick on tun0 all", netlock.pf_ruleset(s))
+        cmds = netlock.ipt_commands(s)
+        self.assertIn(["-A", "VPNMAN_OUT", "-o", "tun0", "-j", "ACCEPT"], cmds)
+        self.assertEqual(cmds[-1], ["-A", "VPNMAN_IN", "-j", "DROP"])
+        v6 = netlock.ipt_commands(s, v6=True)
+        self.assertIn(["-A", "VPNMAN_OUT", "-d", "2001:db8::1/128", "-j", "ACCEPT"], v6)
+
+    def test_ipv6_blocked_chain(self):
+        v6 = netlock.ipt_commands(self.spec(block_ipv6=True), v6=True)
+        self.assertNotIn(["-A", "VPNMAN_OUT", "-o", "tun0", "-j", "ACCEPT"], v6)
+
+
+class ImportTests(unittest.TestCase):
+    def test_sniff(self):
+        self.assertEqual(backends.sniff("a.ovpn", OVPN), "openvpn")
+        self.assertEqual(backends.sniff("wg0.conf", WG), "wireguard")
+        self.assertEqual(backends.sniff("a.conf", WG + "Jc = 4\nS1 = 10\n"), "amneziawg")
+        self.assertEqual(backends.sniff("x.conf", "connections {\n  corp {\n    remote_addrs = 1.2.3.4\n  }\n}\n"), "ikev2")
+        self.assertIsNone(backends.sniff("notes.txt", "hello"))
+
+    def test_openvpn_parse(self):
+        info = backends.get("openvpn").parse("a.ovpn", OVPN)
+        self.assertEqual(info["server"], "vpn.example.net")
+        self.assertEqual(info["options"]["remotes"][1], ["192.0.2.7", 443, "tcp"])
+
+    def test_wireguard_parse(self):
+        info = backends.get("wireguard").parse("w.conf", WG)
+        self.assertEqual((info["server"], info["port"]), ("198.51.100.4", 51820))
+        self.assertEqual(info["dns"], ["10.0.0.1"])
+
+    def test_collect_files_rewrites_paths(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(d + "/certs")
+        open(d + "/certs/ca.crt", "w").write("CA")
+        open(d + "/x.ovpn", "w").write("client\nremote a 1\nca certs/ca.crt\n")
+        text, files = profiles.collect_files(d + "/x.ovpn")
+        self.assertIn("ca ca.crt", text)
+        self.assertEqual(base64.b64decode(files["ca.crt"]), b"CA")
+
+    def test_unsafe_filename(self):
+        for bad in ("../x", "a/../../b", "", ".."):
+            if os.path.basename(bad) in ("", ".."):
+                with self.assertRaises(profiles.ProfileError):
+                    profiles.safe_filename(bad)
+        self.assertEqual(profiles.safe_filename("/etc/passwd"), "passwd")
+
+    def test_store_permissions(self):
+        st = profiles.ProfileStore(TMP + "/store")
+        p = profiles.new_profile("n", "openvpn")
+        st.save(p, {"c.ovpn": "x"})
+        mode = stat.S_IMODE(os.stat(TMP + "/store/%s/profile.json" % p["id"]).st_mode)
+        self.assertEqual(mode, 0o600)
+        self.assertEqual(st.find("N")["id"], p["id"])
+        self.assertNotIn("password", profiles.public_view(p))
+
+
+class BackendTests(unittest.TestCase):
+    def ctx(self, profile, ifname="vpnmtest"):
+        d = tempfile.mkdtemp(dir=TMP)
+        pd = tempfile.mkdtemp(dir=TMP)
+        open(pd + "/p.ovpn", "w").write(OVPN.replace("auth-user-pass\n", ""))
+        open(pd + "/w.conf", "w").write(WG)
+        return backends.Context(profile, pd, d, ifname, settings.Settings(TMP + "/s.json"))
+
+    def test_openvpn_cmd(self):
+        p = profiles.new_profile("o", "openvpn", config="p.ovpn", username="u", password="pw")
+        ctx = self.ctx(p)
+        b = backends.get("openvpn")
+        ctx.state["resolved"] = {"vpn.example.net": "203.0.113.9"}
+        b.prepare(ctx)
+        cmd = b.connect_cmd(ctx)
+        self.assertIn("--auth-user-pass", cmd)
+        self.assertEqual(cmd[cmd.index("--dev") + 1], "vpnmtest")
+        runtime = open(ctx.state["path"]).read()
+        self.assertIn("remote 203.0.113.9 1194", runtime)
+        self.assertEqual(open(os.path.join(ctx.workdir, "auth")).read(), "u\npw\n")
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(ctx.workdir, "auth")).st_mode), 0o600)
+
+    def test_openvpn_needs_creds(self):
+        p = profiles.new_profile("o", "openvpn", config="p.ovpn")
+        ctx = self.ctx(p)
+        open(ctx.profile_dir + "/p.ovpn", "w").write(OVPN)
+        b = backends.get("openvpn")
+        b.prepare(ctx)
+        with self.assertRaises(ValueError):
+            b.connect_cmd(ctx)
+
+    def test_openvpn_log_parsing(self):
+        ctx = self.ctx(profiles.new_profile("o", "openvpn", config="p.ovpn"))
+        b = backends.get("openvpn")
+        b.parse_line("TUN/TAP device tun3 opened", ctx)
+        b.parse_line("PUSH_REPLY,dhcp-option DNS 10.8.0.1,dhcp-option DNS 10.8.0.2", ctx)
+        self.assertEqual(ctx.iface, "tun3")
+        self.assertIn("10.8.0.1", ctx.dns)
+        self.assertTrue(b.ready_re.search("Initialization Sequence Completed"))
+
+    def test_wireguard_strips_dns_and_resolves(self):
+        p = profiles.new_profile("w", "wireguard", config="w.conf")
+        ctx = self.ctx(p)
+        open(ctx.profile_dir + "/w.conf", "w").write(WG.replace("198.51.100.4", "wg.example.org"))
+        ctx.state["resolved"] = {"wg.example.org": "203.0.113.1"}
+        b = backends.get("wireguard")
+        b.prepare(ctx)
+        text = open(ctx.state["path"]).read()
+        self.assertNotIn("DNS", text)
+        self.assertIn("Endpoint = 203.0.113.1:51820", text)
+        self.assertTrue(ctx.state["path"].endswith("vpnmtest.conf"))
+        self.assertEqual(b.connect_cmds(ctx)[0][1:2], ["up"])
+        self.assertEqual(b.disconnect_cmds(ctx)[0][1], "down")
+
+    def test_openconnect_resolve_and_stdin(self):
+        p = profiles.new_profile("c", "openconnect", server="https://gw.example.com", username="u", password="p",
+                                 options={"protocol": "gp"})
+        ctx = self.ctx(p)
+        ctx.state["resolved"] = {"gw.example.com": "203.0.113.5"}
+        b = backends.get("openconnect")
+        cmd = b.connect_cmd(ctx)
+        self.assertIn("gp", cmd)
+        self.assertIn("gw.example.com:203.0.113.5", cmd)
+        self.assertEqual(b.stdin_data(ctx), "p\n")
+        self.assertNotIn("p", [a for a in cmd if a == "p"])
+
+    def test_registry_breadth(self):
+        self.assertGreaterEqual(len(backends.REGISTRY), 15)
+        for b in backends.REGISTRY.values():
+            self.assertTrue(b.label and b.description)
+
+    def test_validation(self):
+        self.assertTrue(backends.get("zerotier").validate(profiles.new_profile("z", "zerotier")))
+        self.assertTrue(backends.get("custom").validate(profiles.new_profile("c", "custom")))
+
+
+class SettingsDnsTests(unittest.TestCase):
+    def test_coercion(self):
+        s = settings.Settings(TMP + "/set.json")
+        self.assertEqual(s.set("netlock.allow_lan", "off"), False)
+        self.assertEqual(s.set("connection.retry_max", "7"), 7)
+        self.assertEqual(s.set("dns.servers", "1.1.1.1, 9.9.9.9"), ["1.1.1.1", "9.9.9.9"])
+        with self.assertRaises(KeyError):
+            s.set("nope.nothing", 1)
+        with self.assertRaises(ValueError):
+            s.set("netlock.enabled", "maybe")
+        self.assertEqual(settings.Settings(TMP + "/set.json").get("connection.retry_max"), 7)
+
+    def test_resolv_conf_roundtrip(self):
+        path = os.environ["VPNMAN_RESOLV_CONF"]
+        open(path, "w").write("nameserver 8.8.8.8\n")
+        d = dns.DnsManager()
+        d.apply(["10.8.0.1"], None)
+        self.assertIn("10.8.0.1", open(path).read())
+        d.restore()
+        self.assertEqual(open(path).read(), "nameserver 8.8.8.8\n")
+
+
+class EndToEnd(unittest.TestCase):
+    """Real daemon + manager + CLI client with a fake `openvpn` executable."""
+
+    @classmethod
+    def setUpClass(cls):
+        fake = TMP + "/bin/openvpn"
+        open(fake, "w").write("""#!/bin/sh
+echo "TUN/TAP device lo opened"
+echo "PUSH: dhcp-option DNS 10.8.0.1"
+echo "Initialization Sequence Completed"
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+""")
+        os.chmod(fake, 0o755)
+        s = settings.Settings(TMP + "/etc/settings.json")
+        s.set("checks.tunnel", False)
+        s.set("connection.reconnect", False)
+        cls.mgr = Manager(settings=s)
+        cls.server = daemon.Server(os.environ["VPNMAN_SOCKET"], cls.mgr)
+        threading.Thread(target=cls.server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True).start()
+        cls.c = ipc.Client(timeout=15)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.mgr.disconnect()
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def wait(self, state, secs=10):
+        end = time.time() + secs
+        while time.time() < end:
+            st = self.c.call("status")
+            if st["state"] == state:
+                return st
+            time.sleep(0.1)
+        self.fail("never reached %s, last=%s" % (state, self.c.call("status")))
+
+    def test_full_lifecycle(self):
+        self.assertEqual(self.c.call("ping"), "pong")
+        p = self.c.call("profiles.import", name="lab", text=OVPN.replace("auth-user-pass\n", ""),
+                        filename="lab.ovpn", files={})
+        self.assertEqual(p["protocol"], "openvpn")
+        self.assertNotIn("password", p)
+        self.c.call("connect", ident="lab")
+        st = self.wait("connected")
+        self.assertEqual(st["profile"], "lab")
+        self.assertIn("10.8.0.1", open(os.environ["VPNMAN_RESOLV_CONF"]).read())
+        logs = self.c.call("logs")
+        self.assertTrue(any("Initialization Sequence" in e["msg"] for e in logs["entries"]))
+        self.c.call("disconnect")
+        self.assertEqual(self.c.call("status")["state"], "disconnected")
+        self.assertNotIn("vpnman", open(os.environ["VPNMAN_RESOLV_CONF"]).read())
+        self.c.call("profiles.update", ident="lab", changes={"favorite": True})
+        self.assertTrue(self.c.call("profiles.get", ident="lab")["favorite"])
+        self.c.call("profiles.remove", ident="lab")
+        self.assertEqual(self.c.call("profiles.list"), [])
+
+    def test_errors(self):
+        with self.assertRaises(ipc.RpcError):
+            self.c.call("connect", ident="nonexistent")
+        with self.assertRaises(ipc.RpcError):
+            self.c.call("nonsense")
+        with self.assertRaises(ipc.RpcError):
+            self.c.call("settings.set", key="bogus", value=1)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,806 @@
+"""GTK4 / libadwaita front-end for vpnman (requires libadwaita >= 1.4)."""
+
+import os
+import sys
+import threading
+import time
+
+try:
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango
+except (ImportError, ValueError) as exc:  # pragma: no cover
+    print("The GUI needs PyGObject, GTK 4 and libadwaita >= 1.4: %s" % exc, file=sys.stderr)
+    raise SystemExit(1)
+
+from .. import APP_ID, APP_NAME, __version__, profiles as prof
+from ..ipc import Client, DaemonUnavailable, RpcError
+
+ACTIVE = ("connected", "connecting", "reconnecting")
+
+
+def human(n):
+    n = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return ("%d %s" if unit == "B" else "%.1f %s") % (n if unit == "B" else n, unit)
+        n /= 1024
+
+
+def hms(sec):
+    sec = int(sec)
+    return "%d:%02d:%02d" % (sec // 3600, sec % 3600 // 60, sec % 60)
+
+
+def rpc(method, ok=None, fail=None, **params):
+    """Run a daemon call off the UI thread; callbacks run on the main loop."""
+    def work():
+        try:
+            res = Client(timeout=60).call(method, **params)
+            if ok:
+                GLib.idle_add(ok, res)
+        except (DaemonUnavailable, RpcError) as e:
+            GLib.idle_add(fail or (lambda *_: None), str(e), isinstance(e, DaemonUnavailable))
+    threading.Thread(target=work, daemon=True).start()
+
+
+def choose_files(parent, title, callback, multiple=True):
+    if hasattr(Gtk, "FileDialog"):
+        dlg = Gtk.FileDialog(title=title)
+
+        def done(d, res):
+            try:
+                if multiple:
+                    model = d.open_multiple_finish(res)
+                    files = [model.get_item(i).get_path() for i in range(model.get_n_items())]
+                else:
+                    files = [d.open_finish(res).get_path()]
+            except GLib.Error:
+                return
+            callback(files)
+        (dlg.open_multiple if multiple else dlg.open)(parent, None, done)
+    else:  # pragma: no cover - GTK < 4.10
+        dlg = Gtk.FileChooserNative(title=title, transient_for=parent, action=Gtk.FileChooserAction.OPEN,
+                                    select_multiple=multiple)
+        dlg.connect("response", lambda d, r: callback([f.get_path() for f in d.get_files()]) if r == Gtk.ResponseType.ACCEPT else None)
+        dlg.show()
+        parent._native = dlg
+
+
+# ------------------------------------------------------------------ dialogs
+
+class ProfileDialog(Adw.Window):
+    """Import a config file, add a profile by hand, or edit an existing one."""
+
+    def __init__(self, parent, mode, protocols, profile=None, files=None, on_done=None):
+        super().__init__(transient_for=parent, modal=True, default_width=480, default_height=640)
+        self.mode, self.profile, self.on_done, self.parent_win = mode, profile, on_done, parent
+        self.protocols = protocols
+        self.files = files or []
+        self.set_title({"import": "Import Profile", "add": "Add Profile", "edit": "Edit Profile"}[mode])
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar(show_end_title_buttons=False, show_start_title_buttons=False)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self.close())
+        self.save = Gtk.Button(label="Save" if mode == "edit" else "Add")
+        self.save.add_css_class("suggested-action")
+        self.save.connect("clicked", self._submit)
+        header.pack_start(cancel)
+        header.pack_end(self.save)
+        view.add_top_bar(header)
+        page = Adw.PreferencesPage()
+        view.set_content(page)
+        self.set_content(view)
+
+        g = Adw.PreferencesGroup()
+        page.add(g)
+        if mode == "import":
+            self.file_row = Adw.ActionRow(title="Config files", subtitle="None selected")
+            btn = Gtk.Button(label="Choose…", valign=Gtk.Align.CENTER)
+            btn.connect("clicked", self._pick)
+            self.file_row.add_suffix(btn)
+            g.add(self.file_row)
+            if self.files:
+                self._set_files(self.files)
+        self.name = Adw.EntryRow(title="Name" + (" (optional)" if mode == "import" else ""))
+        g.add(self.name)
+        self.proto = None
+        if mode != "edit":
+            labels = (["Auto-detect"] if mode == "import" else []) + [
+                "%s%s" % (p["label"], "" if p["available"] else " (not installed)") for p in protocols]
+            self.proto = Adw.ComboRow(title="Protocol", model=Gtk.StringList.new(labels))
+            g.add(self.proto)
+        self.server = Adw.EntryRow(title="Server")
+        self.port = Adw.EntryRow(title="Port")
+        self.user = Adw.EntryRow(title="Username")
+        self.password = Adw.PasswordEntryRow(title="Password" + (" (empty = keep)" if mode == "edit" else ""))
+        self.opts = Adw.EntryRow(title="Options (key=value, comma separated)")
+        self.dns = Adw.EntryRow(title="DNS servers (comma separated)")
+        self.notes = Adw.EntryRow(title="Notes")
+        g2 = Adw.PreferencesGroup(title="Details")
+        page.add(g2)
+        if mode != "import":
+            for r in (self.server, self.port):
+                g2.add(r)
+        for r in (self.user, self.password):
+            g2.add(r)
+        if mode != "import":
+            for r in (self.opts, self.dns, self.notes):
+                g2.add(r)
+        if profile:
+            self.name.set_text(profile["name"])
+            self.server.set_text(profile.get("server") or "")
+            self.port.set_text(str(profile.get("port") or ""))
+            self.user.set_text(profile.get("username") or "")
+            self.dns.set_text(", ".join(profile.get("dns") or []))
+            self.notes.set_text(profile.get("notes") or "")
+            self.opts.set_text(", ".join("%s=%s" % kv for kv in profile.get("options", {}).items()
+                                         if isinstance(kv[1], (str, int))))
+        self.err = Adw.Banner(revealed=False)
+        view.add_top_bar(self.err)
+
+    def _pick(self, *_):
+        choose_files(self, "Choose VPN configuration files", self._set_files)
+
+    def _set_files(self, files):
+        self.files = files
+        self.file_row.set_subtitle(", ".join(os.path.basename(f) for f in files))
+        if len(files) == 1 and not self.name.get_text():
+            self.name.set_text(os.path.splitext(os.path.basename(files[0]))[0])
+
+    def _selected_protocol(self):
+        if self.proto is None:
+            return None
+        i = self.proto.get_selected() - (1 if self.mode == "import" else 0)
+        return None if i < 0 else self.protocols[i]["id"]
+
+    def _error(self, msg, *_):
+        self.err.set_title(str(msg))
+        self.err.set_revealed(True)
+        self.save.set_sensitive(True)
+
+    def _finish(self, *_):
+        if self.on_done:
+            self.on_done()
+        self.close()
+
+    def _submit(self, *_):
+        self.save.set_sensitive(False)
+        if self.mode == "import":
+            if not self.files:
+                return self._error("Choose at least one file")
+            fields = {}
+            if self.user.get_text():
+                fields = {"username": self.user.get_text(), "password": self.password.get_text()}
+            files, proto, name = list(self.files), self._selected_protocol(), self.name.get_text()
+
+            def work():
+                err = None
+                for f in files:
+                    try:
+                        text, extra = prof.collect_files(f)
+                        Client().call("profiles.import", name=(name if len(files) == 1 and name else os.path.splitext(os.path.basename(f))[0]),
+                                      text=text, files=extra, protocol=proto, filename=os.path.basename(f), fields=fields)
+                    except (RpcError, DaemonUnavailable, OSError) as e:
+                        err = "%s: %s" % (os.path.basename(f), e)
+                GLib.idle_add(self._error if err else self._finish, err)
+            threading.Thread(target=work, daemon=True).start()
+            return
+        name = self.name.get_text().strip()
+        if not name:
+            return self._error("A name is required")
+        opts = {}
+        for kv in self.opts.get_text().split(","):
+            if "=" in kv:
+                k, _, v = kv.partition("=")
+                opts[k.strip()] = v.strip()
+        try:
+            port = int(self.port.get_text() or 0)
+        except ValueError:
+            return self._error("Port must be a number")
+        dns = [d.strip() for d in self.dns.get_text().split(",") if d.strip()]
+        if self.mode == "add":
+            fields = {"server": self.server.get_text().strip(), "port": port, "username": self.user.get_text(),
+                      "password": self.password.get_text(), "dns": dns, "notes": self.notes.get_text()}
+            rpc("profiles.add", self._finish, self._error, name=name, protocol=self._selected_protocol(),
+                fields=fields, options=opts)
+        else:
+            ch = {"name": name, "server": self.server.get_text().strip(), "port": port,
+                  "username": self.user.get_text(), "dns": dns, "notes": self.notes.get_text(),
+                  "options": dict(self.profile.get("options", {}), **opts)}
+            if self.password.get_text():
+                ch["password"] = self.password.get_text()
+            rpc("profiles.update", self._finish, self._error, ident=self.profile["id"], changes=ch)
+
+
+# ------------------------------------------------------------------- window
+
+class MainWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title=APP_NAME, default_width=900, default_height=700)
+        self.set_size_request(360, 480)
+        self.status = None
+        self.profiles = []
+        self.protocols = []
+        self.settings = {}
+        self.latency = {}
+        self.sel_id = None
+        self._log_seq = 0
+        self._quiet = False
+        self._daemon_ok = True
+        self._last_state = None
+        self._rows = {}
+
+        self.toasts = Adw.ToastOverlay()
+        view = Adw.ToolbarView()
+        self.set_content(view)
+
+        # ---- header
+        header = Adw.HeaderBar()
+        self.switcher_title = Adw.ViewSwitcherTitle(title=APP_NAME)
+        header.set_title_widget(self.switcher_title)
+        add_menu = Gio.Menu()
+        add_menu.append("Import from File…", "win.import")
+        add_menu.append("Add Manually…", "win.add")
+        add_btn = Gtk.MenuButton(icon_name="list-add-symbolic", menu_model=add_menu, tooltip_text="Add profile")
+        header.pack_start(add_btn)
+        main_menu = Gio.Menu()
+        main_menu.append("Preferences", "app.preferences")
+        main_menu.append("About VPNMan", "app.about")
+        main_menu.append("Quit", "app.quit")
+        header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=main_menu,
+                                       primary=True, tooltip_text="Main menu"))
+        view.add_top_bar(header)
+        self.banner = Adw.Banner(revealed=False, button_label="Retry")
+        self.banner.connect("button-clicked", lambda *_: self.refresh(full=True))
+        view.add_top_bar(self.banner)
+
+        # ---- pages
+        self.stack = Adw.ViewStack(vexpand=True)
+        self.stack.add_titled_with_icon(self._build_overview(), "overview", "Connection", "network-vpn-symbolic")
+        self.stack.add_titled_with_icon(self._build_servers(), "servers", "Servers", "network-server-symbolic")
+        self.stack.add_titled_with_icon(self._build_lock(), "lock", "Network Lock", "changes-prevent-symbolic")
+        self.stack.add_titled_with_icon(self._build_log(), "log", "Log", "utilities-terminal-symbolic")
+        self.switcher_title.set_stack(self.stack)
+        bar = Adw.ViewSwitcherBar(stack=self.stack)
+        self.switcher_title.bind_property("title-visible", bar, "reveal", GObject.BindingFlags.SYNC_CREATE)
+        self.toasts.set_child(self.stack)
+        view.set_content(self.toasts)
+        view.add_bottom_bar(bar)
+
+        for name, cb in (("import", self.on_import), ("add", self.on_add)):
+            act = Gio.SimpleAction.new(name, None)
+            act.connect("activate", cb)
+            self.add_action(act)
+
+        self.refresh(full=True)
+        GLib.timeout_add_seconds(1, self._tick)
+
+    # ---- overview ----------------------------------------------------
+    def _build_overview(self):
+        page = Adw.PreferencesPage()
+        hero = Adw.PreferencesGroup()
+        self.hero = Adw.StatusPage(icon_name="network-vpn-disabled-symbolic", title="Not Connected",
+                                   description="Choose a server and connect.")
+        self.hero.set_vexpand(False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER)
+        self.server_row = Adw.ComboRow(title="Server", model=Gtk.StringList.new([]))
+        self.server_row.set_size_request(320, -1)
+        self.server_row.add_css_class("card")
+        self.server_row.connect("notify::selected", self._on_server_selected)
+        box.append(self.server_row)
+        self.main_btn = Gtk.Button(label="Connect", halign=Gtk.Align.CENTER)
+        self.main_btn.add_css_class("pill")
+        self.main_btn.add_css_class("suggested-action")
+        self.main_btn.connect("clicked", self.on_main_button)
+        box.append(self.main_btn)
+        self.hero.set_child(box)
+        hero.add(self.hero)
+        page.add(hero)
+
+        self.stats = Adw.PreferencesGroup(title="Connection Details")
+        self.stat_rows = {}
+        for key, title, icon in (("ip", "Public IP", "network-wired-symbolic"),
+                                 ("iface", "Interface", "network-transmit-receive-symbolic"),
+                                 ("uptime", "Duration", "preferences-system-time-symbolic"),
+                                 ("down", "Downloaded", "go-down-symbolic"),
+                                 ("up", "Uploaded", "go-up-symbolic")):
+            row = Adw.ActionRow(title=title, subtitle="–", subtitle_selectable=True)
+            row.add_prefix(Gtk.Image.new_from_icon_name(icon))
+            row.add_css_class("property")
+            self.stats.add(row)
+            self.stat_rows[key] = row
+        self.stats.set_visible(False)
+        page.add(self.stats)
+
+        quick = Adw.PreferencesGroup()
+        self.lock_switch = Adw.SwitchRow(title="Network Lock", subtitle="Block all traffic outside the VPN (kill switch)")
+        self.lock_switch.add_prefix(Gtk.Image.new_from_icon_name("changes-prevent-symbolic"))
+        self.lock_switch.connect("notify::active", self._on_lock_toggled)
+        quick.add(self.lock_switch)
+        page.add(quick)
+        return page
+
+    # ---- servers -----------------------------------------------------
+    def _build_servers(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.search = Gtk.SearchEntry(placeholder_text="Search servers")
+        self.search.connect("search-changed", lambda *_: self.listbox.invalidate_filter())
+        top = Gtk.Box(spacing=6)
+        self.search.set_hexpand(True)
+        top.append(self.search)
+        self.ping_btn = Gtk.Button(label="Test Latency")
+        self.ping_btn.connect("clicked", self.on_ping)
+        top.append(self.ping_btn)
+        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.listbox.add_css_class("boxed-list")
+        self.listbox.set_filter_func(self._filter)
+        self.listbox.set_sort_func(self._sort)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        inner.append(top)
+        inner.append(self.listbox)
+        clamp = Adw.Clamp(maximum_size=720, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12,
+                          valign=Gtk.Align.START)
+        clamp.set_child(inner)
+        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroll.set_child(clamp)
+        self.empty = Adw.StatusPage(icon_name="network-server-symbolic", title="No Profiles",
+                                    description="Import an OpenVPN or WireGuard file, or add a server by hand.",
+                                    vexpand=True)
+        b = Gtk.Button(label="Import…", halign=Gtk.Align.CENTER)
+        b.add_css_class("pill")
+        b.add_css_class("suggested-action")
+        b.connect("clicked", self.on_import)
+        self.empty.set_child(b)
+        self.srv_stack = Gtk.Stack()
+        self.srv_stack.add_named(scroll, "list")
+        self.srv_stack.add_named(self.empty, "empty")
+        box.append(self.srv_stack)
+        return box
+
+    def _filter(self, row):
+        q = self.search.get_text().lower()
+        return not q or q in row.profile["name"].lower() or q in row.profile["protocol"] or \
+            q in (row.profile.get("server") or "").lower()
+
+    def _sort(self, a, b):
+        ka = (not a.profile["favorite"], a.profile["name"].lower())
+        kb = (not b.profile["favorite"], b.profile["name"].lower())
+        return (ka > kb) - (ka < kb)
+
+    def _make_row(self, p):
+        row = Adw.ActionRow(title=GLib.markup_escape_text(p["name"]),
+                            subtitle=GLib.markup_escape_text("%s%s" % (p["protocol"], "  ·  %s:%s" % (p["server"], p["port"]) if p["server"] else "")))
+        row.profile = p
+        row.set_activatable(False)
+        if p["blacklisted"]:
+            row.add_css_class("dim-label")
+        lat = Gtk.Label(label="", css_classes=["dim-label", "numeric"])
+        row.lat = lat
+        row.add_suffix(lat)
+        fav = Gtk.ToggleButton(icon_name="starred-symbolic" if p["favorite"] else "non-starred-symbolic",
+                               active=p["favorite"], valign=Gtk.Align.CENTER, tooltip_text="Favourite")
+        fav.add_css_class("flat")
+        fav.connect("toggled", lambda b, p=p: rpc("profiles.update", lambda *_: self.refresh(full=True),
+                                                   ident=p["id"], changes={"favorite": b.get_active()}))
+        row.add_suffix(fav)
+        menu = Gtk.MenuButton(icon_name="view-more-symbolic", valign=Gtk.Align.CENTER, tooltip_text="More")
+        menu.add_css_class("flat")
+        pop = Gtk.Popover()
+        pb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        for label, cb in (("Edit…", lambda *_: self._edit(p)),
+                          ("Unblock" if p["blacklisted"] else "Blacklist", lambda *_: self._toggle_block(p)),
+                          ("Remove…", lambda *_: self._remove(p))):
+            b = Gtk.Button(label=label)
+            b.add_css_class("flat")
+            b.connect("clicked", lambda w, cb=cb: (pop.popdown(), cb()))
+            pb.append(b)
+        pop.set_child(pb)
+        menu.set_popover(pop)
+        row.add_suffix(menu)
+        go = Gtk.Button(label="Connect", valign=Gtk.Align.CENTER)
+        go.add_css_class("suggested-action")
+        go.connect("clicked", lambda *_: self.connect_to(p["id"]))
+        row.add_suffix(go)
+        return row
+
+    def _edit(self, p):
+        ProfileDialog(self, "edit", self.protocols, profile=p, on_done=lambda: self.refresh(full=True)).present()
+
+    def _toggle_block(self, p):
+        rpc("profiles.update", lambda *_: self.refresh(full=True), ident=p["id"],
+            changes={"blacklisted": not p["blacklisted"]})
+
+    def _remove(self, p):
+        d = Adw.MessageDialog(transient_for=self, heading="Remove %s?" % p["name"],
+                              body="The profile and its stored credentials will be deleted.")
+        d.add_response("cancel", "Cancel")
+        d.add_response("remove", "Remove")
+        d.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        d.connect("response", lambda d, r: r == "remove" and rpc("profiles.remove", lambda *_: self.refresh(full=True), ident=p["id"]))
+        d.present()
+
+    # ---- network lock page -------------------------------------------
+    def _build_lock(self):
+        page = Adw.PreferencesPage()
+        g = Adw.PreferencesGroup(title="Kill Switch",
+                                 description="While engaged, only the VPN tunnel, its server and the exceptions below can "
+                                             "send or receive traffic. If the VPN drops, nothing leaks.")
+        self.lock_now = Adw.SwitchRow(title="Engage now")
+        self.lock_now.connect("notify::active", self._on_lock_toggled)
+        g.add(self.lock_now)
+        page.add(g)
+        self.lock_bindings = {}
+        g = Adw.PreferencesGroup(title="Behaviour")
+        for key, title, sub in (("netlock.enabled", "Lock when connecting", "Engage automatically before connecting and release on disconnect"),
+                                ("netlock.persist", "Stay locked", "Keep the lock after disconnecting and across restarts/boots")):
+            g.add(self._setting_switch(key, title, sub))
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Allowed Outside the Tunnel")
+        for key, title, sub in (("netlock.allow_lan", "Local network", "Private, link-local and multicast ranges"),
+                                ("netlock.allow_dhcp", "DHCP", "Needed to renew your network lease"),
+                                ("netlock.allow_ping", "Ping", "Answer and send ICMP echo requests"),
+                                ("netlock.block_ipv6", "Block IPv6", "Drop all IPv6, even inside the tunnel (prevents v6 leaks)")):
+            g.add(self._setting_switch(key, title, sub))
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Whitelist", description="Comma-separated IPs or CIDR ranges")
+        g.add(self._setting_entry("netlock.whitelist_out", "Reachable outside the VPN"))
+        g.add(self._setting_entry("netlock.whitelist_in", "Allowed to reach this computer"))
+        page.add(g)
+        return page
+
+    def _setting_switch(self, key, title, subtitle=""):
+        row = Adw.SwitchRow(title=title, subtitle=subtitle)
+        row.key = key
+        row.connect("notify::active", self._on_setting_switch)
+        self.lock_bindings[key] = row
+        return row
+
+    def _setting_entry(self, key, title):
+        row = Adw.EntryRow(title=title, show_apply_button=True)
+        row.key = key
+        row.connect("apply", lambda r: rpc("settings.set", lambda *_: self.toast("Saved"), self._fail,
+                                           key=r.key, value=r.get_text()))
+        self.lock_bindings[key] = row
+        return row
+
+    def _on_setting_switch(self, row, _p):
+        if not self._quiet:
+            rpc("settings.set", None, self._fail, key=row.key, value=row.get_active())
+
+    # ---- log ---------------------------------------------------------
+    def _build_log(self):
+        self.logbuf = Gtk.TextBuffer()
+        tags = {"error": "#e01b24", "warn": "#e5a50a", "info": "#26a269", "tool": None, "debug": "#9a9996"}
+        for k, col in tags.items():
+            if col:
+                self.logbuf.create_tag(k, foreground=col)
+        self.logbuf.create_tag("time", foreground="#9a9996")
+        view = Gtk.TextView(buffer=self.logbuf, editable=False, cursor_visible=False, monospace=True,
+                            wrap_mode=Gtk.WrapMode.WORD_CHAR, left_margin=12, right_margin=12, top_margin=8, bottom_margin=8)
+        self.logview = view
+        scroll = Gtk.ScrolledWindow(vexpand=True)
+        scroll.set_child(view)
+        self.log_scroll = scroll
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        bar = Gtk.Box(spacing=6, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
+        clear = Gtk.Button(label="Clear")
+        clear.connect("clicked", lambda *_: self.logbuf.set_text(""))
+        bar.append(clear)
+        box.append(bar)
+        box.append(scroll)
+        return box
+
+    def _append_log(self, entries):
+        for e in entries:
+            end = self.logbuf.get_end_iter()
+            self.logbuf.insert_with_tags_by_name(end, time.strftime("%H:%M:%S ", time.localtime(e["time"])), "time")
+            end = self.logbuf.get_end_iter()
+            if e["level"] in ("error", "warn", "info", "debug"):
+                self.logbuf.insert_with_tags_by_name(end, e["msg"] + "\n", e["level"])
+            else:
+                self.logbuf.insert(end, e["msg"] + "\n")
+        if entries:
+            adj = self.log_scroll.get_vadjustment()
+            GLib.idle_add(lambda: adj.set_value(adj.get_upper() - adj.get_page_size()))
+
+    # ---- actions -----------------------------------------------------
+    def toast(self, text):
+        self.toasts.add_toast(Adw.Toast(title=text, timeout=3))
+
+    def _fail(self, msg, daemon_down=False):
+        if daemon_down:
+            self._set_daemon(False, msg)
+        else:
+            self.toast(msg)
+
+    def _set_daemon(self, ok, msg=""):
+        self._daemon_ok = ok
+        self.banner.set_title("VPNMan daemon unavailable: %s" % msg if not ok else "")
+        self.banner.set_revealed(not ok)
+        for w in (self.main_btn, self.lock_switch, self.lock_now):
+            w.set_sensitive(ok)
+
+    def on_import(self, *_):
+        ProfileDialog(self, "import", self.protocols, on_done=lambda: self.refresh(full=True)).present()
+
+    def on_add(self, *_):
+        ProfileDialog(self, "add", self.protocols, on_done=lambda: self.refresh(full=True)).present()
+
+    def on_ping(self, *_):
+        self.ping_btn.set_sensitive(False)
+        self.ping_btn.set_label("Testing…")
+
+        def done(res):
+            self.latency = res
+            self.ping_btn.set_sensitive(True)
+            self.ping_btn.set_label("Test Latency")
+            self._update_latency()
+        rpc("latency", done, self._fail)
+
+    def _update_latency(self):
+        for pid, row in self._rows.items():
+            ms = self.latency.get(pid)
+            row.lat.set_label("%.0f ms" % ms if ms else ("timeout" if pid in self.latency else ""))
+
+    def connect_to(self, pid):
+        self.sel_id = pid
+        self.stack.set_visible_child_name("overview")
+        rpc("connect", lambda *_: self.refresh(), self._fail, ident=pid)
+
+    def on_main_button(self, *_):
+        st = self.status or {}
+        if st.get("state") in ACTIVE:
+            rpc("disconnect", lambda *_: self.refresh(), self._fail)
+        elif not self.profiles:
+            self.stack.set_visible_child_name("servers")
+            self.toast("Import a profile first")
+        else:
+            self.connect_to(self.sel_id or self.profiles[0]["id"])
+
+    def _on_server_selected(self, row, _p):
+        i = row.get_selected()
+        if not self._quiet and 0 <= i < len(self.profiles):
+            self.sel_id = self.profiles[i]["id"]
+
+    def _on_lock_toggled(self, row, _p):
+        if self._quiet:
+            return
+        rpc("netlock.enable" if row.get_active() else "netlock.disable", lambda *_: self.refresh(), self._fail)
+
+    # ---- data refresh --------------------------------------------------
+    def _tick(self):
+        self.refresh()
+        return True
+
+    def refresh(self, full=False):
+        rpc("status", self._on_status, self._fail)
+        rpc("logs", self._on_logs, None, since=self._log_seq)
+        if full:
+            rpc("profiles.list", self._on_profiles, None)
+            rpc("settings.get", self._on_settings, None)
+            if not self.protocols:
+                rpc("protocols", lambda r: setattr(self, "protocols", r), None)
+
+    def _on_logs(self, res):
+        self._log_seq = res["last"]
+        self._append_log(res["entries"])
+
+    def _on_profiles(self, profiles):
+        self.profiles = profiles
+        self._quiet = True
+        names = [p["name"] for p in profiles]
+        self.server_row.set_model(Gtk.StringList.new(names))
+        ids = [p["id"] for p in profiles]
+        if self.sel_id not in ids:
+            self.sel_id = ids[0] if ids else None
+        if self.sel_id:
+            self.server_row.set_selected(ids.index(self.sel_id))
+        self._quiet = False
+        child = self.listbox.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self.listbox.remove(child)
+            child = nxt
+        self._rows = {}
+        for p in profiles:
+            row = self._make_row(p)
+            self._rows[p["id"]] = row
+            self.listbox.append(row)
+        self._update_latency()
+        self.srv_stack.set_visible_child_name("list" if profiles else "empty")
+
+    def _on_settings(self, settings):
+        self.settings = settings
+        self._quiet = True
+        for key, row in self.lock_bindings.items():
+            sec, name = key.split(".")
+            val = settings[sec][name]
+            if isinstance(row, Adw.SwitchRow):
+                row.set_active(bool(val))
+            else:
+                row.set_text(", ".join(val))
+        self._quiet = False
+
+    def _on_status(self, st):
+        self._set_daemon(True)
+        old = self.status
+        self.status = st
+        state = st["state"]
+        active = state in ACTIVE
+        self._quiet = True
+        self.lock_switch.set_active(st["netlock"]["engaged"])
+        self.lock_now.set_active(st["netlock"]["engaged"])
+        self._quiet = False
+        self.server_row.set_sensitive(not active)
+        if state == "connected":
+            self.hero.set_icon_name("network-vpn-symbolic")
+            self.hero.set_title("Connected")
+            self.hero.set_description("%s · %s" % (st["profile"], st["protocol"]))
+        elif state in ("connecting", "reconnecting"):
+            self.hero.set_icon_name("network-vpn-acquiring-symbolic")
+            self.hero.set_title("Connecting…" if state == "connecting" else "Reconnecting…")
+            self.hero.set_description(st.get("message") or st["profile"] or "")
+        elif state == "error":
+            self.hero.set_icon_name("network-vpn-error-symbolic")
+            self.hero.set_title("Connection Failed")
+            self.hero.set_description(st.get("message") or "")
+        else:
+            self.hero.set_icon_name("network-vpn-disabled-symbolic")
+            self.hero.set_title("Not Connected")
+            self.hero.set_description("Your traffic is not protected." if not st["netlock"]["engaged"]
+                                      else "Network lock is engaged - traffic is blocked.")
+        self.main_btn.set_label("Disconnect" if active else "Connect")
+        for cls, on in (("suggested-action", not active), ("destructive-action", active)):
+            (self.main_btn.add_css_class if on else self.main_btn.remove_css_class)(cls)
+        self.stats.set_visible(state == "connected")
+        if state == "connected":
+            r = self.stat_rows
+            r["ip"].set_subtitle(st.get("public_ip") or "checking…")
+            r["iface"].set_subtitle(st.get("iface") or "–")
+            r["uptime"].set_subtitle(hms(st.get("uptime", 0)))
+            r["down"].set_subtitle("%s  (%s/s)" % (human(st["rx"]), human(st["rx_rate"])))
+            r["up"].set_subtitle("%s  (%s/s)" % (human(st["tx"]), human(st["tx_rate"])))
+        if state != self._last_state:
+            if self._last_state is not None:
+                self._notify(state, st)
+            self._last_state = state
+
+    def _notify(self, state, st):
+        if not self.settings.get("ui", {}).get("notifications", True):
+            return
+        msg = {"connected": "Connected to %s" % st.get("profile"), "disconnected": "Disconnected",
+               "error": "Connection failed: %s" % st.get("message"),
+               "reconnecting": "Connection lost - reconnecting"}.get(state)
+        if msg and not self.is_active():
+            n = Gio.Notification.new(APP_NAME)
+            n.set_body(msg)
+            self.get_application().send_notification("state", n)
+
+
+# ------------------------------------------------------------- preferences
+
+class PreferencesWindow(Adw.PreferencesWindow):
+    def __init__(self, parent, settings):
+        super().__init__(transient_for=parent, modal=True, search_enabled=False)
+        self.s = settings
+        self.set_title("Preferences")
+
+        page = Adw.PreferencesPage(title="Connection", icon_name="network-vpn-symbolic")
+        g = Adw.PreferencesGroup(title="Startup")
+        g.add(self._entry("connection.autoconnect", "Auto-connect on start",
+                          "off, last, fastest, or a profile name"))
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Reliability")
+        g.add(self._switch("connection.reconnect", "Reconnect automatically"))
+        g.add(self._spin("connection.retry_max", "Retries before giving up", 0, 20))
+        g.add(self._spin("connection.retry_delay", "Seconds between retries", 1, 120))
+        g.add(self._switch("connection.failover", "Fail over to next favourite"))
+        g.add(self._spin("connection.timeout", "Connection timeout (s)", 10, 300))
+        page.add(g)
+        g = Adw.PreferencesGroup(title="OpenVPN")
+        g.add(self._entry("connection.openvpn_args", "Extra arguments", "comma separated"))
+        page.add(g)
+        self.add(page)
+
+        page = Adw.PreferencesPage(title="DNS & Routes", icon_name="network-wired-symbolic")
+        g = Adw.PreferencesGroup(title="DNS")
+        g.add(self._switch("dns.force", "Use the VPN's DNS", "Prevents DNS leaks"))
+        g.add(self._entry("dns.servers", "Custom DNS servers", "comma separated, overrides pushed servers"))
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Checks")
+        g.add(self._switch("checks.tunnel", "Look up public IP after connecting"))
+        g.add(self._entry("checks.url", "Lookup URL"))
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Routes", description="Networks that bypass the VPN (IPv4, comma separated)")
+        row = Adw.EntryRow(title="Bypass networks", show_apply_button=True)
+        row.set_text(", ".join(r["ip"] for r in settings["routes"] if r.get("action") == "out"))
+        row.connect("apply", lambda r: self._set("routes", [{"ip": x.strip(), "action": "out"}
+                                                           for x in r.get_text().split(",") if x.strip()]))
+        g.add(row)
+        page.add(g)
+        self.add(page)
+
+        page = Adw.PreferencesPage(title="Events", icon_name="system-run-symbolic")
+        g = Adw.PreferencesGroup(title="Hooks", description="Shell commands run as root. Environment: VPNMAN_EVENT, "
+                                 "VPNMAN_PROFILE, VPNMAN_PROTOCOL, VPNMAN_IFACE")
+        for k, t in (("pre_connect", "Before connecting"), ("connected", "After connecting"),
+                     ("disconnected", "After disconnecting")):
+            g.add(self._entry("events." + k, t))
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Interface")
+        g.add(self._switch("ui.notifications", "Desktop notifications"))
+        page.add(g)
+        self.add(page)
+
+    def _val(self, key):
+        node = self.s
+        for p in key.split("."):
+            node = node[p]
+        return node
+
+    def _set(self, key, value):
+        rpc("settings.set", None, lambda m, *_: self.add_toast(Adw.Toast(title=m)), key=key, value=value)
+
+    def _switch(self, key, title, sub=""):
+        row = Adw.SwitchRow(title=title, subtitle=sub, active=bool(self._val(key)))
+        row.connect("notify::active", lambda r, _p: self._set(key, r.get_active()))
+        return row
+
+    def _spin(self, key, title, lo, hi):
+        row = Adw.SpinRow.new_with_range(lo, hi, 1)
+        row.set_title(title)
+        row.set_value(self._val(key))
+        row.connect("notify::value", lambda r, _p: self._set(key, int(r.get_value())))
+        return row
+
+    def _entry(self, key, title, sub=""):
+        v = self._val(key)
+        row = Adw.EntryRow(title=title + (" - " + sub if sub else ""), show_apply_button=True)
+        row.set_text(", ".join(v) if isinstance(v, list) else str(v))
+        row.connect("apply", lambda r: self._set(key, r.get_text()))
+        return row
+
+
+# ----------------------------------------------------------------------- app
+
+class Application(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        self.win = None
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        for name, cb, accel in (("preferences", self.on_prefs, "<primary>comma"), ("about", self.on_about, None),
+                                ("quit", lambda *_: self.quit(), "<primary>q")):
+            act = Gio.SimpleAction.new(name, None)
+            act.connect("activate", cb)
+            self.add_action(act)
+            if accel:
+                self.set_accels_for_action("app." + name, [accel])
+
+    def do_activate(self):
+        if not self.win:
+            self.win = MainWindow(self)
+        self.win.present()
+
+    def on_prefs(self, *_):
+        PreferencesWindow(self.win, self.win.settings or Client().call("settings.get")).present()
+
+    def on_about(self, *_):
+        kw = dict(application_name=APP_NAME, application_icon=APP_ID, version=__version__,
+                  developer_name="VPNMan contributors", license_type=Gtk.License.MIT_X11,
+                  website="https://github.com/Smiley-McSmiles/VPNMan", comments="Multi-protocol VPN manager with a kill switch.")
+        if hasattr(Adw, "AboutDialog"):
+            Adw.AboutDialog(**kw).present(self.win)
+        else:
+            Adw.AboutWindow(transient_for=self.win, **kw).present()
+
+
+def run():
+    return Application().run(sys.argv[:1])
+
+
+if __name__ == "__main__":
+    sys.exit(run())

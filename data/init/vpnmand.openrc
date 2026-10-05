@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+description="VPNMan VPN manager daemon"
+command="@BINDIR@/vpnmand"
+command_background=true
+pidfile="/run/vpnman/vpnmand.pid"
+output_log="/var/log/vpnmand.out"
+error_log="/var/log/vpnmand.out"
+extra_started_commands="reload"
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath -d -m 0755 /run/vpnman
+}
+
+reload() {
+	ebegin "Reloading ${RC_SVCNAME}"
+	start-stop-daemon --signal HUP --pidfile "${pidfile}"
+	eend $?
+}

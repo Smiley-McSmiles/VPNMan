@@ -1,0 +1,32 @@
+.TH VPNMAN 1 "2026" "vpnman 1.0.0" "User Commands"
+.SH NAME
+vpnman \- multi-protocol VPN manager with a kill switch
+.SH SYNOPSIS
+.B vpnman
+[\fICOMMAND\fR] [\fIARGS\fR]
+.br
+.B vpnmand
+.SH DESCRIPTION
+Run without arguments in a terminal for an interactive menu. \fBvpnmand\fR is the privileged background daemon
+(managed by systemd, runit, OpenRC, SysV init or OpenBSD rc.d) that owns tunnels and the network lock;
+\fBvpnman\fR and the GTK application talk to it over a Unix socket available to members of the \fBvpnman\fR group.
+.SH COMMANDS
+.TP
+status, list, connect, disconnect, import, add, remove, edit, fav, block, ping
+Manage profiles and the connection.
+.TP
+lock on|off|status
+Engage or release the network lock (kill switch).
+.TP
+get, set
+Read or change settings (dotted keys such as netlock.allow_lan).
+.TP
+logs [-f], protocols, doctor, service, daemon, gui
+Diagnostics, service control and the GTK interface.
+.SH FILES
+.TP
+/etc/vpnman/
+Profiles, settings and state (root only).
+.TP
+/run/vpnman/vpnman.sock
+Daemon socket.

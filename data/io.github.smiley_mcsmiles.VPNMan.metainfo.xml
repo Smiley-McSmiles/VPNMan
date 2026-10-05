@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.smiley_mcsmiles.VPNMan</id>
+  <name>VPNMan</name>
+  <summary>Multi-protocol VPN manager with a kill switch</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>VPNMan manages OpenVPN, WireGuard, AmneziaWG, OpenConnect, Fortinet, SSTP, IKEv2, Tailscale and more from one
+    libadwaita application or an interactive command line, with a built-in network lock (kill switch) for nftables,
+    iptables and pf.</p>
+  </description>
+  <launchable type="desktop-id">io.github.smiley_mcsmiles.VPNMan.desktop</launchable>
+  <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
+  <content_rating type="oars-1.1"/>
+  <releases><release version="1.0.0" date="2026-10-05"/></releases>
+  <requires><display_length compare="ge">360</display_length></requires>
+</component>

@@ -1,0 +1,17 @@
+[Unit]
+Description=VPNMan VPN manager daemon
+Documentation=man:vpnman(1)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/vpnmand
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
