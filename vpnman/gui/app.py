@@ -398,7 +398,6 @@ class MainWindow(Adw.ApplicationWindow):
         header.pack_start(add_btn)
         main_menu = Gio.Menu()
         main_menu.append("Preferences", "app.preferences")
-        main_menu.append("Donate…", "app.donate")
         main_menu.append("About VPNMan", "app.about")
         main_menu.append("Quit", "app.quit")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=main_menu,
@@ -1153,7 +1152,7 @@ class Application(Adw.Application):
         Adw.Application.do_startup(self)
         ensure_icons()
         for name, cb, accel in (("preferences", self.on_prefs, "<primary>comma"), ("about", self.on_about, None),
-                                ("donate", self.on_donate, None), ("quit", lambda *_: self.quit(), "<primary>q")):
+                                ("quit", lambda *_: self.quit(), "<primary>q")):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", cb)
             self.add_action(act)
@@ -1332,10 +1331,6 @@ class Application(Adw.Application):
         ctrl.connect("key-pressed", lambda c, k, code, st: win.close() if k == Gdk.KEY_Escape else False)
         win.add_controller(ctrl)
         win.present()
-
-    def on_donate(self, *_):
-        """Main-menu entry: the same options without going through the About dialog."""
-        self._donation_window(self.win)
 
     def _copy_donation_text(self, text):
         Gdk.Display.get_default().get_clipboard().set(text)
