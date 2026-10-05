@@ -16,6 +16,9 @@
   <url type="donation">https://github.com/Smiley-McSmiles/VPNMan</url>
   <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
   <content_rating type="oars-1.1"/>
-  <releases><release version="1.0.0" date="2026-10-05"/></releases>
+  <releases>
+    <release version="1.0.1" date="2026-10-05"/>
+    <release version="1.0.0" date="2026-10-05"/>
+  </releases>
   <requires><display_length compare="ge">360</display_length></requires>
 </component>
