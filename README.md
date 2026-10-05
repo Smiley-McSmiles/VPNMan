@@ -1,5 +1,14 @@
 # VPNMan
 
+<p align="center">
+  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.0-blue.svg?style=flat-square" alt="Version 1.0.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="MIT License"></a>
+  <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
+  <a href="https://gtk.org"><img src="https://img.shields.io/badge/toolkit-GTK4%20%7C%20Libadwaita-red.svg?style=flat-square" alt="GTK4 Libadwaita"></a>
+  <a href="https://github.com/Smiley-McSmiles/VPNMan"><img src="https://img.shields.io/badge/kill%20switch-nftables%20%7C%20iptables%20%7C%20pf-orange.svg?style=flat-square" alt="Kill switch: nftables, iptables, pf"></a>
+  <a href="https://github.com/Smiley-McSmiles/VPNMan"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20OpenBSD%20%7C%20FreeBSD-lightgrey.svg?style=flat-square" alt="Linux, OpenBSD & FreeBSD"></a>
+</p>
+
 A multi-protocol VPN manager with a **GTK4 / libadwaita** app, an **interactive CLI**, and a built-in
 **network lock (kill switch)**. Runs on systemd, runit, OpenRC and SysV-init Linux, and on OpenBSD/FreeBSD.
 
