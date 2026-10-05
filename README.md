@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.1-blue.svg?style=flat-square" alt="Version 1.0.1"></a>
+  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.2-blue.svg?style=flat-square" alt="Version 1.0.2"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
   <a href="https://gtk.org"><img src="https://img.shields.io/badge/toolkit-GTK4%20%7C%20Libadwaita-red.svg?style=flat-square" alt="GTK4 Libadwaita"></a>
@@ -125,7 +125,9 @@ session inside is still authenticated); a warning is logged.
   background service, so the tunnel (and the kill switch, with `netlock.persist`) comes up right after boot, before login.
   It waits up to `connection.autoconnect_wait` seconds for a network and then keeps retrying instead of giving up.
 * **App at login** – *Preferences → Tray & Login* or `vpnman autostart --login-app on`. Starts `vpnman-gtk --background`.
-* **Tray** – GTK 4 has no tray API, so VPNMan implements the StatusNotifierItem D-Bus protocol (with a dbusmenu menu)
+* **Tray** – GTK 4 has no tray API. On **Cinnamon** VPNMan starts a tiny GTK 3 helper that uses `XApp.StatusIcon`, Cinnamon's
+  native tray API (needs the `xapp` package and the *XApp Status Applet* on the panel; if the helper cannot start it falls
+  back to StatusNotifier). On every other desktop VPNMan implements the StatusNotifierItem D-Bus protocol (with a dbusmenu menu)
   itself. It works on KDE Plasma, XFCE, Cinnamon, MATE, LXQt, Budgie, Deepin and Pantheon out of the box, and on
   **GNOME with the "AppIndicator and KStatusNotifierItem Support" extension** (preinstalled on Ubuntu; Fedora/Arch:
   `gnome-shell-extension-appindicator`). Closing the window hides it to the tray; the VPN lives in the daemon and is never
@@ -136,6 +138,12 @@ session inside is still authenticated); a warning is logged.
   the GUI, `--background` shows the window instead of hiding it, and if the tray disappears while hidden the window comes back.
 
 ## Install
+
+`install.sh` puts the program under `/usr/local` and, because some desktop sessions set `XDG_DATA_DIRS` without
+`/usr/local/share` (so the menu/dock never sees the launcher or icon), also **links the launcher and icons into
+`/usr/share`** (`--no-system-links` to skip, removed again by `--uninstall`). `vpnman doctor` shows whether your current
+session can see the launcher and icons and what your tray environment offers; `sudo vpnman doctor --fix` repairs an older
+install without reinstalling.
 
 ```sh
 sh install.sh --check              # no root needed: report what is missing on this machine (Python, GTK/libadwaita, VPN tools, firewall, init)

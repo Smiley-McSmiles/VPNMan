@@ -275,6 +275,41 @@ class InstallTests(unittest.TestCase):
                     bad.append(p)
         self.assertEqual(bad, [])
 
+    def test_system_links_make_launcher_visible_in_usr_share(self):
+        import subprocess
+        if os.geteuid() != 0:
+            self.skipTest("install.sh needs root")
+        prefix, sysshare = tempfile.mkdtemp(dir=TMP), tempfile.mkdtemp(dir=TMP)
+        env = dict(os.environ, VPNMAN_SYSTEM_SHARE=sysshare)
+        app = "io.github.smiley_mcsmiles.VPNMan"
+        r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", prefix, "--init", "none", "--no-post"],
+                           env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        desktop = os.path.join(sysshare, "applications", app + ".desktop")
+        self.assertTrue(os.path.islink(desktop))
+        self.assertEqual(os.path.realpath(desktop), os.path.realpath(os.path.join(prefix, "share/applications", app + ".desktop")))
+        for rel in ("pixmaps/%s.svg" % app, "icons/hicolor/48x48/apps/%s.png" % app,
+                    "icons/hicolor/symbolic/apps/%s-connected-symbolic.svg" % app):
+            self.assertTrue(os.path.exists(os.path.join(sysshare, rel)), rel)
+        # a package-owned real file must never be replaced
+        os.unlink(desktop)
+        open(desktop, "w").write("real")
+        subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", prefix, "--init", "none", "--no-post"],
+                       env=env, capture_output=True, text=True)
+        self.assertEqual(open(desktop).read(), "real")
+        os.unlink(desktop)
+        # and --no-system-links really skips them
+        r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", prefix, "--init", "none", "--no-post",
+                            "--no-system-links"], env=env, capture_output=True, text=True)
+        self.assertFalse(os.path.lexists(desktop))
+        # uninstall removes our links again
+        subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", prefix, "--init", "none", "--no-post"],
+                       env=env, capture_output=True, text=True)
+        self.assertTrue(os.path.islink(desktop))
+        subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", prefix, "--init", "none", "--uninstall"],
+                       env=env, capture_output=True, text=True)
+        self.assertFalse(os.path.lexists(desktop))
+
     def test_check_mode_installs_nothing(self):
         import subprocess
         r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--check"], capture_output=True, text=True)
@@ -379,6 +414,28 @@ class GuiTests(unittest.TestCase):
         r = subprocess.run([xvfb, "-a", shutil_which(py), os.path.join(os.path.dirname(__file__), "gui_check.py")],
                            capture_output=True, text=True, timeout=90, env=env)
         self.assertIn("GUI OK", r.stdout, r.stdout + r.stderr[-1500:])
+
+
+class CinnamonTrayTests(unittest.TestCase):
+    def test_xapp_helper_against_emulated_panel_applet(self):
+        import subprocess
+        runner, xvfb = shutil_which("dbus-run-session"), shutil_which("xvfb-run")
+        py = None
+        for cand in ("python3", "python3.12", "python3.11", "python3.13", "python3.10"):
+            exe = shutil_which(cand)
+            if exe and subprocess.run([exe, "-c", "import gi;gi.require_version('Gtk','3.0');gi.require_version('XApp','1.0');"
+                                       "gi.require_version('Gtk','4.0')"], capture_output=True).returncode != 0:
+                # the helper only needs GTK 3 + XApp; the driver needs GTK 4 - probe them separately
+                pass
+            if exe and subprocess.run([exe, "-c", "import gi;gi.require_version('Gtk','3.0');gi.require_version('XApp','1.0');"
+                                       "from gi.repository import XApp"], capture_output=True).returncode == 0:
+                py = exe
+                break
+        if not (runner and xvfb and py):
+            self.skipTest("needs dbus-run-session, xvfb-run and PyGObject with GTK 3 + XApp typelibs")
+        r = subprocess.run([xvfb, "-a", runner, "--", py, os.path.join(os.path.dirname(__file__), "helper_check.py")],
+                           capture_output=True, text=True, timeout=90, env=dict(os.environ, GTK_A11Y="none"))
+        self.assertIn("HELPER OK", r.stdout, r.stdout + r.stderr[-1500:])
 
 
 class TrayTests(unittest.TestCase):
