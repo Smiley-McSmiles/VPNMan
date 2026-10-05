@@ -1,5 +1,6 @@
 #!/sbin/openrc-run
 description="VPNMan VPN manager daemon"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 command="@BINDIR@/vpnmand"
 command_background=true
 pidfile="/run/vpnman/vpnmand.pid"

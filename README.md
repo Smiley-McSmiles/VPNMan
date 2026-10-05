@@ -114,10 +114,17 @@ session inside is still authenticated); a warning is logged.
 ## Install
 
 ```sh
-sudo ./install.sh --install-deps   # optional: pulls dependencies via apt/dnf/pacman/xbps/apk/zypper/pkg_add/pkg
-sudo ./install.sh                  # installs to /usr/local, sets up + starts the service for your init system
+sh install.sh --check              # no root needed: report what is missing on this machine (Python, GTK/libadwaita, VPN tools, firewall, init)
+sudo sh install.sh --install-deps  # optional: pulls dependencies via apt/dnf/pacman/xbps/apk/zypper/pkg_add/pkg
+sudo sh install.sh                 # installs to /usr/local, sets up + starts the service for your init system
+                                   # (no sudo? use `doas sh install.sh` or `su -c 'sh install.sh'`)
 sudo ./install.sh --prefix /usr --uninstall [--purge]
 ```
+
+The installer is defensive: it sets `umask 022` and fixes file modes (so a strict root umask cannot make the install
+unreadable for normal users), extends `PATH` with the `sbin` directories, treats service/group/cache steps as non-fatal
+warnings, waits for the daemon to answer and prints diagnostics if it does not, and tells you which dependencies are missing
+(with the exact install command for your package manager). On Void: `xbps-install -S python3-gobject gtk4 libadwaita`.
 
 After installing (script, `.deb` or `.rpm`) just open **VPNMan** from your application menu.
 `install.sh` is POSIX `sh` (works on OpenBSD's ksh), detects systemd / runit / OpenRC / SysV / OpenBSD rc.d /

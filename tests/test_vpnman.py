@@ -256,6 +256,36 @@ class InstallTests(unittest.TestCase):
         mode = stat.S_IMODE(os.stat(os.path.join(d, "etc/vpnman")).st_mode)
         self.assertEqual(mode, 0o700)
 
+    def test_strict_umask_still_readable(self):
+        import subprocess
+        dest = tempfile.mkdtemp(dir=TMP)
+        # a root shell with umask 077 (and an executable-bit-less source copy) must not yield an unusable install
+        src = tempfile.mkdtemp(dir=TMP)
+        subprocess.run(["cp", "-R", os.path.join(self.ROOT, "vpnman"), os.path.join(self.ROOT, "data"),
+                        os.path.join(self.ROOT, "install.sh"), src], check=True)
+        subprocess.run(["chmod", "-R", "go-rwx", src], check=True)
+        r = subprocess.run(["sh", "-c", "umask 077; sh %s/install.sh --prefix /usr --init runit --no-post" % src],
+                           env=dict(os.environ, DESTDIR=dest), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        bad = []
+        for base, dirs, files in os.walk(os.path.join(dest, "usr")):
+            for n in dirs + files:
+                p = os.path.join(base, n)
+                if not os.path.islink(p) and not os.stat(p).st_mode & stat.S_IROTH:
+                    bad.append(p)
+        self.assertEqual(bad, [])
+
+    def test_check_mode_installs_nothing(self):
+        import subprocess
+        r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--check"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Checking this machine", r.stdout)
+
+    def test_unknown_option_rejected(self):
+        import subprocess
+        r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--bogus"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+
     def test_icon_fallbacks_installed(self):
         d = self.stage("systemd")
         app = "io.github.smiley_mcsmiles.VPNMan"

@@ -9,6 +9,8 @@
 # Description:       Manages VPN tunnels and the network lock (kill switch).
 ### END INIT INFO
 
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+export PATH
 DAEMON=@BINDIR@/vpnmand
 NAME=vpnmand
 PIDFILE=/run/vpnman/vpnmand.pid
