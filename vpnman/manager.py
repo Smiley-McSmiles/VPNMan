@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, dns, netlock, paths, stunnel
+from . import __version__, backends, dns, netlock, paths, schedule, split, stunnel
 from . import platform as plat
 from .profiles import ProfileError, ProfileStore, public_view
 from .settings import Settings
@@ -103,6 +103,10 @@ class Manager:
         self._state_cache = {}
         self._current = None      # (ctx, iface) of the live tunnel
         self._reserved_ifnames = set()
+        self._split = split.SplitTunnel(lambda: split.names_from_settings(self.settings.get("split")), self.log.add)
+        self._split_ctx = None    # (gateway, device, dns) of the live session, while the tunnel is up
+        self._split_cur = None    # (gateway, device) the running bypass was built for
+        self.scheduler = schedule.Scheduler(self)
 
     # ------------------------------------------------------------------ status
     @staticmethod
@@ -149,7 +153,8 @@ class Manager:
         return self._fw
 
     def _lock_apply(self):
-        spec = netlock.Spec.from_settings(self.settings, self._lock_endpoints, self._lock_ifaces)
+        spec = netlock.Spec.from_settings(self.settings, self._lock_endpoints, self._lock_ifaces,
+                                          split.MARK if self._split.active else 0)
         self._firewall().apply(spec)
         if not self.lock_engaged:
             self.log.add("info", "Network lock engaged (%s)" % self._fw.name)
@@ -171,6 +176,7 @@ class Manager:
             self.lock_manual = True
             self._save_state(lock_manual=True)
             self._lock_apply()
+            self._split_sync()
         return self.netlock_status()
 
     def netlock_disable(self):
@@ -178,6 +184,7 @@ class Manager:
             self.lock_manual = False
             self._save_state(lock_manual=False)
             self._lock_remove()
+            self._split_sync()
         return self.netlock_status()
 
     def _lock_wanted(self):
@@ -192,11 +199,15 @@ class Manager:
         else:
             self._lock_endpoints.clear()
             self._lock_remove()
+        self._split_sync()
 
     # --------------------------------------------------------------- start / stop
     def startup(self):
         """Called once by the daemon: crash recovery and boot-time behaviour."""
         dns.restore_resolv_conf()
+        if plat.os_family() == "linux":
+            split.cleanup()
+        self.scheduler.start()
         st = self._load_state()
         self.lock_manual = bool(st.get("lock_manual"))
         if self.lock_manual or self.settings.get("netlock.persist"):
@@ -204,6 +215,7 @@ class Manager:
                 self._lock_apply()
             except Exception as e:  # noqa: BLE001
                 self.log.add("error", "Could not restore network lock: %s" % e)
+            self._split_sync()
         auto = self.settings.get("connection.autoconnect")
         if auto and auto != "off":
             self._autoconnect(auto)
@@ -223,7 +235,9 @@ class Manager:
             self.log.add("error", "Auto-connect failed: %s" % e)
 
     def shutdown(self):
+        self.scheduler.stop()
         self.disconnect()
+        self._split_stop()
 
     def connect(self, ident=None, fastest=False, last=False, persistent=False):
         profiles = self.store.list()
@@ -409,6 +423,7 @@ class Manager:
                 if stop.is_set():
                     return False
             gw, gwif = plat.default_gateway()
+            orig_dns = system_dns(gw)
             before = set(plat.list_interfaces())
             self.log.add("info", "Connecting to %s (%s)" % (profile["name"], backend.label))
             self._set(message="Connecting")
@@ -489,6 +504,8 @@ class Manager:
             self._apply_dns(ctx, primary)
             self._current = (ctx, primary)
             routes_added = self._apply_routes(gw)
+            self._split_ctx = (gw, gwif, orig_dns)
+            self._split_sync()
             up = True
             self._set(state="connected", iface=primary, since=time.time(), message="", attempt=0)
             self.log.add("info", "Connected to %s via %s" % (profile["name"], primary or "(no interface)"))
@@ -544,6 +561,8 @@ class Manager:
                 except Exception as e:  # noqa: BLE001
                     self.log.add("warn", "cleanup failed: %s" % e)
             self._remove_routes(routes_added)
+            self._split_ctx = None
+            self._split_sync()              # stays up for the whitelisted apps if the kill switch is still engaged
             self._dns.restore()
             if up:
                 self._hook("disconnected", ctx)
@@ -632,6 +651,105 @@ class Manager:
         if cur and self._status["state"] == "connected":
             self._dns.restore()
             self._apply_dns(*cur)
+
+    # ---------------------------------------------------------- app bypass
+    def _split_context(self):
+        """(gateway, device, dns) the bypassed apps should use, or None when no bypass is needed right now.
+
+        It is needed while the tunnel is up and while the kill switch is engaged: the whitelisted apps are
+        exempt from the lock, so they keep working when the VPN drops or is switched off."""
+        sp = self.settings.get("split")
+        if not sp["enabled"] or not sp["apps"]:
+            return None
+        if self._split_ctx:
+            return self._split_ctx
+        if self.lock_engaged:
+            gw, dev = plat.default_gateway()
+            if dev:
+                return (gw, dev, system_dns(gw))
+        return None
+
+    def _split_sync(self):
+        """Bring the app bypass in line with the connection / kill switch state (idempotent)."""
+        with self._mlock:
+            was = (self._split.active, self._split_cur)
+            ctx = self._split_context()
+            if not ctx:
+                if self._split.active:
+                    self._split.stop()
+                    self._split_cur = None
+                    self.log.add("info", "App bypass stopped")
+            elif not (self._split.active and self._split_cur == ctx[:2]):
+                try:
+                    self._split.start(*ctx)
+                    self._split_cur = ctx[:2]
+                    apps = ", ".join(a["name"] for a in self.settings.get("split.apps"))
+                    self.log.add("info", "App bypass active for: %s%s" % (
+                        apps, "" if self._split_ctx else " (VPN down, network lock keeps them online)"))
+                except Exception as e:  # noqa: BLE001
+                    self._split_cur = None
+                    self.log.add("warn", "App bypass unavailable: %s" % e)
+            if (self._split.active, self._split_cur) != was and self.lock_engaged:
+                try:
+                    self._lock_apply()          # let the kill switch pass (or stop passing) the bypassed traffic
+                except Exception as e:  # noqa: BLE001
+                    self.log.add("error", "Network lock update failed: %s" % e)
+
+    def _split_stop(self):
+        with self._mlock:
+            if self._split.active:
+                self._split.stop()
+                self._split_cur = None
+                self.log.add("info", "App bypass stopped")
+
+    def split_changed(self):
+        """The whitelist changed: apply it now."""
+        self._split_sync()
+
+    def split_status(self):
+        ok, why = split.supported()
+        sp = self.settings.get("split")
+        return {"supported": ok, "reason": why, "active": self._split.active, "enabled": sp["enabled"],
+                "apps": sp["apps"], "moved": len(self._split.moved)}
+
+    def split_set(self, apps=None, enabled=None):
+        tree = {}
+        if enabled is not None:
+            tree["enabled"] = bool(enabled)
+        if apps is not None:
+            clean = []
+            for a in apps:
+                m = [str(x) for x in a.get("match", []) if str(x).strip()]
+                if not m or not a.get("name"):
+                    raise ProfileError("every app needs a name and at least one program name")
+                clean.append({"id": str(a.get("id") or "custom:" + m[0]), "name": str(a["name"]), "match": m,
+                              "icon": str(a.get("icon") or "")})
+            tree["apps"] = clean
+        self.settings.update({"split": tree})
+        self.split_changed()
+        return self.split_status()
+
+    # ------------------------------------------------------------ schedule
+    def schedule_status(self):
+        sc = self.settings.get("schedule")
+        t = time.localtime()
+        out = []
+        for e in sc["entries"]:
+            nxt = schedule.next_start(e, t)
+            out.append(dict(e, active=schedule.is_active(e, t), next_in=nxt, summary=schedule.describe(e)))
+        return {"enabled": sc["enabled"], "entries": out, "owned": self.scheduler.owned}
+
+    def schedule_set(self, entries=None, enabled=None):
+        tree = {}
+        if enabled is not None:
+            tree["enabled"] = bool(enabled)
+        if entries is not None:
+            try:
+                tree["entries"] = [schedule.clean(e) for e in entries]
+            except (ValueError, TypeError) as e:
+                raise ProfileError(str(e))
+        self.settings.update({"schedule": tree})
+        return self.schedule_status()
 
     def _apply_routes(self, gw):
         added = []
@@ -770,6 +888,25 @@ class Manager:
 
     def profiles(self):
         return [public_view(p) for p in self.store.list()]
+
+
+def system_dns(gw=None):
+    """The resolvers in use before the tunnel comes up (what bypassed apps should keep using)."""
+    found = []
+    try:
+        with open(os.environ.get("VPNMAN_RESOLV_CONF", "/etc/resolv.conf")) as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "nameserver":
+                    try:
+                        ip = ipaddress.ip_address(parts[1])
+                    except ValueError:
+                        continue
+                    if ip.version == 4 and not ip.is_loopback and parts[1] not in found:
+                        found.append(parts[1])
+    except OSError:
+        pass
+    return found or ([gw] if gw else [])
 
 
 def sum_stats(ifaces):

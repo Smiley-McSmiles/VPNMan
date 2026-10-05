@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.2-blue.svg?style=flat-square" alt="Version 1.0.2"></a>
+  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.3-blue.svg?style=flat-square" alt="Version 1.0.3"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
   <a href="https://gtk.org"><img src="https://img.shields.io/badge/toolkit-GTK4%20%7C%20Libadwaita-red.svg?style=flat-square" alt="GTK4 Libadwaita"></a>
@@ -97,6 +97,8 @@ session inside is still authenticated); a warning is logged.
 | Lock engaged *before* connecting, kept while reconnecting, endpoint pre-resolved (no DNS needed under lock) | ✔ |
 | DNS leak protection + DNS picker (provider, Cloudflare, Google, Quad9, OpenDNS, AdGuard, Mullvad, custom; switches live; `vpnman dns`) | ✔ |
 | Custom routes that bypass the tunnel | ✔ (IPv4) |
+| **Schedule**: connect (and optionally disconnect) at set times on chosen days, overnight windows, per-entry server; runs in the daemon | ✔ |
+| **App bypass** (per-app split tunnel): whitelist installed apps such as Steam or Firefox so they ignore the VPN | ✔ (Linux: nftables + cgroup v2) |
 | Event hooks (pre-connect / connected / disconnected) | ✔ |
 | Standard interface names: `tun0`, `tun1`, … (`tapN` for tap, `wgN` for WireGuard on BSD); first free index is used | ✔ |
 | Live stats (up/down, rates, duration), public-IP check, log viewer | ✔ |
@@ -107,6 +109,38 @@ session inside is still authenticated); a warning is logged.
 | Start the tray app at login (XDG autostart; GNOME, KDE, XFCE, …) | ✔ |
 | AirVPN-specific API (server list/keys fetch, per-country scoring) | ✘ – import their generated configs instead |
 | Proxy / Tor / SSH / SSL tunnels as transports | ✘ |
+
+## Schedule and app bypass
+
+* **Schedule** – the *Schedule* tab (or `vpnman schedule`). Each entry has days, a start time, an optional end time and a
+  server (last used, fastest, or a profile). The daemon connects when a window opens and disconnects when it closes
+  (only if the schedule made the connection, so a manual connection is never cut off). Windows that end before they start
+  run past midnight. Times are the computer's local time.
+
+  ```sh
+  vpnman schedule add --days mon-fri --start 08:00 --end 18:00 --profile Zurich --name Work
+  vpnman schedule add --days weekends --start 22:00          # connect only, stay connected
+  vpnman schedule                                             # list, shows "next in …"
+  vpnman schedule disable Work | enable Work | remove Work | off
+  ```
+
+* **App bypass** – the *Apps* tab (or `vpnman bypass`). Pick installed applications (read from the `.desktop` launchers,
+  including Flatpak and Snap) or type a program name. While the VPN is up, those programs *and everything they start*
+  keep using your normal connection; all other traffic stays in the tunnel and under the kill switch.
+
+  ```sh
+  vpnman bypass add steam firefox
+  vpnman bypass available game        # search installed apps
+  vpnman bypass remove steam | on | off
+  ```
+
+  How it works (Linux): the daemon moves matching running programs into a dedicated cgroup v2, nftables marks that
+  cgroup's packets, a policy-routing rule sends marked packets out of the physical gateway (masqueraded, with the
+  system's original DNS), and the kill switch lets the marked traffic through. The apps are exempt from the kill switch
+  too: while the lock is engaged they stay online even if the VPN drops or is switched off. No program has to be started specially,
+  and programs started later are picked up within about two seconds. Needs `nft`, `ip` and a pure cgroup v2 system
+  (`/sys/fs/cgroup` is cgroup2 - the default on Fedora, Ubuntu 22.04+, Debian 11+, Arch, Void with elogind/systemd).
+  The Apps tab says so when the machine can't do it. Not available on the BSDs (pf cannot match by program).
 
 ## Auto-start and the system tray
 
@@ -180,6 +214,8 @@ vpnman set netlock.persist true      # keep the lock after disconnect and across
 vpnman set netlock.whitelist_out 203.0.113.0/24
 vpnman set dns.servers 9.9.9.9,149.112.112.112
 vpnman set events.connected '/usr/local/bin/my-hook'
+vpnman schedule add --days mon-fri --start 08:00 --end 18:00   # timed auto-connect
+vpnman bypass add steam firefox      # these apps skip the VPN
 vpnman logs -f
 vpnman doctor
 vpnman-gtk                   # or `vpnman gui`

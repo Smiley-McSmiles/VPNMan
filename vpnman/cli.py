@@ -333,6 +333,98 @@ class Cli:
         print("DNS updated (applied immediately if connected).")
         return 0
 
+    # ------------------------------------------------------- app bypass / schedule
+    def cmd_bypass(self, a):
+        from . import apps as appmod
+        act, rest = a.action or "list", a.items
+        st = self.call("split.status")
+        cur = st["apps"]
+        if act == "list":
+            print("App bypass: %s%s" % ("on" if st["enabled"] else "off", " (active)" if st["active"] else ""))
+            if not st["supported"]:
+                print(yellow("  not available here: %s" % st["reason"]))
+            for ap in cur:
+                print("  %-28s %s" % (ap["name"], dim(", ".join(ap["match"]))))
+            if not cur:
+                print("  no apps - add one with: vpnman bypass add firefox steam")
+            return 0
+        if act in ("on", "off"):
+            self.call("split.set", enabled=(act == "on"))
+            print("App bypass %s." % ("enabled" if act == "on" else "disabled"))
+            return 0
+        if act == "available":
+            flt = " ".join(rest).lower()
+            for ap in appmod.discover():
+                if flt in ap["name"].lower() or any(flt in m.lower() for m in ap["match"]):
+                    print("  %-32s %s" % (ap["name"], dim(", ".join(ap["match"]))))
+            return 0
+        if not rest:
+            raise RpcError("name one or more apps (see: vpnman bypass available)")
+        if act == "add":
+            installed = appmod.discover()
+            for want in rest:
+                low = want.lower()
+                hit = [x for x in installed if low == x["name"].lower() or low in [m.lower() for m in x["match"]]] \
+                    or [x for x in installed if low in x["name"].lower()][:1]
+                entry = ({k: hit[0][k] for k in ("id", "name", "match", "icon")} if hit else appmod.custom_entry(want))
+                if all(c["id"] != entry["id"] for c in cur):
+                    cur.append(entry)
+                print("  + %s (%s)" % (entry["name"], ", ".join(entry["match"])))
+        elif act in ("remove", "rm"):
+            for want in rest:
+                low = want.lower()
+                keep = [c for c in cur if low not in (c["name"].lower(), c["id"].lower()) and low not in
+                        [m.lower() for m in c["match"]]]
+                if len(keep) == len(cur):
+                    print(yellow("  not in the list: %s" % want))
+                cur = keep
+        else:
+            raise RpcError("unknown action %r (list, add, remove, available, on, off)" % act)
+        self.call("split.set", apps=cur)
+        print("Saved. Programs are moved out of the VPN within a couple of seconds of the tunnel coming up.")
+        return 0
+
+    def cmd_schedule(self, a):
+        from . import schedule as sch
+        act = a.action or "list"
+        st = self.call("schedule.status")
+        entries = st["entries"]
+        keys = ("id", "name", "enabled", "days", "start", "end", "profile")
+        if act == "list":
+            print("Schedule: %s" % ("on" if st["enabled"] else "off"))
+            for e in entries:
+                state = green("active now") if e["active"] else (dim("next in %s" % _eta(e["next_in"])) if e["next_in"] else "")
+                print("  %-8s %-3s %-22s %-30s %s %s" % (e["id"], "on" if e["enabled"] else "off", e["name"] or "-",
+                                                         e["summary"], e["profile"] or "last used", state))
+            if not entries:
+                print("  nothing scheduled - e.g.: vpnman schedule add --days weekdays --start 08:00 --end 18:00")
+            return 0
+        if act in ("on", "off"):
+            self.call("schedule.set", enabled=(act == "on"))
+            print("Schedule %s." % ("enabled" if act == "on" else "disabled"))
+            return 0
+        if act == "add":
+            if not a.start:
+                raise RpcError("--start HH:MM is required")
+            entries.append({"name": a.name or "", "enabled": True, "days": _parse_days(a.days),
+                            "start": a.start, "end": a.end or "", "profile": a.profile or ""})
+        elif act in ("remove", "rm", "enable", "disable"):
+            if not a.target:
+                raise RpcError("give the schedule id or name (see: vpnman schedule)")
+            hit = [e for e in entries if a.target in (e["id"], e["name"])]
+            if not hit:
+                raise RpcError("no schedule %r" % a.target)
+            if act in ("remove", "rm"):
+                entries = [e for e in entries if e not in hit]
+            else:
+                for e in hit:
+                    e["enabled"] = act == "enable"
+        else:
+            raise RpcError("unknown action %r (list, add, remove, enable, disable, on, off)" % act)
+        self.call("schedule.set", entries=[{k: e[k] for k in keys if k in e} for e in entries])
+        print("Saved.")
+        return 0
+
     def cmd_get(self, a):
         v = self.call("settings.get", key=a.key)
         if a.key and not isinstance(v, (dict, list)):
@@ -469,10 +561,32 @@ def pick(items, label, render):
     return None
 
 
+def _parse_days(text):
+    from . import schedule as sch
+    t = (text or "all").lower().replace(" ", "")
+    named = {"all": range(7), "daily": range(7), "everyday": range(7), "weekdays": range(5), "weekends": (5, 6)}
+    if t in named:
+        return list(named[t])
+    out = []
+    for part in t.split(","):
+        if "-" in part:
+            lo, hi = (sch.DAYS.index(x[:3].capitalize()) for x in part.split("-", 1))
+            out += list(range(lo, hi + 1)) if lo <= hi else list(range(lo, 7)) + list(range(0, hi + 1))
+        else:
+            out.append(sch.DAYS.index(part[:3].capitalize()))
+    return sorted(set(out))
+
+
+def _eta(minutes):
+    h, m = divmod(int(minutes), 60)
+    d, h = divmod(h, 24)
+    return " ".join(x for x in ("%dd" % d if d else "", "%dh" % h if h else "", "%dm" % m if m or not (d or h) else "") if x)
+
+
 def interactive(cli):
     menu = [("c", "Connect"), ("f", "Connect to fastest"), ("d", "Disconnect"), ("s", "Servers / profiles"),
             ("l", "Network lock (kill switch)"), ("i", "Import profile(s)"), ("p", "Preferences"),
-            ("g", "View log"), ("x", "System check"), ("q", "Quit")]
+            ("a", "App bypass"), ("t", "Schedule"), ("g", "View log"), ("x", "System check"), ("q", "Quit")]
     while True:
         try:
             print("\n" + bold("VPNMan %s" % __version__))
@@ -514,6 +628,8 @@ def interactive(cli):
                     cli.cmd_import(ns)
             elif ch == "p":
                 _settings_menu(cli)
+            elif ch in ("a", "t"):
+                _sub_menu(cli, ch)
             elif ch == "g":
                 cli.cmd_logs(argparse.Namespace(lines=40, follow=False))
             elif ch == "x":
@@ -523,6 +639,40 @@ def interactive(cli):
         except KeyboardInterrupt:
             print()
             return 0
+
+
+def _sub_menu(cli, ch):
+    """Tiny prompt wrapper around `vpnman bypass` / `vpnman schedule`."""
+    if ch == "a":
+        cli.cmd_bypass(argparse.Namespace(action="list", items=[]))
+        act = ask("[a]dd  [r]emove  [v] browse installed apps  [o]n/off  (enter = back)").lower()[:1]
+        if act == "a":
+            cli.cmd_bypass(argparse.Namespace(action="add", items=ask("App name(s), space separated").split()))
+        elif act == "r":
+            cli.cmd_bypass(argparse.Namespace(action="remove", items=ask("App name(s) to remove").split()))
+        elif act == "v":
+            cli.cmd_bypass(argparse.Namespace(action="available", items=ask("Filter (optional)").split()))
+        elif act == "o":
+            on = ask("Turn app bypass on? (Y/n)").lower() != "n"
+            cli.cmd_bypass(argparse.Namespace(action="on" if on else "off", items=[]))
+    else:
+        cli.cmd_schedule(argparse.Namespace(action="list"))
+        act = ask("[a]dd  [r]emove  [e]nable/disable one  [o]n/off all  (enter = back)").lower()[:1]
+        if act == "a":
+            ns = argparse.Namespace(action="add", target=None, name=ask("Name (optional)"),
+                                    days=ask("Days (all, weekdays, weekends, mon-fri, mon,wed)", "all"),
+                                    start=ask("Connect at (HH:MM)"), end=ask("Disconnect at (HH:MM, empty = stay connected)"),
+                                    profile=ask("Profile (empty = last used, or 'fastest')"))
+            cli.cmd_schedule(ns)
+        elif act == "r":
+            cli.cmd_schedule(argparse.Namespace(action="remove", target=ask("Schedule id or name")))
+        elif act == "e":
+            tgt = ask("Schedule id or name")
+            on = ask("Enable? (Y/n)").lower() != "n"
+            cli.cmd_schedule(argparse.Namespace(action="enable" if on else "disable", target=tgt))
+        elif act == "o":
+            on = ask("Turn the schedule on? (Y/n)").lower() != "n"
+            cli.cmd_schedule(argparse.Namespace(action="on" if on else "off", target=None))
 
 
 def _render_profile(p):
@@ -614,6 +764,13 @@ def build_parser():
     s.add_argument("target", nargs="?", help="off | last | fastest | profile name")
     s.add_argument("--login-app", choices=["on", "off"], help="start the tray app at login (this user)")
     s = add("dns", "choose the DNS servers used while connected"); s.add_argument("choice", nargs="*")
+    s = add("bypass", "apps that skip the VPN (split tunnel): list|add|remove|available|on|off", aliases=["split"])
+    s.add_argument("action", nargs="?"); s.add_argument("items", nargs="*")
+    s = add("schedule", "connect the VPN at set times: list|add|remove|enable|disable|on|off")
+    s.add_argument("action", nargs="?"); s.add_argument("target", nargs="?")
+    s.add_argument("--name"); s.add_argument("--days", help="all | weekdays | weekends | mon,wed | mon-fri")
+    s.add_argument("--start", metavar="HH:MM"); s.add_argument("--end", metavar="HH:MM", help="disconnect again at this time")
+    s.add_argument("--profile", help="profile name/id, 'fastest' or 'last' (default: last used)")
     s = add("get", "show settings"); s.add_argument("key", nargs="?")
     s = add("set", "change a setting"); s.add_argument("key"); s.add_argument("value")
     s = add("logs", "show daemon log"); s.add_argument("-f", "--follow", action="store_true")
@@ -633,7 +790,7 @@ def build_parser():
     return ap
 
 
-ALIASES = {"ls": "list", "up": "connect", "down": "disconnect", "rm": "remove", "menu": "shell"}
+ALIASES = {"split": "bypass", "ls": "list", "up": "connect", "down": "disconnect", "rm": "remove", "menu": "shell"}
 
 
 def main(argv=None):
