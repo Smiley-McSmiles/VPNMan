@@ -1,6 +1,9 @@
 # VPNMan
 
+
+
 <p align="center">
+  ![icon](data/icons/hicolor/scalable/apps/io.github.smiley_mcsmiles.VPNMan.svg)
   <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.0-blue.svg?style=flat-square" alt="Version 1.0.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
@@ -11,9 +14,6 @@
 
 A multi-protocol VPN manager with a **GTK4 / libadwaita** app, an **interactive CLI**, and a built-in
 **network lock (kill switch)**. Runs on systemd, runit, OpenRC and SysV-init Linux, and on OpenBSD/FreeBSD.
-
-![icon](data/icons/hicolor/scalable/apps/io.github.smiley_mcsmiles.VPNMan.svg)
-
 ## Architecture
 
 ```
