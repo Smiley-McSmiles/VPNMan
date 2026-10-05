@@ -39,6 +39,16 @@ class App(A.Application):
                   "netlock": {"engaged": False, "backend": None}}
             w._on_status(st)
             assert w.server_row.get_selected() == 1, "dropdown must show the connected server"
+            self.on_about()
+            GLib.timeout_add(1500, about_check)
+            return False
+        def about_check():
+            rows = [x for x in self._iter_descendants(self.get_windows()[0] if False else w) if False]
+            found = []
+            for top in [w] + list(Gtk.Window.list_toplevels()):
+                found += [x for x in self._iter_descendants(top) if getattr(x, "_vpnman_donate", False)]
+            assert found, "About dialog has no Donate row"
+            assert not [1 for x in self._iter_descendants(found[0].get_parent()) if False]
             print("GUI OK")
             self.quit()
             return False

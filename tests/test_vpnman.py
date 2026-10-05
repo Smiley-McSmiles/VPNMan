@@ -317,6 +317,32 @@ class InstallTests(unittest.TestCase):
             self.assertIn(key, text)
 
 
+class CreditsTests(unittest.TestCase):
+    def test_attribution_and_donation_options(self):
+        from vpnman import credits
+        self.assertEqual(credits.DEVELOPER_NAME, "WOOSAH")
+        self.assertIn("WOOSAH (Lead Architect)", credits.DEVELOPERS)
+        self.assertEqual([k for k, _ in credits.DONATION_OPTIONS], ["BTC", "XMR", "CashApp"])
+        values = dict(credits.DONATION_OPTIONS)
+        self.assertTrue(values["BTC"].startswith("bc1"))
+        self.assertEqual(len(values["XMR"]), 95)                 # a Monero main address is 95 characters
+        self.assertTrue(values["CashApp"].startswith("$"))
+        # the About dialog parses the copyright as markup: a bare "&" would make GTK drop the whole string
+        self.assertIn("&amp;", credits.COPYRIGHT_MARKUP)
+        self.assertNotIn("&amp;", credits.COPYRIGHT)
+
+    def test_cli_about(self):
+        import io
+        import contextlib
+        from vpnman import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli.main(["about"]), 0)
+        out = buf.getvalue()
+        self.assertIn("WOOSAH (Lead Architect)", out)
+        self.assertIn("$SmileyMcSmiles", out)
+
+
 class GuiTests(unittest.TestCase):
     def test_server_dropdown(self):
         import subprocess
