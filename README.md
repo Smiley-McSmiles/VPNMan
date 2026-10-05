@@ -31,7 +31,7 @@ The same credits are in the app (*main menu → About VPNMan*) and on the comman
 
 ## ☕ Support the project
 
-If VPNMan is useful to you, you can support its development. In the app open *main menu → Donate…* (or *About → Donate*) and
+If VPNMan is useful to you, you can support its development. In the app open *main menu → About VPNMan → Donate* and
 tap an option to copy it to the clipboard; `vpnman about` prints them too.
 
 | Option | Copy |
