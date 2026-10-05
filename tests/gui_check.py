@@ -47,6 +47,23 @@ class App(A.Application):
             for top in [w] + list(Gtk.Window.list_toplevels()):
                 found += [x for x in self._iter_descendants(top) if getattr(x, "_vpnman_donate", False)]
             assert found, "About dialog has no Donate row"
+            # an old process that survives an upgrade (it lives on in the tray) must replace itself with the new code
+            calls = []
+            real_execv, real_version = A.os.execv, A.__version__
+            A.os.execv = lambda exe, argv: calls.append(argv)
+            A.__version__ = "0.0.1"
+            try:
+                self._restart_if_stale()
+            finally:
+                A.os.execv, A.__version__ = real_execv, real_version
+            assert calls and calls[0][1:] == ["-m", "vpnman", "gui"], "stale GUI did not restart itself: %r" % calls
+            calls.clear()
+            A.os.execv = lambda exe, argv: calls.append(argv)
+            try:
+                self._restart_if_stale()                    # same version on disk: must NOT restart
+            finally:
+                A.os.execv = real_execv
+            assert not calls, "restarted although the version matches"
             print("GUI OK")
             self.quit()
             return False

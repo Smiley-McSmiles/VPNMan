@@ -93,11 +93,13 @@ if [ "$1" = configure ]; then
     if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || :; fi
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload || true
-        systemctl enable --now vpnmand || true
+        systemctl enable vpnmand || true
+        systemctl restart vpnmand || true      # restart (not just start): an upgrade must replace the running daemon
     elif [ -x /etc/init.d/vpnmand ]; then
         update-rc.d vpnmand defaults >/dev/null 2>&1 || true
-        /etc/init.d/vpnmand start || true
+        /etc/init.d/vpnmand restart || true
     fi
+    pkill -f -- '^[^ ]*python[0-9.]* -m vpnman gui' >/dev/null 2>&1 || true
 fi
 exit 0
 PST
@@ -181,6 +183,8 @@ if [ -d /run/systemd/system ]; then
     systemctl enable vpnmand.service >/dev/null 2>&1 || :
     systemctl restart vpnmand.service >/dev/null 2>&1 || :
 fi
+# a GUI left running in the tray would keep executing the old version
+pkill -f -- '^[^ ]*python[0-9.]* -m vpnman gui' >/dev/null 2>&1 || :
 
 %preun
 if [ "\$1" -eq 0 ] && [ -d /run/systemd/system ]; then

@@ -1159,7 +1159,29 @@ class Application(Adw.Application):
             if accel:
                 self.set_accels_for_action("app." + name, [accel])
 
+    @staticmethod
+    def _version_on_disk():
+        import re
+        try:
+            with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "__init__.py")) as fh:
+                m = re.search(r'__version__\s*=\s*"([^"]+)"', fh.read())
+            return m.group(1) if m else None
+        except OSError:
+            return None
+
+    def _restart_if_stale(self):
+        """Started again after an upgrade while the OLD process is still alive (it lives on in the tray):
+        replace it with the new code instead of re-showing the old window."""
+        disk = self._version_on_disk()
+        if disk and disk != __version__ and os.environ.get("VPNMAN_NO_REEXEC") != "1":
+            print("vpnman: version %s is installed, restarting the running %s instance" % (disk, __version__), file=sys.stderr)
+            if self.tray:
+                self.tray.stop()
+            os.execv(sys.executable, [sys.executable, "-m", "vpnman", "gui"])
+
     def do_activate(self):
+        if self.win is not None:
+            self._restart_if_stale()
         if self.win is None:
             self.win = MainWindow(self)
             self._setup_tray()
