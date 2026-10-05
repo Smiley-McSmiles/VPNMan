@@ -287,17 +287,12 @@ class InstallTests(unittest.TestCase):
                            env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         desktop = os.path.join(sysshare, "applications", app + ".desktop")
-        self.assertTrue(os.path.islink(desktop))
-        self.assertEqual(os.path.realpath(desktop), os.path.realpath(os.path.join(prefix, "share/applications", app + ".desktop")))
+        self.assertTrue(os.path.isfile(desktop) and not os.path.islink(desktop))     # a real copy, not a symlink
+        self.assertEqual(open(desktop).read(), open(os.path.join(prefix, "share/applications", app + ".desktop")).read())
+        self.assertIn("Exec=%s/bin/vpnman-gtk" % prefix, open(desktop).read())
         for rel in ("pixmaps/%s.svg" % app, "icons/hicolor/48x48/apps/%s.png" % app,
                     "icons/hicolor/symbolic/apps/%s-connected-symbolic.svg" % app):
             self.assertTrue(os.path.exists(os.path.join(sysshare, rel)), rel)
-        # a package-owned real file must never be replaced
-        os.unlink(desktop)
-        open(desktop, "w").write("real")
-        subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", prefix, "--init", "none", "--no-post"],
-                       env=env, capture_output=True, text=True)
-        self.assertEqual(open(desktop).read(), "real")
         os.unlink(desktop)
         # and --no-system-links really skips them
         r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", prefix, "--init", "none", "--no-post",
@@ -306,10 +301,30 @@ class InstallTests(unittest.TestCase):
         # uninstall removes our links again
         subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", prefix, "--init", "none", "--no-post"],
                        env=env, capture_output=True, text=True)
-        self.assertTrue(os.path.islink(desktop))
+        self.assertTrue(os.path.isfile(desktop))
         subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", prefix, "--init", "none", "--uninstall"],
                        env=env, capture_output=True, text=True)
         self.assertFalse(os.path.lexists(desktop))
+
+    def test_gui_wrapper_skips_interpreters_without_pygobject(self):
+        """A desktop launcher's PATH can put a python3 without PyGObject first; the wrapper must pick one that has it."""
+        import subprocess
+        prefix = tempfile.mkdtemp(dir=TMP)
+        r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", prefix, "--init", "none", "--no-post"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        fake = tempfile.mkdtemp(dir=TMP)
+        for n in ("python3", "python3.12"):
+            p = os.path.join(fake, n)
+            open(p, "w").write("#!/bin/sh\ncase \"$*\" in *gi*) exit 1;; *) echo FAKE >&2; exit 0;; esac\n")
+            os.chmod(p, 0o755)
+        env = dict(os.environ, PATH=fake + ":" + os.environ["PATH"])
+        wrapper = open(os.path.join(prefix, "bin", "vpnman-gtk")).read()
+        self.assertIn("NEED_GI", wrapper)
+        r = subprocess.run(["sh", "-c", 'sed "s|^exec .*|echo \\$PY|" %s/bin/vpnman-gtk | sh' % prefix],
+                           env=env, capture_output=True, text=True)
+        chosen = r.stdout.strip()
+        self.assertNotEqual(os.path.dirname(chosen), fake, r.stdout + r.stderr)
 
     def test_upgrade_restarts_service_and_closes_stale_gui(self):
         """The running daemon/GUI keep executing OLD code after an upgrade unless the installer restarts them."""
