@@ -74,6 +74,7 @@ session inside is still authenticated); a warning is logged.
 | DNS leak protection + DNS picker (provider, Cloudflare, Google, Quad9, OpenDNS, AdGuard, Mullvad, custom; switches live; `vpnman dns`) | ✔ |
 | Custom routes that bypass the tunnel | ✔ (IPv4) |
 | Event hooks (pre-connect / connected / disconnected) | ✔ |
+| Standard interface names: `tun0`, `tun1`, … (`tapN` for tap, `wgN` for WireGuard on BSD); first free index is used | ✔ |
 | Live stats (up/down, rates, duration), public-IP check, log viewer | ✔ |
 | Credentials per profile (stored root-only) | ✔ |
 | Desktop notifications | ✔ |

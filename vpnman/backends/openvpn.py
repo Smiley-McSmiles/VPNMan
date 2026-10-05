@@ -56,6 +56,13 @@ class OpenVPN(Backend):
         wrapped = stunnel.endpoint(profile)
         return wrapped or super().endpoints(profile)
 
+    def iface_prefix(self, profile, profile_dir):
+        try:
+            with open("%s/%s" % (profile_dir, profile["config"]), errors="replace") as fh:
+                return self._dev(fh.read())
+        except (OSError, KeyError):
+            return "tun"
+
     def _dev(self, text):
         m = re.search(r"^\s*dev\s+(tun|tap)", text, re.M)
         return m.group(1) if m else "tun"

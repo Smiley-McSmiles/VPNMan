@@ -189,6 +189,43 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(backends.get("custom").validate(profiles.new_profile("c", "custom")))
 
 
+class IfnameTests(unittest.TestCase):
+    def setUp(self):
+        from vpnman import platform as plat
+        self.plat = plat
+        self.saved = (plat.os_family, plat.list_interfaces)
+        plat.os_family = lambda: "linux"
+        self.mgr = Manager(store=profiles.ProfileStore(TMP + "/ifstore"), settings=settings.Settings(TMP + "/if.json"))
+
+    def tearDown(self):
+        self.plat.os_family, self.plat.list_interfaces = self.saved
+
+    def make(self, proto, cfg_text="client\ndev tun\n"):
+        p = profiles.new_profile("n", proto, config="c.conf")
+        self.mgr.store.save(p, {"c.conf": cfg_text})
+        return p
+
+    def test_tun_numbering(self):
+        p = self.make("openvpn")
+        b = backends.get("openvpn")
+        self.plat.list_interfaces = lambda: ["lo", "eth0"]
+        self.assertEqual(self.mgr._ifname_for(b, p), "tun0")
+        self.plat.list_interfaces = lambda: ["lo", "tun0", "tun1"]
+        self.assertEqual(self.mgr._ifname_for(b, p), "tun2")
+        self.mgr._reserved_ifnames.add("tun2")
+        self.assertEqual(self.mgr._ifname_for(b, p), "tun3")
+
+    def test_tap_and_wireguard(self):
+        self.plat.list_interfaces = lambda: ["lo"]
+        self.assertEqual(self.mgr._ifname_for(backends.get("openvpn"), self.make("openvpn", "dev tap\n")), "tap0")
+        self.assertEqual(self.mgr._ifname_for(backends.get("wireguard"), self.make("wireguard", "[Interface]\n")), "tun0")
+
+    def test_bsd_wireguard_uses_wgN(self):
+        self.plat.os_family = lambda: "openbsd"
+        self.plat.list_interfaces = lambda: ["lo0", "wg0"]
+        self.assertEqual(self.mgr._ifname_for(backends.get("wireguard"), self.make("wireguard")), "wg1")
+
+
 class StunnelTests(unittest.TestCase):
     def prof(self, **st):
         return profiles.new_profile("s", "openvpn", options={"stunnel": dict({"enabled": True, "host": "h.example.com"}, **st)})

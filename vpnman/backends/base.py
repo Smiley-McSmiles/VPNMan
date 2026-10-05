@@ -62,6 +62,10 @@ class Backend:
         """Extract profile fields from a config file."""
         return {}
 
+    def iface_prefix(self, profile, profile_dir):
+        """Interface name prefix (an index is appended): tun0, tun1, ..."""
+        return "tun"
+
     # ---- profile helpers
     def endpoints(self, profile):
         """List of (host, port, proto) the tunnel itself must reach."""

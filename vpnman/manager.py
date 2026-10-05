@@ -102,6 +102,7 @@ class Manager:
         self._status = self._blank_status()
         self._state_cache = {}
         self._current = None      # (ctx, iface) of the live tunnel
+        self._reserved_ifnames = set()
 
     # ------------------------------------------------------------------ status
     @staticmethod
@@ -326,14 +327,23 @@ class Manager:
         return None
 
     def _ifname_for(self, backend, profile):
+        """Standard interface names: tun0, tun1, ... (tapN for OpenVPN tap, wgN for WireGuard on BSD).
+
+        The first index that no live interface and no other connection uses is chosen.
+        """
         fam = plat.os_family()
-        if backend.id in ("wireguard", "amneziawg") and fam != "linux":
-            used = set(plat.list_interfaces())
-            for i in range(100):
-                if "wg%d" % i not in used:
-                    return "wg%d" % i
-        if fam == "linux" and backend.named_iface:
-            return "vpnm" + profile["id"][:8]
+        if fam == "linux":
+            if not backend.named_iface:
+                return None
+            prefix = backend.iface_prefix(profile, self.store.dir_of(profile))
+        elif backend.id in ("wireguard", "amneziawg"):
+            prefix = "wg"             # BSD wg(4) only accepts wgN
+        else:
+            return None
+        used = set(plat.list_interfaces()) | set(self._reserved_ifnames)
+        for i in range(256):
+            if "%s%d" % (prefix, i) not in used:
+                return "%s%d" % (prefix, i)
         return None
 
     def _session(self, profile, stop):
@@ -349,6 +359,8 @@ class Manager:
         os.makedirs(workdir, mode=0o700)
         ctx = backends.Context(profile, self.store.dir_of(profile), workdir,
                                self._ifname_for(backend, profile), s)
+        if ctx.ifname:
+            self._reserved_ifnames.add(ctx.ifname)
         up = False
         ready = threading.Event()
         proc = None
@@ -493,6 +505,7 @@ class Manager:
         finally:
             self._proc = None
             self._current = None
+            self._reserved_ifnames.discard(ctx.ifname)
             if proc is not None and proc.poll() is None:
                 _terminate(proc)
             if reader:
