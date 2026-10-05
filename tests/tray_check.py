@@ -72,6 +72,8 @@ def client():
         kids = layout[2]
         assert [k[1].get("label") for k in kids] == ["Show", None, "Connect"], kids
         assert kids[1][1]["type"] == "separator"
+        grp = call("/MenuBar", "com.canonical.dbusmenu", "GetGroupProperties", GLib.Variant("(aias)", ([0, 1], []))).unpack()[0]
+        assert [g[0] for g in grp] == [0, 1] and grp[0][1]["children-display"] == "submenu", grp
         call("/MenuBar", "com.canonical.dbusmenu", "Event", GLib.Variant("(isvu)", (3, "clicked", GLib.Variant("s", ""), 0)))
         call("/StatusNotifierItem", "org.kde.StatusNotifierItem", "Activate", GLib.Variant("(ii)", (0, 0)))
         state["connected"] = True

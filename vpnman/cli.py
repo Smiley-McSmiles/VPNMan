@@ -428,6 +428,11 @@ class Cli:
         from . import daemon
         return daemon.run()
 
+    def cmd_about(self, a):
+        from . import credits
+        print(credits.about_text())
+        return 0
+
     def cmd_gui(self, a):
         from .gui.app import run
         return run(["vpnman-gtk"] + (["--background"] if a.background else []))
@@ -617,6 +622,7 @@ def build_parser():
     add("daemon", "run the daemon in the foreground (root)")
     s = add("gui", "open the GTK4/libadwaita app")
     s.add_argument("--background", action="store_true", help="start minimised to the system tray")
+    add("about", "credits, license and ways to support the project")
     add("shell", "interactive menu", aliases=["menu"])
     return ap
 

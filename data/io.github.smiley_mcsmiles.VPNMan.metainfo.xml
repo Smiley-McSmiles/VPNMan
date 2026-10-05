@@ -3,6 +3,7 @@
   <id>io.github.smiley_mcsmiles.VPNMan</id>
   <name>VPNMan</name>
   <summary>Multi-protocol VPN manager with a kill switch</summary>
+  <developer id="io.github.smiley_mcsmiles"><name>WOOSAH</name></developer>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <description>
@@ -11,8 +12,13 @@
     iptables and pf.</p>
   </description>
   <launchable type="desktop-id">io.github.smiley_mcsmiles.VPNMan.desktop</launchable>
+  <url type="bugtracker">https://github.com/Smiley-McSmiles/VPNMan/issues</url>
+  <url type="donation">https://github.com/Smiley-McSmiles/VPNMan</url>
   <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
   <content_rating type="oars-1.1"/>
-  <releases><release version="1.0.0" date="2026-10-05"/></releases>
+  <releases>
+    <release version="1.0.1" date="2026-10-05"/>
+    <release version="1.0.0" date="2026-10-05"/>
+  </releases>
   <requires><display_length compare="ge">360</display_length></requires>
 </component>

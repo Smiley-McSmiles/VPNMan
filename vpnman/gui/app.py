@@ -16,7 +16,7 @@ except (ImportError, ValueError) as exc:  # pragma: no cover
 
 import json
 
-from .. import APP_ID, APP_NAME, __version__, autostart, profiles as prof
+from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof
 from .tray import Tray
 from ..settings import DNS_PRESETS, DEFAULTS
 from ..ipc import Client, DaemonUnavailable, RpcError
@@ -398,6 +398,7 @@ class MainWindow(Adw.ApplicationWindow):
         header.pack_start(add_btn)
         main_menu = Gio.Menu()
         main_menu.append("Preferences", "app.preferences")
+        main_menu.append("Donate…", "app.donate")
         main_menu.append("About VPNMan", "app.about")
         main_menu.append("Quit", "app.quit")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=main_menu,
@@ -1148,7 +1149,7 @@ class Application(Adw.Application):
         Adw.Application.do_startup(self)
         ensure_icons()
         for name, cb, accel in (("preferences", self.on_prefs, "<primary>comma"), ("about", self.on_about, None),
-                                ("quit", lambda *_: self.quit(), "<primary>q")):
+                                ("donate", self.on_donate, None), ("quit", lambda *_: self.quit(), "<primary>q")):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", cb)
             self.add_action(act)
@@ -1212,19 +1213,126 @@ class Application(Adw.Application):
             self.win._set_daemon(False, msg) if down else None
         rpc("settings.get", show, fail)
 
+    # ---- About / attribution / donations (same layout as GPGMan) --------
     def on_about(self, *_):
         kw = dict(application_name=APP_NAME, application_icon=APP_ID, version=__version__,
-                  developer_name="VPNMan contributors", license_type=Gtk.License.MIT_X11,
-                  website="https://github.com/Smiley-McSmiles/VPNMan", comments="Multi-protocol VPN manager with a kill switch.")
+                  developer_name=credits.DEVELOPER_NAME, developers=credits.DEVELOPERS,
+                  copyright=credits.COPYRIGHT_MARKUP, comments=credits.COMMENTS, website=credits.WEBSITE,
+                  issue_url=credits.ISSUE_URL, support_url=credits.SUPPORT_URL,
+                  license_type=Gtk.License.MIT_X11)
         if hasattr(Adw, "AboutDialog"):
-            Adw.AboutDialog(**kw).present(self.win)
+            dialog = Adw.AboutDialog(**kw)
+            dialog.present(self.win)
         else:
-            Adw.AboutWindow(transient_for=self.win, **kw).present()
+            dialog = Adw.AboutWindow(transient_for=self.win, **kw)
+            ctrl = Gtk.EventControllerKey.new()
+            ctrl.connect("key-pressed", lambda c, k, code, st: dialog.close() if k == Gdk.KEY_Escape else False)
+            dialog.add_controller(ctrl)
+            dialog.present()
+        # The about dialogs have no API for custom rows, so insert one between "Credits" and "Legal"
+        # once the list exists (it is built lazily); give up quietly if the layout differs.
+        tries = {"n": 0}
+
+        def attempt():
+            tries["n"] += 1
+            if self._add_donation_row(dialog) or tries["n"] >= 10:
+                return False
+            return True
+        if attempt():
+            GLib.timeout_add(150, attempt)
+
+    @staticmethod
+    def _iter_descendants(widget):
+        child = widget.get_first_child()
+        while child is not None:
+            yield child
+            yield from Application._iter_descendants(child)
+            child = child.get_next_sibling()
+
+    def _add_donation_row(self, dialog):
+        try:
+            def row_for(text):
+                for w in self._iter_descendants(dialog):
+                    if isinstance(w, Gtk.Label) and w.get_text().strip() == text:
+                        parent = w.get_parent()
+                        while parent is not None and not isinstance(parent, Gtk.ListBoxRow):
+                            parent = parent.get_parent()
+                        if parent is not None and isinstance(parent.get_parent(), Gtk.ListBox):
+                            return parent
+                return None
+            legal, creds = row_for("Legal"), row_for("Credits")
+            if legal is None or creds is None or legal.get_parent() is not creds.get_parent():
+                return False
+            listbox = legal.get_parent()
+            for w in self._iter_descendants(listbox):          # already added (retry race)
+                if getattr(w, "_vpnman_donate", False):
+                    return True
+            row = Adw.ActionRow(title=credits.DONATION_BUTTON_LABEL, activatable=True)
+            row._vpnman_donate = True
+            row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+            row.connect("activated", lambda _r: self._open_donation_page(dialog))
+            listbox.insert(row, legal.get_index())
+            return True
+        except Exception as exc:  # noqa: BLE001
+            print("Warning: could not add donation row to About dialog: %s" % exc, file=sys.stderr)
+            return False
+
+    def _donation_content(self):
+        group = Adw.PreferencesGroup(description="Tap an option to copy it to the clipboard.")
+        for title, text in credits.DONATION_OPTIONS:
+            row = Adw.ActionRow(title=title, subtitle=text if len(text) < 40 else text[:18] + "…" + text[-10:],
+                                activatable=True)
+            row.add_suffix(Gtk.Image.new_from_icon_name("edit-copy-symbolic"))
+            row.connect("activated", lambda _r, t=text: self._copy_donation_text(t))
+            group.add(row)
+        clamp = Adw.Clamp(maximum_size=480, margin_top=18, margin_bottom=18, margin_start=12, margin_end=12)
+        clamp.set_child(group)
+        return clamp
+
+    def _open_donation_page(self, dialog):
+        """Push a sub-page inside the About dialog, like Credits / Legal."""
+        nav = next((w for w in self._iter_descendants(dialog) if isinstance(w, Adw.NavigationView)), None) \
+            if hasattr(Adw, "NavigationView") else None
+        if nav is not None:
+            toolbar = Adw.ToolbarView()
+            toolbar.add_top_bar(Adw.HeaderBar())
+            scrolled = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+            scrolled.set_child(self._donation_content())
+            toolbar.set_content(scrolled)
+            nav.push(Adw.NavigationPage.new(toolbar, credits.DONATION_PAGE_TITLE))
+        else:
+            self._donation_window(dialog)
+
+    def _donation_window(self, parent):
+        win = Adw.Window(transient_for=parent if isinstance(parent, Gtk.Window) else self.win, modal=True,
+                         title=credits.DONATION_PAGE_TITLE, default_width=420, default_height=320)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(Adw.HeaderBar())
+        box.append(self._donation_content())
+        win.set_content(box)
+        ctrl = Gtk.EventControllerKey.new()
+        ctrl.connect("key-pressed", lambda c, k, code, st: win.close() if k == Gdk.KEY_Escape else False)
+        win.add_controller(ctrl)
+        win.present()
+
+    def on_donate(self, *_):
+        """Main-menu entry: the same options without going through the About dialog."""
+        self._donation_window(self.win)
+
+    def _copy_donation_text(self, text):
+        Gdk.Display.get_default().get_clipboard().set(text)
+        if self.win:
+            self.win.toast("Copied to clipboard.")
+
+
+def set_process_identity():
+    """X11 desktops (Cinnamon, MATE, XFCE, ...) match a window to its launcher/dock entry by WM_CLASS, which GTK derives
+    from the program name. Started as `python3 -m vpnman` that would be "python3", so the window would not match the
+    .desktop file (StartupWMClass) -> a duplicate dock icon and no icon on the running app. Wayland uses the app id."""
+    GLib.set_prgname(APP_ID)
+    GLib.set_application_name(APP_NAME)
 
 
 def run(argv=None):
+    set_process_identity()
     return Application().run(argv if argv is not None else sys.argv)
-
-
-if __name__ == "__main__":
-    sys.exit(run())

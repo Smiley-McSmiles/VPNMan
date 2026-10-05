@@ -24,7 +24,7 @@ warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # Files that make up the program, shared by every package type.
-SRC_ITEMS=(vpnman data install.sh package.sh README.md LICENSE tests)
+SRC_ITEMS=(vpnman data packaging install.sh package.sh README.md LICENSE tests)
 
 stage() {  # stage <destdir> <init>
     local dest=$1 init=$2
@@ -43,6 +43,9 @@ build_tar() {
     mkdir -p "$t"
     for i in "${SRC_ITEMS[@]}"; do [ -e "$i" ] && cp -R "$i" "$t/"; done
     find "$t" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+    # normalise modes so the archive installs correctly whatever the packager's umask was
+    chmod -R u+rwX,go+rX,go-w "$t"
+    chmod 755 "$t/install.sh" "$t/package.sh"
     tar -C "$BUILD" -czf "$DIST/$SRCNAME.tar.gz" "$SRCNAME"
     log "  -> dist/$SRCNAME.tar.gz"
 }

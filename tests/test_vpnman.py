@@ -256,6 +256,36 @@ class InstallTests(unittest.TestCase):
         mode = stat.S_IMODE(os.stat(os.path.join(d, "etc/vpnman")).st_mode)
         self.assertEqual(mode, 0o700)
 
+    def test_strict_umask_still_readable(self):
+        import subprocess
+        dest = tempfile.mkdtemp(dir=TMP)
+        # a root shell with umask 077 (and an executable-bit-less source copy) must not yield an unusable install
+        src = tempfile.mkdtemp(dir=TMP)
+        subprocess.run(["cp", "-R", os.path.join(self.ROOT, "vpnman"), os.path.join(self.ROOT, "data"),
+                        os.path.join(self.ROOT, "install.sh"), src], check=True)
+        subprocess.run(["chmod", "-R", "go-rwx", src], check=True)
+        r = subprocess.run(["sh", "-c", "umask 077; sh %s/install.sh --prefix /usr --init runit --no-post" % src],
+                           env=dict(os.environ, DESTDIR=dest), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        bad = []
+        for base, dirs, files in os.walk(os.path.join(dest, "usr")):
+            for n in dirs + files:
+                p = os.path.join(base, n)
+                if not os.path.islink(p) and not os.stat(p).st_mode & stat.S_IROTH:
+                    bad.append(p)
+        self.assertEqual(bad, [])
+
+    def test_check_mode_installs_nothing(self):
+        import subprocess
+        r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--check"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Checking this machine", r.stdout)
+
+    def test_unknown_option_rejected(self):
+        import subprocess
+        r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--bogus"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+
     def test_icon_fallbacks_installed(self):
         d = self.stage("systemd")
         app = "io.github.smiley_mcsmiles.VPNMan"
@@ -285,6 +315,55 @@ class InstallTests(unittest.TestCase):
         text = open(os.path.join(self.ROOT, "data/init/vpnmand.sysv")).read()
         for key in ("Provides:", "Required-Start:", "Default-Start:", "Short-Description:"):
             self.assertIn(key, text)
+
+
+class DesktopIntegrationTests(unittest.TestCase):
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def test_wm_class_matches_launcher(self):
+        """Cinnamon/MATE/XFCE (X11) match windows to dock entries via WM_CLASS == StartupWMClass."""
+        desktop = open(os.path.join(self.ROOT, "data/io.github.smiley_mcsmiles.VPNMan.desktop")).read()
+        wm = [l.split("=", 1)[1].strip() for l in desktop.splitlines() if l.startswith("StartupWMClass=")][0]
+        icon = [l.split("=", 1)[1].strip() for l in desktop.splitlines() if l.startswith("Icon=")][0]
+        from vpnman import APP_ID
+        self.assertEqual(wm, APP_ID)
+        self.assertEqual(icon, APP_ID)
+        import subprocess
+        py = next((p for p in ("python3", "python3.12", "python3.11", "python3.13", "python3.10")
+                   if shutil_which(p) and subprocess.run([shutil_which(p), "-c", "import gi;gi.require_version('Gtk','4.0');gi.require_version('Adw','1')"],
+                                                          capture_output=True).returncode == 0), None)
+        if not py:
+            self.skipTest("needs PyGObject with GTK 4 + libadwaita")
+        code = ("import sys; sys.path.insert(0, %r)\nfrom gi.repository import GLib\nfrom vpnman.gui import app\n"
+                "app.set_process_identity(); print(GLib.get_prgname())" % os.path.abspath(self.ROOT))
+        r = subprocess.run([shutil_which(py), "-c", code], capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), wm, r.stderr[-500:])
+
+
+class CreditsTests(unittest.TestCase):
+    def test_attribution_and_donation_options(self):
+        from vpnman import credits
+        self.assertEqual(credits.DEVELOPER_NAME, "WOOSAH")
+        self.assertIn("WOOSAH (Lead Architect)", credits.DEVELOPERS)
+        self.assertEqual([k for k, _ in credits.DONATION_OPTIONS], ["BTC", "XMR", "CashApp"])
+        values = dict(credits.DONATION_OPTIONS)
+        self.assertTrue(values["BTC"].startswith("bc1"))
+        self.assertEqual(len(values["XMR"]), 95)                 # a Monero main address is 95 characters
+        self.assertTrue(values["CashApp"].startswith("$"))
+        # the About dialog parses the copyright as markup: a bare "&" would make GTK drop the whole string
+        self.assertIn("&amp;", credits.COPYRIGHT_MARKUP)
+        self.assertNotIn("&amp;", credits.COPYRIGHT)
+
+    def test_cli_about(self):
+        import io
+        import contextlib
+        from vpnman import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli.main(["about"]), 0)
+        out = buf.getvalue()
+        self.assertIn("WOOSAH (Lead Architect)", out)
+        self.assertIn("$SmileyMcSmiles", out)
 
 
 class GuiTests(unittest.TestCase):

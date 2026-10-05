@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.0-blue.svg?style=flat-square" alt="Version 1.0.0"></a>
+  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.1-blue.svg?style=flat-square" alt="Version 1.0.1"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
   <a href="https://gtk.org"><img src="https://img.shields.io/badge/toolkit-GTK4%20%7C%20Libadwaita-red.svg?style=flat-square" alt="GTK4 Libadwaita"></a>
@@ -18,6 +18,27 @@
   <b>network lock (kill switch)</b>.<br>
   Runs on systemd, runit, OpenRC and SysV-init Linux, and on OpenBSD/FreeBSD.
 </p>
+
+## 👥 Developers & Attribution
+
+VPNMan is developed and maintained by:
+- **WOOSAH** (Lead Architect & Maintainer)
+- **Claude** (Engineer)
+
+Project GitHub: [https://github.com/Smiley-McSmiles/VPNMan](https://github.com/Smiley-McSmiles/VPNMan)
+
+The same credits are in the app (*main menu → About VPNMan*) and on the command line (`vpnman about`).
+
+## ☕ Support the project
+
+If VPNMan is useful to you, you can support its development. In the app open *main menu → Donate…* (or *About → Donate*) and
+tap an option to copy it to the clipboard; `vpnman about` prints them too.
+
+| Option | Copy |
+|--------|------|
+| BTC | `bc1qy2gtdhnfxp9dcs6v9jda748npmsjx3jgwp99mx` |
+| XMR | `82xtMVSmesuLjPtgHfBCEhM5Fpqh1SLLNf9pzHRRNPqQZsvrnmoM1ZGC7AiLyPfsufdyrMWHrWYV2hsC8jc5rEBVLMHWTLy` |
+| CashApp | `$SmileyMcSmiles` |
 
 ## Architecture
 
@@ -108,16 +129,26 @@ session inside is still authenticated); a warning is logged.
   itself. It works on KDE Plasma, XFCE, Cinnamon, MATE, LXQt, Budgie, Deepin and Pantheon out of the box, and on
   **GNOME with the "AppIndicator and KStatusNotifierItem Support" extension** (preinstalled on Ubuntu; Fedora/Arch:
   `gnome-shell-extension-appindicator`). Closing the window hides it to the tray; the VPN lives in the daemon and is never
-  affected. If no tray host exists (stock GNOME), VPNMan detects that and behaves like a normal window app: closing quits
+  affected. **Cinnamon** shows StatusNotifier icons through `xapp-sn-watcher` and its panel *System Tray / XApp Status*
+  applet (the `xapp` package; on Void: `xbps-install xapp`) - left-clicking such an icon opens its menu (which has *Show VPNMan*).
+  The window class matches the launcher's `StartupWMClass`, so docks/panels on X11 desktops group the running app with its
+  launcher instead of showing a second icon. If no tray host exists (stock GNOME), VPNMan detects that and behaves like a normal window app: closing quits
   the GUI, `--background` shows the window instead of hiding it, and if the tray disappears while hidden the window comes back.
 
 ## Install
 
 ```sh
-sudo ./install.sh --install-deps   # optional: pulls dependencies via apt/dnf/pacman/xbps/apk/zypper/pkg_add/pkg
-sudo ./install.sh                  # installs to /usr/local, sets up + starts the service for your init system
+sh install.sh --check              # no root needed: report what is missing on this machine (Python, GTK/libadwaita, VPN tools, firewall, init)
+sudo sh install.sh --install-deps  # optional: pulls dependencies via apt/dnf/pacman/xbps/apk/zypper/pkg_add/pkg
+sudo sh install.sh                 # installs to /usr/local, sets up + starts the service for your init system
+                                   # (no sudo? use `doas sh install.sh` or `su -c 'sh install.sh'`)
 sudo ./install.sh --prefix /usr --uninstall [--purge]
 ```
+
+The installer is defensive: it sets `umask 022` and fixes file modes (so a strict root umask cannot make the install
+unreadable for normal users), extends `PATH` with the `sbin` directories, treats service/group/cache steps as non-fatal
+warnings, waits for the daemon to answer and prints diagnostics if it does not, and tells you which dependencies are missing
+(with the exact install command for your package manager). On Void: `xbps-install -S python3-gobject gtk4 libadwaita`.
 
 After installing (script, `.deb` or `.rpm`) just open **VPNMan** from your application menu.
 `install.sh` is POSIX `sh` (works on OpenBSD's ksh), detects systemd / runit / OpenRC / SysV / OpenBSD rc.d /
@@ -189,3 +220,10 @@ service files are written from the respective documentation but have not been ex
 ## License
 
 MIT – see `LICENSE`.
+
+## 📄 License
+
+This project is licensed under the **MIT License**. See [LICENSE](LICENSE) for details.
+
+Copyright (c) 2026 **WOOSAH & Claude**  
+Repository: [https://github.com/Smiley-McSmiles/VPNMan](https://github.com/Smiley-McSmiles/VPNMan)
