@@ -137,3 +137,31 @@ def link_system_dirs():
     if exe:
         plat.run([exe, "-q", "/usr/share/applications"])
     return msgs
+
+
+def bytecode_check():
+    """Is the running code the code on disk?  Python trusts __pycache__ by source mtime+size only, so an upgrade
+    can silently keep running the previous version (e.g. 1.0.0 -> 1.0.2 are the same length)."""
+    import re
+    from . import __version__
+    pkg = os.path.dirname(os.path.abspath(__file__))
+    try:
+        with open(os.path.join(pkg, "__init__.py")) as fh:
+            disk = re.search(r'__version__\s*=\s*"([^"]+)"', fh.read()).group(1)
+    except (OSError, AttributeError):
+        return [(True, "running vpnman %s" % __version__)]
+    if disk == __version__:
+        return [(True, "running vpnman %s (matches the installed files)" % __version__)]
+    return [(False, "running code is %s but the installed files are %s - stale compiled cache in %s "
+                    "(sudo vpnman doctor --fix removes it)" % (__version__, disk, pkg))]
+
+
+def purge_bytecode():
+    import shutil
+    pkg = os.path.dirname(os.path.abspath(__file__))
+    n = 0
+    for root, dirs, _files in os.walk(pkg):
+        if "__pycache__" in dirs:
+            shutil.rmtree(os.path.join(root, "__pycache__"), ignore_errors=True)
+            n += 1
+    return ["removed %d stale __pycache__ director%s under %s" % (n, "y" if n == 1 else "ies", pkg)]
