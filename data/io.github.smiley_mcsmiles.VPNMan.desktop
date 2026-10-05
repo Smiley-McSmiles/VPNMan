@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=VPNMan
+GenericName=VPN Manager
+Comment=Manage OpenVPN, WireGuard and other VPN connections with a kill switch
+Exec=vpnman gui
+Icon=io.github.smiley_mcsmiles.VPNMan
+Terminal=false
+Categories=Network;Security;GTK;
+Keywords=vpn;openvpn;wireguard;killswitch;tunnel;privacy;
+StartupNotify=true
+StartupWMClass=io.github.smiley_mcsmiles.VPNMan

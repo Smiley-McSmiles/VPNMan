@@ -1,0 +1,22 @@
+#!/bin/sh
+# PROVIDE: vpnmand
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="vpnmand"
+rcvar="vpnmand_enable"
+command="@BINDIR@/vpnmand"
+pidfile="/var/run/vpnman/vpnmand.pid"
+start_cmd="vpnmand_start"
+
+vpnmand_start()
+{
+	mkdir -p /var/run/vpnman
+	daemon -f -p ${pidfile} ${command}
+}
+
+load_rc_config $name
+: ${vpnmand_enable:="NO"}
+run_rc_command "$1"

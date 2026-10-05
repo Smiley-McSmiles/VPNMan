@@ -1,0 +1,62 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          vpnmand
+# Required-Start:    $remote_fs $syslog $network
+# Required-Stop:     $remote_fs $syslog $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: VPNMan VPN manager daemon
+# Description:       Manages VPN tunnels and the network lock (kill switch).
+### END INIT INFO
+
+DAEMON=@BINDIR@/vpnmand
+NAME=vpnmand
+PIDFILE=/run/vpnman/vpnmand.pid
+[ -d /run ] || PIDFILE=/var/run/vpnman/vpnmand.pid
+LOGFILE=/var/log/vpnmand.out
+
+running() {
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+}
+
+start() {
+    if running; then echo "$NAME already running"; return 0; fi
+    echo "Starting $NAME"
+    mkdir -p "$(dirname "$PIDFILE")"
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon --start --background --quiet --exec "$DAEMON" >>"$LOGFILE" 2>&1
+    else
+        nohup "$DAEMON" >>"$LOGFILE" 2>&1 &
+    fi
+    i=0
+    while [ $i -lt 20 ]; do
+        running && return 0
+        sleep 0.25
+        i=$((i + 1))
+    done
+    echo "$NAME failed to start; see $LOGFILE" >&2
+    return 1
+}
+
+stop() {
+    running || { echo "$NAME not running"; return 0; }
+    echo "Stopping $NAME"
+    kill "$(cat "$PIDFILE")"
+    i=0
+    while running && [ $i -lt 60 ]; do
+        sleep 0.5
+        i=$((i + 1))
+    done
+    running && kill -9 "$(cat "$PIDFILE")"
+    rm -f "$PIDFILE"
+    return 0
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart|force-reload) stop; start ;;
+    reload) running && kill -HUP "$(cat "$PIDFILE")" ;;
+    status) if running; then echo "$NAME is running"; else echo "$NAME is stopped"; exit 3; fi ;;
+    *) echo "Usage: $0 {start|stop|restart|reload|status}" >&2; exit 2 ;;
+esac
