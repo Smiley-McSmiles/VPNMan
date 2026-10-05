@@ -167,8 +167,8 @@ uninstall() {
     rm -f "$D$SHAREDIR/applications/io.github.smiley_mcsmiles.VPNMan.desktop" \
           "$D$SHAREDIR/metainfo/io.github.smiley_mcsmiles.VPNMan.metainfo.xml" \
           "$D$SHAREDIR/icons/hicolor/scalable/apps/io.github.smiley_mcsmiles.VPNMan.svg" \
-          "$D$SHAREDIR/icons/hicolor/symbolic/apps/io.github.smiley_mcsmiles.VPNMan-symbolic.svg" \
           "$D$MANDIR/vpnman.1"
+    rm -f "$D$SHAREDIR"/icons/hicolor/symbolic/apps/io.github.smiley_mcsmiles.VPNMan*.svg
     rm -f "$D/etc/systemd/system/vpnmand.service" "$D/usr/lib/systemd/system/vpnmand.service" \
           "$D/etc/init.d/vpnmand" "$D/etc/rc.d/vpnmand" "$D/usr/local/etc/rc.d/vpnmand"
     rm -rf "$D/etc/sv/vpnmand" "$D/etc/runit/sv/vpnmand"

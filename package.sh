@@ -66,7 +66,7 @@ Architecture: all
 Installed-Size: $size
 Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), iproute2
 Recommends: openvpn, wireguard-tools, nftables | iptables, openresolv | resolvconf
-Suggests: openconnect, openfortivpn, sstp-client, pptp-linux, strongswan-swanctl, vpnc, network-manager
+Suggests: stunnel4, gnome-shell-extension-appindicator, openconnect, openfortivpn, sstp-client, pptp-linux, strongswan-swanctl, vpnc, network-manager
 Maintainer: VPNMan contributors <noreply@example.invalid>
 Homepage: $URL
 Description: $DESC
@@ -129,7 +129,7 @@ Source0:        $SRCNAME.tar.gz
 BuildArch:      noarch
 Requires:       python3 >= 3.9, python3-gobject, gtk4, libadwaita >= 1.4, iproute
 Recommends:     openvpn, wireguard-tools, nftables
-Suggests:       openconnect, openfortivpn, strongswan, NetworkManager
+Suggests:       stunnel, gnome-shell-extension-appindicator, openconnect, openfortivpn, strongswan, NetworkManager
 
 %description
 VPNMan manages OpenVPN, WireGuard, AmneziaWG, OpenConnect, Fortinet, SSTP, IKEv2,

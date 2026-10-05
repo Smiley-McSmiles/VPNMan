@@ -14,7 +14,10 @@ except (ImportError, ValueError) as exc:  # pragma: no cover
     print("The GUI needs PyGObject, GTK 4 and libadwaita >= 1.4: %s" % exc, file=sys.stderr)
     raise SystemExit(1)
 
-from .. import APP_ID, APP_NAME, __version__, profiles as prof
+import json
+
+from .. import APP_ID, APP_NAME, __version__, autostart, profiles as prof
+from .tray import Tray
 from ..settings import DNS_PRESETS, DEFAULTS
 from ..ipc import Client, DaemonUnavailable, RpcError
 
@@ -67,6 +70,36 @@ def choose_files(parent, title, callback, multiple=True):
         dlg.connect("response", lambda d, r: callback([f.get_path() for f in d.get_files()]) if r == Gtk.ResponseType.ACCEPT else None)
         dlg.show()
         parent._native = dlg
+
+
+class UserConfig:
+    """Per-user GUI preferences (~/.config/vpnman/gui.json); the daemon's settings are system-wide."""
+    DEFAULTS = {"run_in_background": True}
+
+    def __init__(self):
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+        self.path = os.path.join(base, "vpnman", "gui.json")
+        try:
+            with open(self.path) as fh:
+                self.data = dict(self.DEFAULTS, **json.load(fh))
+        except (OSError, ValueError):
+            self.data = dict(self.DEFAULTS)
+
+    def get(self, key):
+        return self.data.get(key, self.DEFAULTS.get(key))
+
+    def set(self, key, value):
+        self.data[key] = value
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(self.path, "w") as fh:
+                json.dump(self.data, fh)
+        except OSError:
+            pass
+
+
+TRAY_ICONS = {"connected": "connected", "connecting": "connecting", "reconnecting": "connecting",
+              "error": "error", "disconnected": "disconnected"}
 
 
 class Hero(Gtk.Box):
@@ -365,8 +398,54 @@ class MainWindow(Adw.ApplicationWindow):
             act.connect("activate", cb)
             self.add_action(act)
 
+        self.connect("close-request", self._on_close)
         self.refresh(full=True)
         GLib.timeout_add_seconds(1, self._tick)
+
+    def _on_close(self, *_):
+        """Hide to the tray instead of quitting - the VPN itself lives in the daemon either way."""
+        if self.get_application().keep_in_tray():
+            self.set_visible(False)
+            return True
+        return False
+
+    def tray_menu(self):
+        st = self.status or {}
+        state = st.get("state", "disconnected")
+        active = state in ACTIVE
+        label = {"connected": "Connected to %s" % st.get("profile"), "connecting": "Connecting…",
+                 "reconnecting": "Reconnecting…", "error": "Connection failed"}.get(state, "Not connected")
+        locked = (st.get("netlock") or {}).get("engaged")
+        return [
+            {"label": label, "enabled": False},
+            {"separator": True},
+            {"label": "Disconnect" if active else "Connect", "enabled": self._daemon_ok,
+             "callback": self.on_main_button},
+            {"label": "Turn Network Lock %s" % ("Off" if locked else "On"), "enabled": self._daemon_ok,
+             "callback": lambda: rpc("netlock.disable" if locked else "netlock.enable",
+                                     lambda *_: self.refresh(), self._fail)},
+            {"separator": True},
+            {"label": "Show VPNMan", "callback": lambda: self.present()},
+            {"label": "Quit", "callback": lambda: self.get_application().quit()},
+        ]
+
+    def _update_tray(self, st):
+        app = self.get_application()
+        tray = getattr(app, "tray", None)
+        if not tray:
+            return
+        state = st["state"]
+        key = (state, st["netlock"]["engaged"], st.get("profile"))
+        tip = {"connected": "Connected to %s" % st.get("profile"), "disconnected": "Not connected",
+               "connecting": "Connecting…", "reconnecting": "Reconnecting…",
+               "error": "Connection failed"}.get(state, state)
+        if st["netlock"]["engaged"]:
+            tip += " · Network Lock on"
+        tray.set_state("%s-%s-symbolic" % (APP_ID, TRAY_ICONS.get(state, "disconnected")), tip,
+                       attention=(state == "error"))
+        if key != getattr(self, "_tray_key", None):
+            self._tray_key = key
+            tray.update_menu()
 
     # ---- overview ----------------------------------------------------
     def _build_overview(self):
@@ -419,6 +498,18 @@ class MainWindow(Adw.ApplicationWindow):
         dns.add(self.dns_custom)
         groups.append(dns)
 
+        start = Adw.PreferencesGroup(title="Startup", description="Handled by the background service, so it works "
+                                     "right after boot, before anyone logs in. It waits for the network and keeps trying.")
+        self.auto_switch = Adw.SwitchRow(title="Connect when the computer starts")
+        self.auto_switch.add_prefix(Gtk.Image.new_from_icon_name("system-run-symbolic"))
+        self.auto_switch.connect("notify::active", self._on_auto_toggle)
+        self.auto_row = Adw.ComboRow(title="Connect to", model=Gtk.StringList.new(["Last used server"]))
+        self.auto_row.connect("notify::selected", self._on_auto_target)
+        self.auto_values = ["last"]
+        start.add(self.auto_switch)
+        start.add(self.auto_row)
+        groups.append(start)
+
         quick = Adw.PreferencesGroup()
         self.lock_switch = Adw.SwitchRow(title="Network Lock", subtitle="Block all traffic outside the VPN (kill switch)")
         self.lock_switch.add_prefix(Gtk.Image.new_from_icon_name("changes-prevent-symbolic"))
@@ -428,6 +519,39 @@ class MainWindow(Adw.ApplicationWindow):
         scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
         scroll.set_child(page)
         return scroll
+
+    # ---- startup (boot-time auto-connect) -----------------------------
+    def _auto_value(self):
+        i = self.auto_row.get_selected()
+        return self.auto_values[i] if 0 <= i < len(self.auto_values) else "last"
+
+    def _on_auto_toggle(self, row, _p):
+        self.auto_row.set_sensitive(row.get_active())
+        if not self._quiet:
+            rpc("settings.set", lambda *_: self.toast("Saved"), self._fail, key="connection.autoconnect",
+                value=self._auto_value() if row.get_active() else "off")
+
+    def _on_auto_target(self, row, _p):
+        if not self._quiet and self.auto_switch.get_active():
+            rpc("settings.set", lambda *_: self.toast("Saved"), self._fail, key="connection.autoconnect",
+                value=self._auto_value())
+
+    def _sync_auto(self):
+        if not self.settings:
+            return
+        cur = self.settings["connection"]["autoconnect"]
+        self.auto_values = ["last", "fastest"] + [p["id"] for p in self.profiles]
+        labels = ["Last used server", "Fastest server"] + [p["name"] for p in self.profiles]
+        self._quiet = True
+        self.auto_row.set_model(Gtk.StringList.new(labels))
+        on = cur not in ("off", "")
+        self.auto_switch.set_active(on)
+        self.auto_row.set_sensitive(on)
+        if on:
+            for i, v in enumerate(self.auto_values):
+                if v == cur or (i >= 2 and self.profiles[i - 2]["name"] == cur):
+                    self.auto_row.set_selected(i)
+        self._quiet = False
 
     @staticmethod
     def _parse_ips(text):
@@ -780,11 +904,13 @@ class MainWindow(Adw.ApplicationWindow):
             self.listbox.append(row)
         self._update_latency()
         self.srv_stack.set_visible_child_name("list" if profiles else "empty")
+        self._sync_auto()
 
     def _on_settings(self, settings):
         self.settings = settings
         self._quiet = True
         self._sync_dns(settings["dns"])
+        self._sync_auto()
         for key, row in self.lock_bindings.items():
             sec, name = key.split(".")
             val = settings[sec][name]
@@ -833,6 +959,7 @@ class MainWindow(Adw.ApplicationWindow):
             r["uptime"].set_subtitle(hms(st.get("uptime", 0)))
             r["down"].set_subtitle("%s  (%s/s)" % (human(st["rx"]), human(st["rx_rate"])))
             r["up"].set_subtitle("%s  (%s/s)" % (human(st["tx"]), human(st["tx_rate"])))
+        self._update_tray(st)
         if state != self._last_state:
             if self._last_state is not None:
                 self._notify(state, st)
@@ -859,10 +986,6 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self.set_title("Preferences")
 
         page = Adw.PreferencesPage(title="Connection", icon_name="network-vpn-symbolic")
-        g = Adw.PreferencesGroup(title="Startup")
-        g.add(self._entry("connection.autoconnect", "Auto-connect on start",
-                          "off, last, fastest, or a profile name"))
-        page.add(g)
         g = Adw.PreferencesGroup(title="Reliability")
         g.add(self._switch("connection.reconnect", "Reconnect automatically"))
         g.add(self._spin("connection.retry_max", "Retries before giving up", 0, 20))
@@ -890,6 +1013,36 @@ class PreferencesWindow(Adw.PreferencesWindow):
         row.connect("apply", lambda r: self._set("routes", [{"ip": x.strip(), "action": "out"}
                                                            for x in r.get_text().split(",") if x.strip()]))
         g.add(row)
+        page.add(g)
+        self.add(page)
+
+        page = Adw.PreferencesPage(title="Tray & Login", icon_name="preferences-desktop-symbolic")
+        app = parent.get_application()
+        tray_ok = bool(app.tray and app.tray.available)
+        g = Adw.PreferencesGroup(title="System Tray")
+        row = Adw.ActionRow(title="Tray icon", subtitle="Available" if tray_ok else
+                            "Not available on this desktop")
+        row.add_prefix(Gtk.Image.new_from_icon_name("emblem-ok-symbolic" if tray_ok else "dialog-warning-symbolic"))
+        g.add(row)
+        bg = Adw.SwitchRow(title="Keep running in the tray when the window is closed",
+                           subtitle="The VPN stays connected either way - it is handled by the background service",
+                           active=app.userconfig.get("run_in_background"), sensitive=tray_ok)
+        bg.connect("notify::active", lambda r, _p: (app.userconfig.set("run_in_background", r.get_active()),
+                                                    app.set_background_hold(app.keep_in_tray())))
+        g.add(bg)
+        if not tray_ok:
+            g.set_description("GNOME has no tray by default. Install and enable the 'AppIndicator and "
+                              "KStatusNotifierItem Support' extension (Ubuntu ships it; Fedora: "
+                              "gnome-shell-extension-appindicator; Arch: gnome-shell-extension-appindicator). "
+                              "KDE, XFCE, Cinnamon, MATE, LXQt and Budgie work out of the box. Without a tray, closing "
+                              "the window simply closes the app.")
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Login")
+        login = Adw.SwitchRow(title="Start VPNMan when I log in",
+                              subtitle="Starts in the tray (or as a window if there is no tray)",
+                              active=autostart.is_enabled())
+        login.connect("notify::active", lambda r, _p: autostart.enable() if r.get_active() else autostart.disable())
+        g.add(login)
         page.add(g)
         self.add(page)
 
@@ -940,6 +1093,18 @@ class Application(Adw.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.win = None
+        self.tray = None
+        self.background = False
+        self.userconfig = UserConfig()
+        self._held = False
+        self._bg_pending = False
+        self.add_main_option("background", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+                             "Start minimised to the system tray", None)
+
+    def do_handle_local_options(self, options):
+        if options.contains("background"):
+            self.background = True
+        return -1
 
     def do_startup(self):
         Adw.Application.do_startup(self)
@@ -952,9 +1117,52 @@ class Application(Adw.Application):
                 self.set_accels_for_action("app." + name, [accel])
 
     def do_activate(self):
-        if not self.win:
+        if self.win is None:
             self.win = MainWindow(self)
+            self._setup_tray()
+            if self.background:
+                # start hidden if a tray host shows up; otherwise the user would have no way back in
+                self._bg_pending = True
+                self.hold()
+                GLib.timeout_add_seconds(5, self._background_timeout)
+                return
         self.win.present()
+
+    # ---- tray ----------------------------------------------------------
+    def _setup_tray(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        theme = os.path.normpath(os.path.join(here, "..", "..", "data", "icons"))
+        self.tray = Tray(APP_ID, APP_NAME, lambda: self.win.present(), self.win.tray_menu,
+                         self._on_tray_availability, theme if os.path.isdir(theme) else "")
+        self.tray.set_state("%s-disconnected-symbolic" % APP_ID, "VPNMan")
+        self.tray.start()
+
+    def keep_in_tray(self):
+        return bool(self.tray and self.tray.available and self.userconfig.get("run_in_background"))
+
+    def set_background_hold(self, on):
+        if on and not self._held:
+            self.hold()
+            self._held = True
+        elif not on and self._held:
+            self.release()
+            self._held = False
+
+    def _on_tray_availability(self, available):
+        self.set_background_hold(self.keep_in_tray())
+        if self._bg_pending and available:
+            self._bg_pending = False
+            self.release()                    # the persistent hold above takes over
+        elif not available and self.win and not self.win.get_visible():
+            self.win.present()                # tray vanished (e.g. GNOME extension disabled)
+
+    def _background_timeout(self):
+        if self._bg_pending:
+            self._bg_pending = False
+            self.release()
+            if not (self.tray and self.tray.available):
+                self.win.present()
+        return False
 
     def on_prefs(self, *_):
         def show(settings):
@@ -976,8 +1184,8 @@ class Application(Adw.Application):
             Adw.AboutWindow(transient_for=self.win, **kw).present()
 
 
-def run():
-    return Application().run(sys.argv[:1])
+def run(argv=None):
+    return Application().run(argv if argv is not None else sys.argv)
 
 
 if __name__ == "__main__":

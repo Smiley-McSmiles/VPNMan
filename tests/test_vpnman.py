@@ -189,6 +189,71 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(backends.get("custom").validate(profiles.new_profile("c", "custom")))
 
 
+class AutostartTests(unittest.TestCase):
+    def test_login_entry(self):
+        from vpnman import autostart
+        os.environ["XDG_CONFIG_HOME"] = TMP + "/xdg"
+        self.assertFalse(autostart.is_enabled())
+        autostart.enable("/usr/bin/vpnman-gtk")
+        text = open(autostart.path()).read()
+        self.assertIn("Exec=/usr/bin/vpnman-gtk --background", text)
+        self.assertIn("X-GNOME-Autostart-enabled=true", text)
+        self.assertTrue(autostart.is_enabled())
+        autostart.disable()
+        self.assertFalse(autostart.is_enabled())
+        autostart.disable()   # idempotent
+
+    def test_boot_autoconnect_waits_for_network(self):
+        from vpnman import platform as plat
+        fake = TMP + "/bin/openvpn"
+        if not os.path.exists(fake):
+            open(fake, "w").write("#!/bin/sh\necho 'Initialization Sequence Completed'\ntrap 'exit 0' TERM\nwhile :; do sleep 0.1; done\n")
+            os.chmod(fake, 0o755)
+        s = settings.Settings(TMP + "/boot.json")
+        s.set("checks.tunnel", False)
+        s.set("connection.autoconnect_wait", 30)
+        mgr = Manager(store=profiles.ProfileStore(TMP + "/bootstore"), settings=s)
+        mgr.import_profile("boot", OVPN.replace("auth-user-pass\n", ""), filename="boot.ovpn")
+        calls = {"n": 0}
+        orig = plat.default_gateway
+
+        def gw():
+            calls["n"] += 1
+            return (None, None) if calls["n"] < 3 else ("192.0.2.1", "eth0")
+        plat.default_gateway = gw
+        try:
+            t0 = time.time()
+            mgr._autoconnect("boot")
+            self.assertGreater(calls["n"], 2)             # it polled until a gateway appeared
+            self.assertGreater(time.time() - t0, 1.5)
+            end = time.time() + 10
+            while mgr.status()["state"] != "connected" and time.time() < end:
+                time.sleep(0.1)
+            self.assertEqual(mgr.status()["state"], "connected")
+        finally:
+            plat.default_gateway = orig
+            mgr.disconnect()
+
+
+class TrayTests(unittest.TestCase):
+    def test_status_notifier_protocol(self):
+        import subprocess
+        runner = shutil_which("dbus-run-session")
+        py = next((p for p in ("python3", "python3.12", "python3.11", "python3.13", "python3.10")
+                   if shutil_which(p) and subprocess.run([shutil_which(p), "-c", "import gi;gi.require_version('Gtk','4.0');from gi.repository import Gtk"],
+                                                          capture_output=True).returncode == 0), None)
+        if not runner or not py:
+            self.skipTest("needs dbus-run-session and PyGObject with GTK 4")
+        r = subprocess.run([runner, "--", shutil_which(py), os.path.join(os.path.dirname(__file__), "tray_check.py")],
+                           capture_output=True, text=True, timeout=60)
+        self.assertIn("TRAY OK", r.stdout, r.stdout + r.stderr)
+
+
+def shutil_which(name):
+    import shutil
+    return shutil.which(name)
+
+
 class IfnameTests(unittest.TestCase):
     def setUp(self):
         from vpnman import platform as plat

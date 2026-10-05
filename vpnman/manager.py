@@ -206,15 +206,26 @@ class Manager:
                 self.log.add("error", "Could not restore network lock: %s" % e)
         auto = self.settings.get("connection.autoconnect")
         if auto and auto != "off":
-            try:
-                self.connect(None if auto == "last" else auto, fastest=(auto == "fastest"), last=(auto == "last"))
-            except Exception as e:  # noqa: BLE001
-                self.log.add("error", "Auto-connect failed: %s" % e)
+            self._autoconnect(auto)
+
+    def _autoconnect(self, auto):
+        """Boot-time connect: wait for a network, then keep retrying until it works."""
+        end = time.time() + self.settings.get("connection.autoconnect_wait")
+        if not plat.default_gateway()[0]:
+            self.log.add("info", "Auto-connect: waiting for a network connection")
+        while not plat.default_gateway()[0] and time.time() < end:
+            time.sleep(2)
+        try:
+            r = self.connect(None if auto == "last" else auto, fastest=(auto == "fastest"),
+                             last=(auto == "last"), persistent=True)
+            self.log.add("info", "Auto-connect to %s" % r["profile"])
+        except Exception as e:  # noqa: BLE001
+            self.log.add("error", "Auto-connect failed: %s" % e)
 
     def shutdown(self):
         self.disconnect()
 
-    def connect(self, ident=None, fastest=False, last=False):
+    def connect(self, ident=None, fastest=False, last=False, persistent=False):
         profiles = self.store.list()
         if not profiles:
             raise ProfileError("no profiles - import one first")
@@ -236,7 +247,7 @@ class Manager:
             self._status = self._blank_status()
             self._set(state="connecting", profile_id=p["id"], profile=p["name"], protocol=p["protocol"],
                       message="Starting")
-            self._thread = threading.Thread(target=self._run, args=(p, self._stop), daemon=True,
+            self._thread = threading.Thread(target=self._run, args=(p, self._stop, persistent), daemon=True,
                                             name="vpn-conn")
             self._thread.start()
         self._save_state(last_profile=p["id"])
@@ -275,7 +286,8 @@ class Manager:
         return True
 
     # -------------------------------------------------------------- run loop
-    def _run(self, profile, stop):
+    def _run(self, profile, stop, persistent=False):
+        """persistent: never give up (used for boot-time auto-connect on slow/late networks)."""
         s = self.settings
         attempt = 0
         tried = {profile["id"]}
@@ -304,7 +316,9 @@ class Manager:
                 self._set(state="error", message=reason)
                 return
             attempt += 1
-            if attempt > s.get("connection.retry_max"):
+            if persistent and not s.get("connection.reconnect"):
+                persistent = False
+            if attempt > s.get("connection.retry_max") and not persistent:
                 nxt = self._next_candidate(profile, tried) if s.get("connection.failover") else None
                 if not nxt:
                     self._set(state="error", message="gave up: " + reason)
@@ -315,6 +329,8 @@ class Manager:
                 tried.add(nxt["id"])
                 continue
             delay = s.get("connection.retry_delay")
+            if persistent and attempt > s.get("connection.retry_max"):
+                delay = max(delay, 15)       # back off while waiting for the network
             self._set(state="reconnecting", message="%s - retry %d in %ds" % (reason, attempt, delay))
             self.log.add("warn", "Reconnecting in %ds (attempt %d)" % (delay, attempt))
             if stop.wait(delay):

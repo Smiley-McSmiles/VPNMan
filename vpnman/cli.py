@@ -272,6 +272,40 @@ class Cli:
                     nl["backend"], ", ".join(nl["ifaces"]) or "-", ", ".join(nl["endpoints"]) or "-"))
         return 0
 
+    def cmd_autostart(self, a):
+        """Boot-time VPN (daemon) and login-time tray app (per user)."""
+        from . import autostart
+        if a.login_app:
+            if a.login_app == "on":
+                print("Tray app will start at login: %s" % autostart.enable())
+            else:
+                autostart.disable()
+                print("Tray app will no longer start at login.")
+            if not a.target:
+                return 0
+        if a.target:
+            t = a.target.lower()
+            if t in ("off", "none", "no"):
+                val = "off"
+            elif t in ("last", "fastest"):
+                val = t
+            else:
+                val = self.call("profiles.get", ident=a.target)["id"]
+            self.call("settings.set", key="connection.autoconnect", value=val)
+        cur = self.call("settings.get", key="connection.autoconnect")
+        if cur in ("off", ""):
+            print("VPN at system start: off")
+        elif cur in ("last", "fastest"):
+            print("VPN at system start: %s server" % cur)
+        else:
+            try:
+                cur = self.call("profiles.get", ident=cur)["name"]
+            except RpcError:
+                pass
+            print("VPN at system start: %s" % cur)
+        print("Tray app at login:   %s" % ("on" if autostart.is_enabled() else "off"))
+        return 0
+
     def cmd_dns(self, a):
         from .settings import DNS_PRESETS
         if not a.choice:
@@ -385,7 +419,7 @@ class Cli:
 
     def cmd_gui(self, a):
         from .gui.app import run
-        return run()
+        return run(["vpnman-gtk"] + (["--background"] if a.background else []))
 
 
 # ------------------------------------------------------------------ interactive
@@ -554,6 +588,9 @@ def build_parser():
         s = add(n, h); s.add_argument("profiles", nargs="+")
     s = add("ping", "measure latency to profiles"); s.add_argument("profiles", nargs="*")
     s = add("lock", "network lock (kill switch)"); s.add_argument("action", choices=["on", "off", "status"], nargs="?", default="status")
+    s = add("autostart", "connect the VPN automatically when the system starts")
+    s.add_argument("target", nargs="?", help="off | last | fastest | profile name")
+    s.add_argument("--login-app", choices=["on", "off"], help="start the tray app at login (this user)")
     s = add("dns", "choose the DNS servers used while connected"); s.add_argument("choice", nargs="*")
     s = add("get", "show settings"); s.add_argument("key", nargs="?")
     s = add("set", "change a setting"); s.add_argument("key"); s.add_argument("value")
@@ -564,7 +601,8 @@ def build_parser():
     s = add("service", "install/control the background service")
     s.add_argument("action", choices=["install", "uninstall", "enable", "disable", "start", "stop", "restart", "status"])
     add("daemon", "run the daemon in the foreground (root)")
-    add("gui", "open the GTK4/libadwaita app")
+    s = add("gui", "open the GTK4/libadwaita app")
+    s.add_argument("--background", action="store_true", help="start minimised to the system tray")
     add("shell", "interactive menu", aliases=["menu"])
     return ap
 

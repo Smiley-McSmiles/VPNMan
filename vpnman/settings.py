@@ -24,7 +24,8 @@ DEFAULTS = {
         "servers": [],             # custom DNS servers (override pushed ones)
     },
     "connection": {
-        "autoconnect": "off",      # off | last | fastest | <profile id or name>
+        "autoconnect": "off",      # at boot: off | last | fastest | <profile id or name>
+        "autoconnect_wait": 120,   # seconds to wait for a network connection before connecting at boot
         "reconnect": True,
         "retry_max": 3,
         "retry_delay": 5,

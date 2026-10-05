@@ -78,9 +78,24 @@ session inside is still authenticated); a warning is logged.
 | Live stats (up/down, rates, duration), public-IP check, log viewer | ✔ |
 | Credentials per profile (stored root-only) | ✔ |
 | Desktop notifications | ✔ |
+| Auto-connect at system start (daemon-side: waits for the network, keeps retrying; `last` / `fastest` / a profile) | ✔ |
+| System tray (StatusNotifierItem): status icon, Connect/Disconnect, Network Lock toggle, Show, Quit | ✔ |
+| Start the tray app at login (XDG autostart; GNOME, KDE, XFCE, …) | ✔ |
 | AirVPN-specific API (server list/keys fetch, per-country scoring) | ✘ – import their generated configs instead |
 | Proxy / Tor / SSH / SSL tunnels as transports | ✘ |
-| System-tray icon (GTK4 has no tray API) | ✘ |
+
+## Auto-start and the system tray
+
+* **VPN at boot** – *Connection → Startup* in the app, or `vpnman autostart last|fastest|<profile>|off`. This is done by the
+  background service, so the tunnel (and the kill switch, with `netlock.persist`) comes up right after boot, before login.
+  It waits up to `connection.autoconnect_wait` seconds for a network and then keeps retrying instead of giving up.
+* **App at login** – *Preferences → Tray & Login* or `vpnman autostart --login-app on`. Starts `vpnman-gtk --background`.
+* **Tray** – GTK 4 has no tray API, so VPNMan implements the StatusNotifierItem D-Bus protocol (with a dbusmenu menu)
+  itself. It works on KDE Plasma, XFCE, Cinnamon, MATE, LXQt, Budgie, Deepin and Pantheon out of the box, and on
+  **GNOME with the "AppIndicator and KStatusNotifierItem Support" extension** (preinstalled on Ubuntu; Fedora/Arch:
+  `gnome-shell-extension-appindicator`). Closing the window hides it to the tray; the VPN lives in the daemon and is never
+  affected. If no tray host exists (stock GNOME), VPNMan detects that and behaves like a normal window app: closing quits
+  the GUI, `--background` shows the window instead of hiding it, and if the tray disappears while hidden the window comes back.
 
 ## Install
 
