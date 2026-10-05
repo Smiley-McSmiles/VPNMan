@@ -16,9 +16,12 @@ A multi-protocol VPN manager with a **GTK4 / libadwaita** app, an **interactive 
                                │                              └─ profiles + settings in /etc/vpnman (0700)
 ```
 
-The daemon is the only privileged part. The socket is `root:vpnman 0660`, so members of the `vpnman`
-group can use the CLI/GUI without `sudo`. (Group membership is effectively root: hooks and custom
-commands run as root.) Pure Python 3.9+ standard library; the GUI additionally needs PyGObject,
+The daemon is the only privileged part. Packages and `install.sh` enable and start it for you; if it is ever
+stopped the GUI offers a **Start Service** button (admin password via polkit). On Linux every connection is
+authorized by the peer's uid: root, members of `vpnman`/`wheel`/`sudo`, and anyone with an **active local login
+session** may use the CLI/GUI - no group setup or re-login needed (`vpnman set access.mode group` restricts it to
+groups). On BSD the socket is `root:wheel 0660`. Anyone with access is effectively root (hooks and custom commands
+run as root). Pure Python 3.9+ standard library; the GUI additionally needs PyGObject,
 GTK 4 and libadwaita ≥ 1.4.
 
 ## Protocols
@@ -71,8 +74,9 @@ sudo ./install.sh                  # installs to /usr/local, sets up + starts th
 sudo ./install.sh --prefix /usr --uninstall [--purge]
 ```
 
+After installing (script, `.deb` or `.rpm`) just open **VPNMan** from your application menu.
 `install.sh` is POSIX `sh` (works on OpenBSD's ksh), detects systemd / runit / OpenRC / SysV / OpenBSD rc.d /
-FreeBSD rc.d, creates the `vpnman` group, and adds `$SUDO_USER` to it (log out/in afterwards).
+FreeBSD rc.d, creates the `vpnman` group, adds `$SUDO_USER` to it, and enables and starts the service.
 Service control later: `sudo vpnman service enable|disable|start|stop|restart|status|install|uninstall`.
 
 ### Packages

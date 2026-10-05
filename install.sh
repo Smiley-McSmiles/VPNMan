@@ -234,7 +234,7 @@ if [ "$DO_POST" -eq 1 ] && [ -z "$DESTDIR" ]; then
     fi
     TARGET_USER=${SUDO_USER:-${DOAS_USER:-}}
     if [ -n "$TARGET_USER" ] && [ "$TARGET_USER" != root ]; then
-        say "Adding $TARGET_USER to group '$GROUP' (log out and in again to apply)"
+        say "Adding $TARGET_USER to group '$GROUP'"
         if have usermod && [ "$OS" = Linux ]; then usermod -aG "$GROUP" "$TARGET_USER"
         elif have adduser && [ "$OS" = Linux ]; then adduser "$TARGET_USER" "$GROUP"
         elif [ "$OS" = OpenBSD ]; then
@@ -268,5 +268,5 @@ cat <<DONE
 VPNMan is installed.
   GUI:  vpnman-gtk          CLI:  vpnman   (interactive menu)   Daemon: vpnmand
   Import a profile:  vpnman import my.ovpn      Kill switch:  vpnman lock on
-Run 'vpnman doctor' to see which protocols have their tools installed.
+Open the app from your menu - no further setup needed. Run "vpnman doctor" to see which protocols have their tools installed.
 DONE

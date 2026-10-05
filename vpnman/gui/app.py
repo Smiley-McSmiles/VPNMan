@@ -252,8 +252,8 @@ class MainWindow(Adw.ApplicationWindow):
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=main_menu,
                                        primary=True, tooltip_text="Main menu"))
         view.add_top_bar(header)
-        self.banner = Adw.Banner(revealed=False, button_label="Retry")
-        self.banner.connect("button-clicked", lambda *_: self.refresh(full=True))
+        self.banner = Adw.Banner(revealed=False, button_label="Start Service")
+        self.banner.connect("button-clicked", self._start_service)
         view.add_top_bar(self.banner)
 
         # ---- pages
@@ -517,10 +517,33 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _set_daemon(self, ok, msg=""):
         self._daemon_ok = ok
-        self.banner.set_title("VPNMan daemon unavailable: %s. Start it with: sudo vpnman service enable" % msg if not ok else "")
+        self.banner.set_title("The VPNMan background service is not running" if not ok else "")
         self.banner.set_revealed(not ok)
         for w in (self.main_btn, self.lock_switch, self.lock_now):
             w.set_sensitive(ok)
+
+    def _start_service(self, *_):
+        """Enable + start vpnmand, asking for the admin password through polkit."""
+        import shutil
+        import subprocess
+        exe = shutil.which("vpnman") or "/usr/bin/vpnman"
+        cmd = [exe, "service", "enable"]
+        if os.geteuid() != 0:
+            if not shutil.which("pkexec"):
+                return self.toast("Run:  sudo vpnman service enable")
+            cmd = ["pkexec"] + cmd
+        self.banner.set_button_label("Starting…")
+
+        def work():
+            try:
+                rc = subprocess.run(cmd, capture_output=True, text=True, timeout=120).returncode
+            except (OSError, subprocess.SubprocessError):
+                rc = 1
+            GLib.timeout_add_seconds(2, lambda: (self.banner.set_button_label("Start Service"),
+                                                 self.refresh(full=True), False)[2])
+            if rc:
+                GLib.idle_add(self.toast, "Could not start the service (cancelled or failed)")
+        threading.Thread(target=work, daemon=True).start()
 
     def on_import(self, *_):
         ProfileDialog(self, "import", self.protocols, on_done=lambda: self.refresh(full=True)).present()

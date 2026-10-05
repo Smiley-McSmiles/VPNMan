@@ -303,6 +303,8 @@ class Cli:
             service.uninstall(init)
             print("Removed.")
             return 0
+        if a.action == "enable":
+            service.install(init)     # idempotent: makes "enable" work even if the definition is missing
         ok, out = service.control(a.action, init)
         print(out)
         return 0 if ok else 1

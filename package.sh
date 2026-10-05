@@ -86,7 +86,6 @@ if [ "$1" = configure ]; then
         update-rc.d vpnmand defaults >/dev/null 2>&1 || true
         /etc/init.d/vpnmand start || true
     fi
-    echo "Add yourself to the vpnman group to use the CLI/GUI without sudo: sudo adduser \$USER vpnman" >&2
 fi
 exit 0
 PST
@@ -150,7 +149,6 @@ if [ -d /run/systemd/system ]; then
     systemctl enable vpnmand.service >/dev/null 2>&1 || :
     systemctl start vpnmand.service >/dev/null 2>&1 || :
 fi
-echo "Add yourself to the vpnman group to use the CLI/GUI without sudo: sudo usermod -aG vpnman \$USER" >&2
 
 %preun
 %systemd_preun vpnmand.service

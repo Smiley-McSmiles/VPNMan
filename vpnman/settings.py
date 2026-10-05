@@ -32,6 +32,10 @@ DEFAULTS = {
         "timeout": 60,
         "openvpn_args": [],        # extra raw arguments appended to OpenVPN
     },
+    "access": {
+        "mode": "session",         # session: root + groups + active local users | group: root + groups only
+        "groups": ["vpnman", "wheel", "sudo"],
+    },
     "routes": [],                  # [{"ip": "10.0.0.0/8", "action": "out"}]  out = bypass the VPN
     "events": {
         "pre_connect": "",

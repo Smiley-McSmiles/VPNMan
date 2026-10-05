@@ -8,7 +8,7 @@ import sys
 import threading
 import traceback
 
-from . import __version__, backends, ipc, paths
+from . import __version__, access, backends, ipc, paths
 from . import platform as plat
 from .manager import Manager
 from .profiles import ProfileError, public_view
@@ -18,6 +18,17 @@ from .settings import Settings
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         mgr = self.server.manager
+        if ipc.peercred_supported() and plat.is_root():
+            uid = ipc.peer_uid(self.request)
+            if uid is None or not access.authorized(uid, mgr.settings):
+                mgr.log.add("warn", "Denied connection from uid %s" % uid)
+                try:
+                    self.wfile.write((json.dumps({"id": None, "ok": False, "error":
+                        "permission denied - you need an active local session or membership of the vpnman group"})
+                        + "\n").encode())
+                except OSError:
+                    pass
+                return
         try:
             line = self.rfile.readline(8 * 1024 * 1024)
             if not line:
@@ -112,8 +123,8 @@ def run(foreground=True):
     grp = ipc.secure_socket(sock)
     with open(paths.pidfile(), "w") as fh:
         fh.write(str(os.getpid()))
-    mgr.log.add("info", "vpnmand %s started (%s, init: %s, socket group: %s)"
-                % (__version__, plat.distro()[1], plat.init_system(), grp or "root only"))
+    mgr.log.add("info", "vpnmand %s started (%s, init: %s, access: %s)"
+                % (__version__, plat.distro()[1], plat.init_system(), grp))
 
     def stop(signum, _frame):
         mgr.log.add("info", "Signal %d received, shutting down" % signum)

@@ -63,6 +63,7 @@ class Client:
 
 
 def peer_uid(conn):
+    """uid of the connecting process, or None where the kernel cannot tell us."""
     try:
         import struct
         creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
@@ -71,8 +72,20 @@ def peer_uid(conn):
         return None
 
 
+def peercred_supported():
+    return hasattr(socket, "SO_PEERCRED")
+
+
 def secure_socket(path):
-    """Restrict the socket to root and the vpnman (or wheel) group."""
+    """Set socket permissions; returns a description of who may connect.
+
+    With peer credentials (Linux) the socket is connectable by everyone and the
+    daemon authorizes each connection (see access.py).  Elsewhere fall back to
+    filesystem permissions: root plus the vpnman/wheel group.
+    """
+    if peercred_supported():
+        os.chmod(path, 0o666)
+        return "authorized per connection"
     import grp
     for g in ("vpnman", "wheel", "sudo"):
         try:
@@ -82,8 +95,8 @@ def secure_socket(path):
         try:
             os.chown(path, 0, gid)
             os.chmod(path, 0o660)
-            return g
+            return "group " + g
         except PermissionError:
             break
     os.chmod(path, 0o600)
-    return None
+    return "root only"

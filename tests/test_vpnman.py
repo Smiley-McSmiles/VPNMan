@@ -277,5 +277,38 @@ while :; do sleep 0.1; done
             self.c.call("settings.set", key="bogus", value=1)
 
 
+
+
+class AccessTests(unittest.TestCase):
+    def setUp(self):
+        from vpnman import access
+        self.access = access
+        self.s = settings.Settings(TMP + "/acc.json")
+        self.s.set("access.mode", "session")
+        access._cache.clear()
+
+    def test_root_always(self):
+        self.assertTrue(self.access.authorized(0, self.s))
+
+    def test_group_mode_denies_strangers(self):
+        self.s.set("access.mode", "group")
+        self.assertFalse(self.access.authorized(54321, self.s))
+
+    def test_session_mode(self):
+        orig = self.access._active_local_session
+        try:
+            self.access._active_local_session = lambda uid: True
+            self.assertTrue(self.access.authorized(54321, self.s))
+            self.access._cache.clear()
+            self.access._active_local_session = lambda uid: False
+            self.assertFalse(self.access.authorized(54322, self.s))
+            self.access._cache.clear()
+            self.access._active_local_session = lambda uid: None   # no session manager
+            self.assertTrue(self.access.authorized(54323, self.s))
+            self.assertFalse(self.access.authorized(33, self.s))   # system accounts never
+        finally:
+            self.access._active_local_session = orig
+
+
 if __name__ == "__main__":
     unittest.main()
