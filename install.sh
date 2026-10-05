@@ -413,7 +413,7 @@ say "Service definition installed for: $INIT"
 
 enable_service() {
     case "$INIT" in
-        systemd) try systemctl daemon-reload; try systemctl enable --now vpnmand ;;
+        systemd) try systemctl daemon-reload; try systemctl enable vpnmand; try systemctl restart vpnmand ;;
         runit)
             sv=/etc/sv
             if [ ! -d /etc/sv ] && [ -d /etc/runit/sv ]; then sv=/etc/runit/sv; fi
@@ -425,19 +425,33 @@ enable_service() {
                 warn "no runit service directory found (/var/service, /etc/service); link $sv/vpnmand into yours"
             else
                 try ln -sf "$sv/vpnmand" "$link/vpnmand"      # runsvdir notices new services within ~5 seconds
+                # upgrade: a service that is already running keeps running the OLD code until restarted
+                if have sv && [ -e "$link/vpnmand/supervise/ok" ]; then try sv restart "$link/vpnmand"; fi
             fi ;;
-        openrc) try rc-update add vpnmand default; try rc-service vpnmand start ;;
+        openrc) try rc-update add vpnmand default; try rc-service vpnmand restart ;;
         sysv)
             if have update-rc.d; then try update-rc.d vpnmand defaults
             elif have chkconfig; then try chkconfig --add vpnmand
             elif have insserv; then try insserv vpnmand
             else warn "no update-rc.d/chkconfig: vpnmand will not start at boot (it was started now)"
             fi
-            try /etc/init.d/vpnmand start ;;
-        openbsd) try rcctl enable vpnmand; try rcctl start vpnmand ;;
-        freebsd) try sysrc vpnmand_enable=YES; try service vpnmand start ;;
+            try /etc/init.d/vpnmand restart ;;
+        openbsd) try rcctl enable vpnmand; try rcctl restart vpnmand ;;
+        freebsd) try sysrc vpnmand_enable=YES; try service vpnmand restart ;;
         none) warn "no init system detected - start the daemon yourself with: vpnmand" ;;
     esac
+}
+
+# The GUI keeps running in the tray after its window is closed, so an upgrade would otherwise leave the OLD code
+# running (and a second launch would just re-open that old instance). Ask running copies to quit; the user simply
+# starts the app again.
+stop_running_gui() {
+    if have pkill; then
+        if pkill -f -- '^[^ ]*python[0-9.]* -m vpnman gui' 2>/dev/null || pkill -f -- '^[^ ]*python[0-9.]* -m vpnman.gui.trayhelper' 2>/dev/null; then
+            say "Closed the running VPNMan window so the new version starts next time"
+        fi
+    fi
+    return 0
 }
 
 wait_for_daemon() {  # exit status of `vpnman status`: 0/3 = daemon answered, anything else = not (yet)
@@ -495,6 +509,7 @@ if [ "$DO_POST" -eq 1 ] && [ -z "$DESTDIR" ]; then
         fi
     fi
     refresh_icon_cache
+    stop_running_gui
     enable_service
     say "Waiting for the VPNMan service to start"
     if wait_for_daemon; then

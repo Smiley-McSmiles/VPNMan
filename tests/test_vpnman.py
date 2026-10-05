@@ -310,6 +310,16 @@ class InstallTests(unittest.TestCase):
                        env=env, capture_output=True, text=True)
         self.assertFalse(os.path.lexists(desktop))
 
+    def test_upgrade_restarts_service_and_closes_stale_gui(self):
+        """The running daemon/GUI keep executing OLD code after an upgrade unless the installer restarts them."""
+        text = open(os.path.join(self.ROOT, "install.sh")).read()
+        self.assertIn("systemctl restart vpnmand", text)
+        self.assertIn("stop_running_gui", text)
+        self.assertIn("/etc/init.d/vpnmand restart", text)
+        pkg = open(os.path.join(self.ROOT, "package.sh")).read()
+        self.assertGreaterEqual(pkg.count("systemctl restart vpnmand"), 2)       # rpm %post and deb postinst
+        self.assertGreaterEqual(pkg.count("-m vpnman gui"), 2)
+
     def test_check_mode_installs_nothing(self):
         import subprocess
         r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--check"], capture_output=True, text=True)
