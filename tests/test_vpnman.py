@@ -256,6 +256,19 @@ class InstallTests(unittest.TestCase):
         mode = stat.S_IMODE(os.stat(os.path.join(d, "etc/vpnman")).st_mode)
         self.assertEqual(mode, 0o700)
 
+    def test_icon_fallbacks_installed(self):
+        d = self.stage("systemd")
+        app = "io.github.smiley_mcsmiles.VPNMan"
+        for rel in ("usr/share/pixmaps/%s.svg" % app, "usr/share/icons/hicolor/48x48/apps/%s.png" % app,
+                    "usr/share/icons/hicolor/256x256/apps/%s.png" % app):
+            self.assertTrue(os.path.exists(os.path.join(d, rel)), rel)
+        svg = open(os.path.join(self.ROOT, "data/icons/hicolor/scalable/apps/%s.svg" % app)).read()
+        self.assertNotIn("<filter", svg)       # renderer-specific features can make an icon render blank
+
+    def test_icon_doctor(self):
+        from vpnman import icons
+        self.assertTrue(all(isinstance(m, str) for _ok, m in icons.check()))
+
     def test_init_files_per_system(self):
         for init, path, needle in (("runit", "etc/sv/vpnmand/run", "exec /usr/bin/vpnmand"),
                                    ("sysv", "etc/init.d/vpnmand", "DAEMON=/usr/bin/vpnmand"),
