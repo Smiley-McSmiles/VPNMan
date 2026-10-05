@@ -29,17 +29,6 @@ Project GitHub: [https://github.com/Smiley-McSmiles/VPNMan](https://github.com/S
 
 The same credits are in the app (*main menu → About VPNMan*) and on the command line (`vpnman about`).
 
-## ☕ Support the project
-
-If VPNMan is useful to you, you can support its development. In the app open *main menu → About VPNMan → Donate* and
-tap an option to copy it to the clipboard; `vpnman about` prints them too.
-
-| Option | Copy |
-|--------|------|
-| BTC | `bc1qy2gtdhnfxp9dcs6v9jda748npmsjx3jgwp99mx` |
-| XMR | `82xtMVSmesuLjPtgHfBCEhM5Fpqh1SLLNf9pzHRRNPqQZsvrnmoM1ZGC7AiLyPfsufdyrMWHrWYV2hsC8jc5rEBVLMHWTLy` |
-| CashApp | `$SmileyMcSmiles` |
-
 ## Architecture
 
 ```
@@ -97,7 +86,7 @@ VPNMan starts stunnel in client mode on a free `127.0.0.1` port, rewrites the ru
 lets the kill switch allow only the stunnel server. Without a CA file the TLS layer is not verified (the OpenVPN
 session inside is still authenticated); a warning is logged.
 
-## Eddie-style feature set
+## Feature set
 
 | Feature | Status |
 |---------|--------|
