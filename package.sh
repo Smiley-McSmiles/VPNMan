@@ -4,6 +4,7 @@
 #   ./package.sh            build everything that can be built on this machine, and
 #                           generate recipes (PKGBUILD, spec, template, APKBUILD, port) for the rest
 #   ./package.sh tar deb    build selected targets
+#   ./package.sh --container rpm    build inside a Fedora container (podman/docker) - works from any distro
 #
 # Targets: tar  deb  rpm  arch  void  alpine  openbsd  recipes  clean
 set -euo pipefail
@@ -47,7 +48,7 @@ build_tar() {
 }
 
 build_deb() {
-    have dpkg-deb || { warn "dpkg-deb not found, skipping deb"; return; }
+    have python3 || { warn "python3 not found, skipping deb"; return; }
     log "deb"
     local root=$BUILD/deb/${NAME}_$VERSION
     stage "$root" all-linux
@@ -110,7 +111,8 @@ exit 0
 PRM
     chmod 755 "$root/DEBIAN/postinst" "$root/DEBIAN/prerm" "$root/DEBIAN/postrm"
     mkdir -p "$DIST"
-    dpkg-deb --root-owner-group --build "$root" "$DIST/${NAME}_${VERSION}_all.deb" >/dev/null
+    # works on any distribution: packaging/mkdeb.py writes the ar/tar structure itself
+    python3 "$ROOT/packaging/mkdeb.py" "$root" "$DIST/${NAME}_${VERSION}_all.deb"
     log "  -> dist/${NAME}_${VERSION}_all.deb"
 }
 
@@ -125,7 +127,6 @@ License:        MIT
 URL:            $URL
 Source0:        $SRCNAME.tar.gz
 BuildArch:      noarch
-BuildRequires:  systemd-rpm-macros
 Requires:       python3 >= 3.9, python3-gobject, gtk4, libadwaita >= 1.4, iproute
 Recommends:     openvpn, wireguard-tools, nftables
 Suggests:       openconnect, openfortivpn, strongswan, NetworkManager
@@ -139,22 +140,31 @@ Tailscale and more, with a kill switch for nftables, iptables and pf.
 
 %install
 DESTDIR=%{buildroot} ./install.sh --prefix /usr --init systemd --no-post
+mkdir -p %{buildroot}/etc/vpnman
 
 %post
 getent group vpnman >/dev/null || groupadd -r vpnman
 mkdir -p /etc/vpnman && chmod 700 /etc/vpnman
-%systemd_post vpnmand.service
-# the distro preset leaves unknown services disabled, so enable and start explicitly
+# plain systemctl (no distro macros) so the spec builds on any rpm-based distro;
+# the distro preset would leave an unknown service disabled, so enable and start explicitly
 if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || :
     systemctl enable vpnmand.service >/dev/null 2>&1 || :
-    systemctl start vpnmand.service >/dev/null 2>&1 || :
+    systemctl restart vpnmand.service >/dev/null 2>&1 || :
 fi
 
 %preun
-%systemd_preun vpnmand.service
+if [ "\$1" -eq 0 ] && [ -d /run/systemd/system ]; then
+    systemctl disable --now vpnmand.service >/dev/null 2>&1 || :
+fi
 
 %postun
-%systemd_postun_with_restart vpnmand.service
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || :
+fi
+if [ "\$1" -eq 0 ] && command -v nft >/dev/null 2>&1; then
+    nft delete table inet vpnman >/dev/null 2>&1 || :
+fi
 
 %files
 %license LICENSE
@@ -169,6 +179,10 @@ fi
 /usr/share/metainfo/io.github.smiley_mcsmiles.VPNMan.metainfo.xml
 /usr/share/icons/hicolor/*/apps/io.github.smiley_mcsmiles.VPNMan*.svg
 /usr/share/man/man1/vpnman.1*
+
+%changelog
+* Mon Oct 05 2026 VPNMan contributors <noreply@example.invalid> - $VERSION-1
+- Packaged VPNMan $VERSION
 SPEC
 }
 
@@ -301,6 +315,21 @@ MK
 }
 
 build_recipes() { recipe_rpm; recipe_arch; recipe_void; recipe_alpine; recipe_openbsd; log "recipes -> dist/recipes/"; }
+
+# --container [IMAGE]: build the rpm inside a Fedora container (podman or docker), so it works from any distro
+if [ "${1:-}" = "--container" ]; then
+    shift
+    engine=$(command -v podman || command -v docker || true)
+    [ -n "$engine" ] || { echo "--container needs podman or docker" >&2; exit 1; }
+    image=${PKG_IMAGE:-registry.fedoraproject.org/fedora:latest}
+    log "building [$*] in $image with $(basename "$engine")"
+    "$engine" run --rm -v "$ROOT:/src:Z" -w /src "$image" bash -c \
+        "dnf -y -q install rpm-build python3 tar gzip findutils sed systemd-rpm-macros >/dev/null && \
+         cp -r /src /tmp/build-src && cd /tmp/build-src && rm -rf dist build && ./package.sh ${*:-rpm} && \
+         mkdir -p /src/dist && cp dist/*.rpm dist/*.tar.gz dist/*.deb /src/dist/ 2>/dev/null; true"
+    log "done. Output in $DIST"
+    exit 0
+fi
 
 targets=("$@")
 [ ${#targets[@]} -eq 0 ] && targets=(all)

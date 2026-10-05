@@ -42,10 +42,25 @@ GTK 4 and libadwaita ≥ 1.4.
 | `tailscale` / `netbird` / `zerotier` / `nebula` | Mesh/overlay VPNs | their CLIs |
 | `networkmanager` | Anything already defined in NetworkManager (L2TP/IPsec, …) | `nmcli` |
 | `custom` | Your own connect/disconnect commands | – |
+| *stunnel* | Not a protocol of its own: wraps **OpenVPN in TLS** so it looks like HTTPS (per-profile switch) | `stunnel` |
 
 Config files are auto-detected on import (`.ovpn`, WireGuard `.conf`, AmneziaWG, swanctl, vpnc,
 openfortivpn, Nebula). OpenVPN files that reference external `ca`/`cert`/`key`/`tls-crypt` files are
 imported together with those files.
+
+### OpenVPN over TLS (stunnel)
+
+Turn it on in the profile dialog ("SSL Tunnel (stunnel)": server `host:port`, optional SNI and CA file), or:
+
+```sh
+vpnman import work.ovpn --stunnel vpn.example.com:443 --stunnel-sni cdn.example.com --stunnel-ca server.pem
+vpnman edit work stunnel=vpn.example.com:443 stunnel_verify=system     # or stunnel=off
+```
+
+VPNMan starts stunnel in client mode on a free `127.0.0.1` port, rewrites the runtime copy of the OpenVPN config to
+`remote 127.0.0.1 <port>` / `proto tcp-client`, keeps the stunnel server outside the tunnel (`route … net_gateway`), and
+lets the kill switch allow only the stunnel server. Without a CA file the TLS layer is not verified (the OpenVPN
+session inside is still authenticated); a warning is logged.
 
 ## Eddie-style feature set
 
@@ -82,7 +97,9 @@ Service control later: `sudo vpnman service enable|disable|start|stop|restart|st
 ### Packages
 
 ```sh
-./package.sh            # dist/: .tar.gz, .deb (and .rpm / Arch pkg if rpmbuild / makepkg exist)
+./package.sh            # dist/: .tar.gz, .deb (built by packaging/mkdeb.py - no dpkg needed), .rpm if rpmbuild exists,
+                        # Arch pkg if makepkg exists
+./package.sh --container rpm   # build the .rpm inside a Fedora container (podman/docker) from ANY distro
                         # dist/recipes/: PKGBUILD, .spec, Void template, Alpine APKBUILD, OpenBSD port skeleton
 ./package.sh deb        # or pick targets: tar deb rpm arch void alpine openbsd recipes clean
 ```

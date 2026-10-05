@@ -189,6 +189,39 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(backends.get("custom").validate(profiles.new_profile("c", "custom")))
 
 
+class StunnelTests(unittest.TestCase):
+    def prof(self, **st):
+        return profiles.new_profile("s", "openvpn", options={"stunnel": dict({"enabled": True, "host": "h.example.com"}, **st)})
+
+    def test_config_defaults(self):
+        from vpnman import stunnel
+        conf, warns = stunnel.config(self.prof(), "/pd", "/wd", 12345)
+        self.assertIn("accept = 127.0.0.1:12345", conf)
+        self.assertIn("connect = h.example.com:443", conf)
+        self.assertIn("sni = h.example.com", conf)
+        self.assertTrue(warns)   # unverified by default
+
+    def test_config_ca_verification(self):
+        from vpnman import stunnel
+        conf, warns = stunnel.config(self.prof(ca="srv.pem"), "/pd", "/wd", 1)
+        self.assertIn("CAfile = /pd/srv.pem", conf)
+        self.assertIn("verifyChain = yes", conf)
+        self.assertIn("checkHost = h.example.com", conf)
+        self.assertFalse(warns)
+
+    def test_validation(self):
+        from vpnman import stunnel
+        self.assertTrue(any("host" in p for p in stunnel.validate(self.prof(host="bad host;x"))))
+        self.assertTrue(any("CA" in p for p in stunnel.validate(self.prof(verify="ca"))))
+        self.assertEqual(stunnel.validate(profiles.new_profile("p", "openvpn")), [])
+
+    def test_endpoint_is_stunnel_server(self):
+        b = backends.get("openvpn")
+        p = self.prof(port=8443)
+        p["options"]["remotes"] = [["vpn.example.net", 1194, "udp"]]
+        self.assertEqual(b.endpoints(p), [("h.example.com", 8443, "tcp")])
+
+
 class SettingsDnsTests(unittest.TestCase):
     def test_coercion(self):
         s = settings.Settings(TMP + "/set.json")
@@ -217,13 +250,21 @@ class EndToEnd(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         fake = TMP + "/bin/openvpn"
+        open(TMP + "/bin/stunnel", "w").write("""#!/bin/sh
+cp "$1" "%s/stunnel.conf.copy"
+echo "Configuration successful"
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+""" % TMP)
+        os.chmod(TMP + "/bin/stunnel", 0o755)
         open(fake, "w").write("""#!/bin/sh
+cp "$2" "%s/last.ovpn"
 echo "TUN/TAP device lo opened"
 echo "PUSH: dhcp-option DNS 10.8.0.1"
 echo "Initialization Sequence Completed"
 trap 'exit 0' TERM
 while :; do sleep 0.1; done
-""")
+""" % TMP)
         os.chmod(fake, 0o755)
         s = settings.Settings(TMP + "/etc/settings.json")
         s.set("checks.tunnel", False)
@@ -267,6 +308,25 @@ while :; do sleep 0.1; done
         self.assertTrue(self.c.call("profiles.get", ident="lab")["favorite"])
         self.c.call("profiles.remove", ident="lab")
         self.assertEqual(self.c.call("profiles.list"), [])
+
+    def test_openvpn_over_stunnel(self):
+        opts = {"stunnel": {"enabled": True, "host": "127.0.0.1", "port": 8443, "sni": "cdn.example.com"}}
+        self.c.call("profiles.import", name="tls", text=OVPN.replace("auth-user-pass\n", ""),
+                    filename="tls.ovpn", options=opts)
+        self.c.call("connect", ident="tls")
+        self.wait("connected")
+        conf = open(TMP + "/stunnel.conf.copy").read()
+        self.assertIn("connect = 127.0.0.1:8443", conf)
+        self.assertIn("sni = cdn.example.com", conf)
+        self.assertIn("client = yes", conf)
+        ovpn = open(TMP + "/last.ovpn").read()
+        self.assertIn("proto tcp-client", ovpn)
+        self.assertRegex(ovpn, r"remote 127\.0\.0\.1 \d+")
+        self.assertNotIn("vpn.example.net", ovpn)
+        self.assertIn("route 127.0.0.1 255.255.255.255 net_gateway", ovpn)
+        self.assertTrue(any(e["level"] == "stunnel" for e in self.c.call("logs")["entries"]))
+        self.c.call("disconnect")
+        self.c.call("profiles.remove", ident="tls")
 
     def test_errors(self):
         with self.assertRaises(ipc.RpcError):

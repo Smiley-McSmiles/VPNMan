@@ -198,6 +198,7 @@ mkdir -p "$D$LIBDIR"
 cp -R "$SRC/vpnman" "$D$LIBDIR/vpnman"
 find "$D$LIBDIR" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
+mkdir -p "$D/etc/vpnman" && chmod 700 "$D/etc/vpnman"
 mkdir -p "$D$SHAREDIR/vpnman"
 cp -R "$SRC/data/init" "$D$SHAREDIR/vpnman/init"
 

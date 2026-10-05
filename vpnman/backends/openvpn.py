@@ -1,5 +1,6 @@
 import re
 
+from .. import stunnel
 from .base import Backend
 
 _REMOTE = re.compile(r"^\s*remote\s+(\S+)(?:\s+(\d+))?(?:\s+(udp6?|tcp6?(?:-client)?))?", re.M | re.I)
@@ -46,10 +47,14 @@ class OpenVPN(Backend):
         return out
 
     def validate(self, profile):
-        problems = super().validate(profile)
+        problems = super().validate(profile) + stunnel.validate(profile)
         if not profile.get("config"):
             problems.append("profile has no OpenVPN config")
         return problems
+
+    def endpoints(self, profile):
+        wrapped = stunnel.endpoint(profile)
+        return wrapped or super().endpoints(profile)
 
     def _dev(self, text):
         m = re.search(r"^\s*dev\s+(tun|tap)", text, re.M)
@@ -67,6 +72,15 @@ class OpenVPN(Backend):
             return m.group(1) + ip + m.group(3) if ip else m.group(0)
 
         text = re.sub(r"^(\s*remote\s+)(\S+)(.*)$", sub, text, flags=re.M)
+        tun = ctx.state.get("stunnel")
+        if tun:
+            # OpenVPN talks TCP to the local stunnel; stunnel carries it over TLS to the server.
+            text = re.sub(r"^\s*(remote|remote-random|proto|explicit-exit-notify|http-proxy|socks-proxy)\b.*$\n?",
+                          "", text, flags=re.M)
+            extra = ["remote 127.0.0.1 %d" % tun["port"], "proto tcp-client", "nobind"]
+            if tun.get("ip") and ":" not in tun["ip"]:
+                extra.append("route %s 255.255.255.255 net_gateway" % tun["ip"])   # keep stunnel outside the VPN
+            text = text.rstrip("\n") + "\n" + "\n".join(extra) + "\n"
         ctx.state["text"] = text
         ctx.state["path"] = ctx.write("runtime.ovpn", text)
 

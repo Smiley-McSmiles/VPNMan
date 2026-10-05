@@ -148,18 +148,41 @@ class Cli:
         if a.user:
             fields["username"] = a.user
             fields["password"] = getpass.getpass("Password for %s: " % a.user) if a.ask_password else (a.password or "")
+        options = {}
+        if a.stunnel:
+            options["stunnel"] = self.stunnel_opts(a.stunnel, a.stunnel_sni, a.stunnel_verify)
         ok = 0
         for path in targets:
             try:
                 text, files = prof.collect_files(path)
                 name = a.name if (a.name and len(targets) == 1) else os.path.splitext(os.path.basename(path))[0]
                 p = self.call("profiles.import", name=name, text=text, files=files, protocol=a.protocol,
-                              filename=os.path.basename(path), fields=fields)
+                              filename=os.path.basename(path), fields=fields, options=options)
+                if a.stunnel_ca and a.stunnel:
+                    self.upload_ca(p["id"], a.stunnel_ca)
                 print("%s %s  (%s)" % (green("imported"), p["name"], p["protocol"]))
                 ok += 1
             except (RpcError, OSError) as e:
                 print("%s %s: %s" % (red("skipped"), path, e), file=sys.stderr)
         return 0 if ok else 1
+
+    @staticmethod
+    def stunnel_opts(target, sni=None, verify=None):
+        host, _, port = target.rpartition(":") if ":" in target else (target, "", "")
+        st = {"enabled": True, "host": host or target, "port": int(port) if port.isdigit() else 443}
+        if sni:
+            st["sni"] = sni
+        if verify:
+            st["verify"] = verify
+        return st
+
+    def upload_ca(self, ident, path):
+        import base64
+        with open(path, "rb") as fh:
+            self.call("profiles.setfile", ident=ident, name="stunnel-ca.pem", data=base64.b64encode(fh.read()).decode())
+        p = self.call("profiles.get", ident=ident)
+        st = dict(p["options"].get("stunnel", {}), ca="stunnel-ca.pem", verify="ca")
+        self.call("profiles.update", ident=ident, changes={"options": dict(p["options"], stunnel=st)})
 
     def cmd_add(self, a):
         fields = {"server": a.server or "", "port": a.port or 0, "username": a.user or ""}
@@ -180,8 +203,28 @@ class Cli:
 
     def cmd_edit(self, a):
         ch = {}
+        cur = None
         for kv in a.changes:
             k, _, v = kv.partition("=")
+            if k.startswith("stunnel"):
+                cur = cur or self.call("profiles.get", ident=a.profile)
+                opts = ch.setdefault("options", dict(cur["options"]))
+                st = dict(opts.get("stunnel", {}))
+                if k == "stunnel":
+                    if v.lower() in ("", "off", "none", "false"):
+                        st["enabled"] = False
+                    else:
+                        st.update(self.stunnel_opts(v))
+                elif k == "stunnel_sni":
+                    st["sni"] = v
+                elif k == "stunnel_verify":
+                    st["verify"] = v
+                elif k == "stunnel_ca":
+                    self.upload_ca(cur["id"], v)
+                    st.update(ca="stunnel-ca.pem", verify="ca")
+                    cur = self.call("profiles.get", ident=a.profile)
+                opts["stunnel"] = st
+                continue
             if k in ("favorite", "blacklisted"):
                 v = v.lower() in ("1", "true", "yes", "on")
             elif k == "dns":
@@ -407,7 +450,8 @@ def interactive(cli):
                 path = ask("Path to config file or directory")
                 if path:
                     ns = argparse.Namespace(paths=[os.path.expanduser(path)], name=None, protocol=None,
-                                            user=None, password=None, ask_password=False)
+                                            user=None, password=None, ask_password=False, stunnel=None,
+                                            stunnel_sni=None, stunnel_ca=None, stunnel_verify=None)
                     user = ask("Username (empty if none)")
                     if user:
                         ns.user, ns.ask_password = user, True
@@ -494,12 +538,16 @@ def build_parser():
     s = add("import", "import config files or a directory of them")
     s.add_argument("paths", nargs="+"); s.add_argument("--name"); s.add_argument("--protocol", choices=list(backends.REGISTRY))
     s.add_argument("--user"); s.add_argument("--password"); s.add_argument("--ask-password", action="store_true")
+    s.add_argument("--stunnel", metavar="HOST[:PORT]", help="carry OpenVPN over TLS via stunnel (default port 443)")
+    s.add_argument("--stunnel-sni", metavar="NAME"); s.add_argument("--stunnel-ca", metavar="FILE")
+    s.add_argument("--stunnel-verify", choices=["none", "system", "ca"])
     s = add("add", "create a profile without a config file")
     s.add_argument("name"); s.add_argument("--protocol", required=True, choices=list(backends.REGISTRY))
     s.add_argument("--server"); s.add_argument("--port", type=int); s.add_argument("--user")
     s.add_argument("--ask-password", action="store_true"); s.add_argument("--option", "-o", action="append", metavar="K=V")
     s = add("remove", "delete profiles", aliases=["rm"]); s.add_argument("profiles", nargs="+")
-    s = add("edit", "change profile fields (name, username, password, server, port, dns, notes, group)")
+    s = add("edit", "change profile fields (name, username, password, server, port, dns, notes, group, "
+                 "stunnel=HOST:PORT|off, stunnel_sni, stunnel_ca=FILE, stunnel_verify)")
     s.add_argument("profile"); s.add_argument("changes", nargs="+", metavar="KEY=VALUE")
     for n, h in (("fav", "mark favourite"), ("unfav", "unmark favourite"), ("block", "blacklist"),
                  ("unblock", "remove from blacklist")):

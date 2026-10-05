@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, dns, netlock, paths
+from . import __version__, backends, dns, netlock, paths, stunnel
 from . import platform as plat
 from .profiles import ProfileError, ProfileStore, public_view
 from .settings import Settings
@@ -353,6 +353,8 @@ class Manager:
         ready = threading.Event()
         proc = None
         reader = None
+        tproc = None
+        treader = None
         routes_added = []
         try:
             # --- endpoints & lock (before anything touches the network)
@@ -374,6 +376,10 @@ class Manager:
             self._hook("pre_connect", ctx)
             if stop.is_set():
                 return False
+            if stunnel.settings_of(profile):
+                tproc, treader = self._start_stunnel(profile, ctx, stop)
+                if stop.is_set():
+                    return False
             gw, gwif = plat.default_gateway()
             before = set(plat.list_interfaces())
             self.log.add("info", "Connecting to %s (%s)" % (profile["name"], backend.label))
@@ -468,6 +474,9 @@ class Manager:
                 if proc is not None and proc.poll() is not None:
                     self.log.add("warn", "%s terminated (status %s)" % (backend.label, proc.returncode))
                     break
+                if tproc is not None and tproc.poll() is not None:
+                    self.log.add("warn", "stunnel terminated (status %s)" % tproc.returncode)
+                    break
                 if oneshot and primary and not plat.iface_exists(primary):
                     self.log.add("warn", "Tunnel interface %s disappeared" % primary)
                     break
@@ -490,6 +499,13 @@ class Manager:
                 reader.join(2)
             if proc is not None and proc.stdout:
                 proc.stdout.close()
+            if tproc is not None:
+                if tproc.poll() is None:
+                    _terminate(tproc)
+                if treader:
+                    treader.join(2)
+                if tproc.stdout:
+                    tproc.stdout.close()
             if oneshot or ctx.state:
                 try:
                     for cmd in backend.disconnect_cmds(ctx):
@@ -509,6 +525,52 @@ class Manager:
                 except Exception as e:  # noqa: BLE001
                     self.log.add("error", "Network lock update failed: %s" % e)
             shutil.rmtree(workdir, ignore_errors=True)
+
+    def _start_stunnel(self, profile, ctx, stop):
+        """Launch the stunnel sidecar and wait until it is configured."""
+        st = stunnel.settings_of(profile)
+        port = stunnel.free_port()
+        conf, warns = stunnel.config(profile, ctx.profile_dir, ctx.workdir, port)
+        for w in warns:
+            self.log.add("warn", w)
+        path = ctx.write("stunnel.conf", conf)
+        ips = ctx.state.get("resolved", {}).get(st["host"])
+        ctx.state["stunnel"] = {"port": port, "ip": ips}
+        cmd = [stunnel.binary(), path]
+        self.log.add("info", "Starting stunnel to %s:%s" % (st["host"], st.get("port") or 443))
+        self.log.add("debug", "$ " + _safe_cmd(cmd))
+        try:
+            tproc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, start_new_session=True, text=True,
+                                     bufsize=1, errors="replace")
+        except OSError as e:
+            raise FatalError("cannot start stunnel: %s" % e)
+        up = threading.Event()
+
+        def pump():
+            try:
+                for line in tproc.stdout:
+                    line = line.rstrip()
+                    if line:
+                        self.log.add("stunnel", line)
+                        if stunnel.READY_RE.search(line):
+                            up.set()
+            except (OSError, ValueError):
+                pass
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+        end = time.time() + 15
+        while not up.is_set():
+            if stop.is_set():
+                return tproc, reader
+            if tproc.poll() is not None:
+                reader.join(2)
+                raise ConnectError("stunnel exited with status %s" % tproc.returncode)
+            if time.time() > end:
+                _terminate(tproc)
+                raise ConnectError("stunnel did not start in time")
+            time.sleep(0.1)
+        return tproc, reader
 
     def _read_output(self, proc, backend, ctx, ready):
         try:
@@ -622,7 +684,7 @@ class Manager:
             return dict(ex.map(probe, profiles))
 
     # ---------------------------------------------------------------- profiles
-    def import_profile(self, name, text, files=None, protocol=None, filename=None, fields=None):
+    def import_profile(self, name, text, files=None, protocol=None, filename=None, fields=None, options=None):
         filename = filename or name
         protocol = protocol or backends.sniff(filename, text)
         if not protocol:
@@ -637,6 +699,7 @@ class Manager:
         for k, v in (fields or {}).items():
             if k in p and k not in ("id", "created", "config"):
                 p[k] = v
+        p["options"].update(options or {})
         cfg = re.sub(r"[^A-Za-z0-9._-]", "_", filename)
         if not cfg.lower().endswith(tuple(backend.extensions) or ("",)) and backend.extensions:
             cfg += backend.extensions[0]
@@ -650,7 +713,7 @@ class Manager:
         self.log.add("info", "Imported profile %s (%s)" % (p["name"], backend.label))
         return public_view(p)
 
-    def add_profile(self, name, protocol, fields=None, options=None):
+    def add_profile(self, name, protocol, fields=None, options=None, files=None):
         from .profiles import new_profile
         backends.get(protocol)
         p = new_profile(name, protocol)
@@ -659,7 +722,14 @@ class Manager:
                 p[k] = v
         p["options"].update(options or {})
         self._unique_name(p)
-        self.store.save(p)
+        import base64
+        self.store.save(p, {fn: base64.b64decode(b) for fn, b in (files or {}).items()})
+        return public_view(p)
+
+    def set_profile_file(self, ident, name, b64):
+        import base64
+        p = self.store.find(ident)
+        self.store.save(p, {name: base64.b64decode(b64)})
         return public_view(p)
 
     def _unique_name(self, p):

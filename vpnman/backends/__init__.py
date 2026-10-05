@@ -30,6 +30,11 @@ def sniff(filename, text):
 
 
 def describe():
+    from .. import stunnel
+    extra = [{"id": "stunnel", "label": "stunnel (TLS wrapper)",
+              "description": "Carry OpenVPN over TLS so it looks like HTTPS (enable per OpenVPN profile)",
+              "available": bool(stunnel.binary()), "missing": [] if stunnel.binary() else ["stunnel"],
+              "mode": "wrapper", "fields": [], "note": ""}]
     return [{"id": b.id, "label": b.label, "description": b.description,
              "available": b.available(), "missing": b.missing(), "mode": b.mode,
              "fields": list(b.fields), "note": b.lock_note}

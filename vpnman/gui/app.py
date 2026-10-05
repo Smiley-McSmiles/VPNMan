@@ -159,6 +159,27 @@ class ProfileDialog(Adw.Window):
             self.notes.set_text(profile.get("notes") or "")
             self.opts.set_text(", ".join("%s=%s" % kv for kv in profile.get("options", {}).items()
                                          if isinstance(kv[1], (str, int))))
+        # ---- stunnel (TLS wrapper for OpenVPN)
+        g3 = Adw.PreferencesGroup(title="SSL Tunnel (stunnel)",
+                                  description="OpenVPN only. Wraps the connection in TLS so it looks like HTTPS.")
+        page.add(g3)
+        self.st_switch = Adw.SwitchRow(title="Tunnel over TLS with stunnel")
+        self.st_host = Adw.EntryRow(title="stunnel server (host:port, default port 443)")
+        self.st_sni = Adw.EntryRow(title="SNI hostname (optional)")
+        self.st_ca = Adw.ActionRow(title="CA certificate (optional)", subtitle="None - server certificate is not verified")
+        self.st_ca_path = None
+        ca_btn = Gtk.Button(label="Choose…", valign=Gtk.Align.CENTER)
+        ca_btn.connect("clicked", lambda *_: choose_files(self, "Choose CA certificate", self._set_ca, multiple=False))
+        self.st_ca.add_suffix(ca_btn)
+        for r in (self.st_switch, self.st_host, self.st_sni, self.st_ca):
+            g3.add(r)
+        st = (profile or {}).get("options", {}).get("stunnel")
+        if st:
+            self.st_switch.set_active(bool(st.get("enabled")))
+            self.st_host.set_text("%s:%s" % (st.get("host", ""), st.get("port", 443)) if st.get("host") else "")
+            self.st_sni.set_text(st.get("sni", ""))
+            if st.get("ca"):
+                self.st_ca.set_subtitle("Stored: %s" % st["ca"])
         self.err = Adw.Banner(revealed=False)
         view.add_top_bar(self.err)
 
@@ -170,6 +191,36 @@ class ProfileDialog(Adw.Window):
         self.file_row.set_subtitle(", ".join(os.path.basename(f) for f in files))
         if len(files) == 1 and not self.name.get_text():
             self.name.set_text(os.path.splitext(os.path.basename(files[0]))[0])
+
+    def _set_ca(self, files):
+        self.st_ca_path = files[0]
+        self.st_ca.set_subtitle(os.path.basename(files[0]))
+
+    def _stunnel(self):
+        """Return (options dict or None, {filename: b64} extra files); raises ValueError when invalid."""
+        if not self.st_switch.get_active():
+            if (self.profile or {}).get("options", {}).get("stunnel"):
+                return {"stunnel": dict(self.profile["options"]["stunnel"], enabled=False)}, {}
+            return {}, {}
+        target = self.st_host.get_text().strip()
+        if not target:
+            raise ValueError("Enter the stunnel server (host:port)")
+        host, _, port = target.rpartition(":") if ":" in target else (target, "", "")
+        if not host:
+            host = target
+        st = {"enabled": True, "host": host, "port": int(port) if port.isdigit() else 443}
+        if self.st_sni.get_text().strip():
+            st["sni"] = self.st_sni.get_text().strip()
+        files = {}
+        old = (self.profile or {}).get("options", {}).get("stunnel", {})
+        if self.st_ca_path:
+            import base64
+            with open(self.st_ca_path, "rb") as fh:
+                files["stunnel-ca.pem"] = base64.b64encode(fh.read()).decode()
+            st.update(ca="stunnel-ca.pem", verify="ca")
+        elif old.get("ca"):
+            st.update(ca=old["ca"], verify=old.get("verify", "ca"))
+        return {"stunnel": st}, files
 
     def _selected_protocol(self):
         if self.proto is None:
@@ -196,14 +247,19 @@ class ProfileDialog(Adw.Window):
             if self.user.get_text():
                 fields = {"username": self.user.get_text(), "password": self.password.get_text()}
             files, proto, name = list(self.files), self._selected_protocol(), self.name.get_text()
+            try:
+                st_opts, st_files = self._stunnel()
+            except ValueError as e:
+                return self._error(e)
 
             def work():
                 err = None
                 for f in files:
                     try:
                         text, extra = prof.collect_files(f)
+                        extra.update(st_files)
                         Client().call("profiles.import", name=(name if len(files) == 1 and name else os.path.splitext(os.path.basename(f))[0]),
-                                      text=text, files=extra, protocol=proto, filename=os.path.basename(f), fields=fields)
+                                      text=text, files=extra, protocol=proto, filename=os.path.basename(f), fields=fields, options=st_opts)
                     except (RpcError, DaemonUnavailable, OSError) as e:
                         err = "%s: %s" % (os.path.basename(f), e)
                 GLib.idle_add(self._error if err else self._finish, err)
@@ -222,18 +278,31 @@ class ProfileDialog(Adw.Window):
         except ValueError:
             return self._error("Port must be a number")
         dns = [d.strip() for d in self.dns.get_text().split(",") if d.strip()]
+        try:
+            st_opts, st_files = self._stunnel()
+        except ValueError as e:
+            return self._error(e)
+        opts.update(st_opts)
         if self.mode == "add":
             fields = {"server": self.server.get_text().strip(), "port": port, "username": self.user.get_text(),
                       "password": self.password.get_text(), "dns": dns, "notes": self.notes.get_text()}
             rpc("profiles.add", self._finish, self._error, name=name, protocol=self._selected_protocol(),
-                fields=fields, options=opts)
+                fields=fields, options=opts, files=st_files)
         else:
             ch = {"name": name, "server": self.server.get_text().strip(), "port": port,
                   "username": self.user.get_text(), "dns": dns, "notes": self.notes.get_text(),
                   "options": dict(self.profile.get("options", {}), **opts)}
             if self.password.get_text():
                 ch["password"] = self.password.get_text()
-            rpc("profiles.update", self._finish, self._error, ident=self.profile["id"], changes=ch)
+            pid = self.profile["id"]
+
+            def apply_changes(*_):
+                rpc("profiles.update", self._finish, self._error, ident=pid, changes=ch)
+            if st_files:
+                rpc("profiles.setfile", apply_changes, self._error, ident=pid, name="stunnel-ca.pem",
+                    data=st_files["stunnel-ca.pem"])
+            else:
+                apply_changes()
 
 
 # ------------------------------------------------------------------- window

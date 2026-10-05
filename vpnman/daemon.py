@@ -72,7 +72,9 @@ METHODS = {
     "profiles.list": lambda m: m.profiles(),
     "profiles.get": lambda m, ident: public_view(m.store.find(ident)),
     "profiles.import": _import,
-    "profiles.add": lambda m, name, protocol, fields=None, options=None: m.add_profile(name, protocol, fields, options),
+    "profiles.add": lambda m, name, protocol, fields=None, options=None, files=None: m.add_profile(
+        name, protocol, fields, options, files),
+    "profiles.setfile": lambda m, ident, name, data: m.set_profile_file(ident, name, data),
     "profiles.update": lambda m, ident, changes: public_view(m.store.update(ident, changes)),
     "profiles.remove": lambda m, ident: public_view(m.store.remove(ident)),
     "latency": lambda m, ids=None: m.latency(ids),
