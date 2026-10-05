@@ -22,6 +22,7 @@ UNINSTALL=0
 PURGE=0
 DEPS=0
 CHECK=0
+SYSLINKS=1
 GROUP=vpnman
 WARNINGS=""
 SRC=$(cd "$(dirname "$0")" && pwd)
@@ -38,6 +39,7 @@ Options:
   --uninstall         remove VPNMan (add --purge to also delete /etc/vpnman profiles/settings)
   --install-deps      install runtime dependencies first (apt, dnf, pacman, xbps, apk, zypper, pkg_add, pkg)
   --check             only report what is missing on this machine; install nothing
+  --no-system-links   do not link the launcher/icons into /usr/share when installing under another prefix
   -h, --help          show this help
 USAGE
 }
@@ -53,6 +55,7 @@ while [ $# -gt 0 ]; do
         --purge) PURGE=1 ;;
         --install-deps) DEPS=1 ;;
         --check) CHECK=1 ;;
+        --no-system-links) SYSLINKS=0 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -138,13 +141,13 @@ install_deps() {
     case "$(pm_name)" in
         apt-get) apt-get update || warn "apt-get update failed"
                  REQ="python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 iproute2"
-                 OPT="openvpn wireguard-tools nftables openresolv desktop-file-utils libgtk-4-bin stunnel4" ;;
+                 OPT="openvpn wireguard-tools nftables openresolv desktop-file-utils libgtk-4-bin stunnel4 gir1.2-xapp-1.0" ;;
         dnf) REQ="python3 python3-gobject gtk4 libadwaita iproute"
              OPT="openvpn wireguard-tools nftables desktop-file-utils gtk-update-icon-cache stunnel" ;;
         pacman) REQ="python python-gobject gtk4 libadwaita iproute2"
                 OPT="openvpn wireguard-tools nftables desktop-file-utils stunnel" ;;
         xbps-install) REQ="python3 python3-gobject gtk4 libadwaita iproute2"
-                      OPT="openvpn wireguard-tools nftables polkit desktop-file-utils gtk-update-icon-cache stunnel" ;;
+                      OPT="openvpn wireguard-tools nftables polkit desktop-file-utils gtk-update-icon-cache stunnel xapp" ;;
         apk) REQ="python3 py3-gobject3 gtk4.0 libadwaita iproute2"
              OPT="openvpn wireguard-tools nftables desktop-file-utils stunnel" ;;
         zypper) REQ="python3 python3-gobject typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 iproute2"
@@ -181,6 +184,11 @@ preflight() {
         fi
     else
         warn "GUI dependencies missing (PyGObject, GTK 4, libadwaita). The CLI and daemon still work. Install with: $(gui_hint)   (or rerun with --install-deps)"
+    fi
+    if have cinnamon || printf '%s' "${XDG_CURRENT_DESKTOP:-}" | grep -qi cinnamon; then
+        if ! "$PY" -c "import gi; gi.require_version('Gtk','3.0'); gi.require_version('XApp','1.0')" 2>/dev/null; then
+            warn "Cinnamon detected but the XApp/GTK 3 typelibs are missing - the system tray icon will not work. Install xapp (Void: xbps-install -S xapp; Debian/Mint: apt install gir1.2-xapp-1.0)"
+        fi
     fi
     if ! have openvpn && ! have wg && ! have wg-quick; then
         warn "no VPN client found yet - install openvpn and/or wireguard-tools (see: vpnman protocols)"
@@ -239,17 +247,65 @@ install_init() {
     esac
 }
 
-refresh_icon_cache() {
-    theme=$SHAREDIR/icons/hicolor
-    if [ -d "$theme" ] && [ -z "$(find "$theme" -type f ! -name 'icon-theme.cache' ! -name index.theme 2>/dev/null | head -n 1)" ]; then
+APPID=io.github.smiley_mcsmiles.VPNMan
+SYSTEM_SHARE=${VPNMAN_SYSTEM_SHARE:-/usr/share}      # overridable for tests
+
+refresh_one_cache() {  # refresh_one_cache <hicolor dir>
+    theme=$1
+    [ -d "$theme" ] || return 0
+    if [ -z "$(find "$theme" -type f ! -name 'icon-theme.cache' ! -name index.theme 2>/dev/null | head -n 1)" ]; then
         rm -f "$theme/icon-theme.cache"      # nothing left: a stale cache would advertise icons that are gone
     else
         for t in gtk4-update-icon-cache gtk-update-icon-cache; do
             if have "$t"; then "$t" -q -f -t "$theme" 2>/dev/null && break; fi
         done
     fi
-    if have update-desktop-database; then update-desktop-database -q "$SHAREDIR/applications" 2>/dev/null; fi
+}
+
+refresh_icon_cache() {
+    refresh_one_cache "$SHAREDIR/icons/hicolor"
+    if [ "$SHAREDIR" != "$SYSTEM_SHARE" ]; then refresh_one_cache "$SYSTEM_SHARE/icons/hicolor"; fi
+    for d in "$SHAREDIR/applications" "$SYSTEM_SHARE/applications"; do
+        if have update-desktop-database && [ -d "$d" ]; then update-desktop-database -q "$d" 2>/dev/null || true; fi
+    done
     return 0
+}
+
+# Desktops search $XDG_DATA_DIRS for launchers and icons. The default includes /usr/local/share, but sessions that
+# set XDG_DATA_DIRS themselves (common with some display managers / Cinnamon session scripts) leave it out, and the
+# launcher and icon then silently never show up. Linking them into /usr/share makes them visible in every case.
+link_one() {  # link_one <real file> <link path>
+    if [ -e "$2" ] && [ ! -L "$2" ]; then return 0; fi          # a real file (package-owned): never touch it
+    mkdir -p "$(dirname "$2")" 2>/dev/null || return 1
+    ln -sf "$1" "$2"
+}
+
+link_system_dirs() {
+    [ "$SYSLINKS" -eq 1 ] && [ "$OS" = Linux ] && [ "$SHAREDIR" != "$SYSTEM_SHARE" ] || return 0
+    [ -d "$SYSTEM_SHARE" ] || return 0
+    ok=1
+    link_one "$SHAREDIR/applications/$APPID.desktop" "$SYSTEM_SHARE/applications/$APPID.desktop" || ok=0
+    link_one "$SHAREDIR/metainfo/$APPID.metainfo.xml" "$SYSTEM_SHARE/metainfo/$APPID.metainfo.xml" || ok=0
+    link_one "$SHAREDIR/pixmaps/$APPID.svg" "$SYSTEM_SHARE/pixmaps/$APPID.svg" || ok=0
+    for f in "$SHAREDIR"/icons/hicolor/*/apps/"$APPID"*; do
+        [ -f "$f" ] || continue
+        rel=${f#"$SHAREDIR"/icons/hicolor/}
+        link_one "$f" "$SYSTEM_SHARE/icons/hicolor/$rel" || ok=0
+    done
+    if [ "$ok" -eq 1 ]; then
+        say "Linked the launcher and icons into $SYSTEM_SHARE (visible to every desktop session)"
+    else
+        warn "could not link the launcher/icons into $SYSTEM_SHARE (read-only?). If VPNMan is missing from your menu, reinstall with --prefix /usr"
+    fi
+}
+
+unlink_system_dirs() {
+    for l in "$SYSTEM_SHARE/applications/$APPID.desktop" "$SYSTEM_SHARE/metainfo/$APPID.metainfo.xml" \
+             "$SYSTEM_SHARE/pixmaps/$APPID.svg" "$SYSTEM_SHARE"/icons/hicolor/*/apps/"$APPID"*; do
+        if [ -L "$l" ]; then
+            case "$(readlink "$l")" in "$SHAREDIR"/*) rm -f "$l" ;; esac
+        fi
+    done
 }
 
 uninstall() {
@@ -271,7 +327,7 @@ uninstall() {
           "$D$MANDIR/vpnman.1"
     rm -f "$D$SHAREDIR"/icons/hicolor/symbolic/apps/io.github.smiley_mcsmiles.VPNMan*.svg \
           "$D$SHAREDIR"/icons/hicolor/*/apps/io.github.smiley_mcsmiles.VPNMan.png
-    if [ -z "$DESTDIR" ]; then refresh_icon_cache; fi
+    if [ -z "$DESTDIR" ]; then unlink_system_dirs; refresh_icon_cache; fi
     rm -f "$D/etc/systemd/system/vpnmand.service" "$D/usr/lib/systemd/system/vpnmand.service" \
           "$D/etc/init.d/vpnmand" "$D/etc/rc.d/vpnmand" "$D/usr/local/etc/rc.d/vpnmand"
     rm -rf "$D/etc/sv/vpnmand" "$D/etc/runit/sv/vpnmand"
@@ -412,6 +468,10 @@ diagnose_daemon() {
     esac
     printf -- '-------------------\nRun "vpnman doctor" for more, or start it by hand: %s/vpnmand\n\n' "$BINDIR" >&2
 }
+
+if [ -z "$DESTDIR" ] && { [ "$DO_POST" -eq 1 ] || [ -n "${VPNMAN_SYSTEM_SHARE:-}" ]; }; then
+    link_system_dirs
+fi
 
 if [ "$DO_POST" -eq 1 ] && [ -z "$DESTDIR" ]; then
     mkdir -p /etc/vpnman && chmod 700 /etc/vpnman

@@ -139,7 +139,16 @@ class Tray:
         for w in WATCHERS:
             Gio.bus_watch_name_on_connection(self._conn, w, Gio.BusNameWatcherFlags.NONE,
                                              self._watcher_appeared, self._watcher_vanished)
+        GLib.timeout_add_seconds(2, self._wake_xapp_watcher)
         return True
+
+    def _wake_xapp_watcher(self):
+        """Cinnamon's bridge (xapp-sn-watcher) is D-Bus activatable; start it if autostart did not."""
+        if not self._watcher and "cinnamon" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower():
+            self._conn.call("org.x.StatusNotifierWatcher", "/org/x/StatusNotifierWatcher",
+                            "org.freedesktop.Application", "Activate", GLib.Variant("(a{sv})", ({},)), None,
+                            Gio.DBusCallFlags.NONE, 5000, None, lambda *_: None)
+        return False
 
     def stop(self):
         self._set_available(False)
@@ -317,3 +326,144 @@ class Tray:
             cb = items[item_id - 1].get("callback")
             if cb and items[item_id - 1].get("enabled", True):
                 GLib.idle_add(lambda: (cb(), False)[1])
+
+
+class HelperTray:
+    """Same interface as Tray, but the icon lives in a GTK 3 + XApp helper process (see trayhelper.py).
+
+    Used on Cinnamon: XApp.StatusIcon is its native tray API and does not depend on the StatusNotifier bridge.
+    """
+
+    def __init__(self, app_id, title, on_activate, menu_provider, on_availability=None, icon_theme_path="",
+                 on_failure=None):
+        self.app_id, self.title = app_id, title
+        self.on_activate, self.menu_provider = on_activate, menu_provider
+        self.on_availability, self.on_failure = on_availability, on_failure
+        self.icon_theme_path = icon_theme_path
+        self.available = False
+        self.kind = None
+        self._proc = None
+        self._buf = b""
+        self._items = {}
+        self._watch = None
+        self._ready = False
+
+    def start(self):
+        import subprocess
+        import sys
+        pkg_parent = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        env = dict(os.environ)
+        env["PYTHONPATH"] = pkg_parent + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        try:
+            self._proc = subprocess.Popen([sys.executable, "-m", "vpnman.gui.trayhelper", self.icon_theme_path],
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+        except OSError:
+            return False
+        os.set_blocking(self._proc.stdout.fileno(), False)
+        self._watch = GLib.io_add_watch(self._proc.stdout.fileno(), GLib.PRIORITY_DEFAULT,
+                                        GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR, self._on_data)
+        GLib.timeout_add_seconds(6, self._startup_check)
+        return True
+
+    def _startup_check(self):
+        if not self._ready:                       # the helper never said hello (GTK 3 missing, crashed, ...)
+            self._failed()
+        return False
+
+    def _failed(self):
+        self.stop()
+        if self.on_failure:
+            self.on_failure()
+
+    def _send(self, obj):
+        import json
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.stdin.write((json.dumps(obj) + "\n").encode())
+                self._proc.stdin.flush()
+            except OSError:
+                pass
+
+    def _on_data(self, fd, cond):
+        import json
+        try:
+            chunk = os.read(fd, 65536)
+        except BlockingIOError:
+            return True
+        except OSError:
+            chunk = b""
+        if not chunk:
+            if self._proc and not self._ready:
+                self._failed()
+            else:
+                self._set_available(False)
+            return False
+        self._buf += chunk
+        while b"\n" in self._buf:
+            line, self._buf = self._buf.split(b"\n", 1)
+            try:
+                msg = json.loads(line.decode())
+            except ValueError:
+                continue
+            ev = msg.get("event")
+            if ev == "ready":
+                self._ready, self.kind = True, msg.get("kind")
+                self.update_menu()
+                self._set_available(bool(msg.get("available")))
+            elif ev == "availability":
+                self._set_available(bool(msg.get("available")))
+            elif ev == "activate":
+                GLib.idle_add(lambda: (self.on_activate(), False)[1])
+            elif ev == "menu":
+                cb = self._items.get(msg.get("id"))
+                if cb:
+                    GLib.idle_add(lambda cb=cb: (cb(), False)[1])
+            elif ev == "error":
+                self._failed()
+                return False
+        return True
+
+    def _set_available(self, value):
+        if value != self.available:
+            self.available = value
+            if self.on_availability:
+                self.on_availability(value)
+
+    # same interface as Tray ------------------------------------------------
+    def set_state(self, icon, tooltip, attention=False, title=None):
+        self._last_state = (icon, tooltip, attention)
+        self._send({"cmd": "state", "icon": icon, "tooltip": tooltip, "attention": attention})
+
+    def update_menu(self):
+        items, self._items = [], {}
+        for i, it in enumerate(self.menu_provider(), 1):
+            if it.get("separator"):
+                items.append({"separator": True})
+            else:
+                items.append({"id": i, "label": it["label"], "enabled": bool(it.get("enabled", True))})
+                if it.get("callback"):
+                    self._items[i] = it["callback"]
+        self._send({"cmd": "menu", "items": items})
+
+    def stop(self):
+        if self._watch:
+            GLib.source_remove(self._watch)
+            self._watch = None
+        if self._proc:
+            self._send({"cmd": "quit"})
+            try:
+                self._proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                self._proc.wait(timeout=2)
+            except Exception:  # noqa: BLE001
+                self._proc.kill()
+            self._proc = None
+        self._set_available(False)
+
+
+def wants_helper():
+    """Cinnamon: use the XApp helper.  Other desktops speak StatusNotifierItem natively."""
+    d = (os.environ.get("XDG_CURRENT_DESKTOP", "") + ":" + os.environ.get("DESKTOP_SESSION", "")).lower()
+    return "cinnamon" in d and os.environ.get("VPNMAN_TRAY") != "sni"

@@ -17,7 +17,7 @@ except (ImportError, ValueError) as exc:  # pragma: no cover
 import json
 
 from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof
-from .tray import Tray
+from .tray import HelperTray, Tray, wants_helper
 from ..settings import DNS_PRESETS, DEFAULTS
 from ..ipc import Client, DaemonUnavailable, RpcError
 
@@ -1069,7 +1069,11 @@ class PreferencesWindow(Adw.PreferencesWindow):
         bg.connect("notify::active", lambda r, _p: (app.userconfig.set("run_in_background", r.get_active()),
                                                     app.set_background_hold(app.keep_in_tray())))
         g.add(bg)
-        if not tray_ok:
+        if not tray_ok and wants_helper():
+            g.set_description("Cinnamon: add the 'XApp Status Applet' (or 'System Tray') to your panel, and make sure the "
+                              "xapp package is installed (Void: xbps-install xapp). Run 'vpnman doctor' to see what is "
+                              "missing. Without a tray, closing the window simply closes the app.")
+        elif not tray_ok:
             g.set_description("GNOME has no tray by default. Install and enable the 'AppIndicator and "
                               "KStatusNotifierItem Support' extension (Ubuntu ships it; Fedora: "
                               "gnome-shell-extension-appindicator; Arch: gnome-shell-extension-appindicator). "
@@ -1171,6 +1175,20 @@ class Application(Adw.Application):
     # ---- tray ----------------------------------------------------------
     def _setup_tray(self):
         # IconThemePath lets the tray host find our icons even when the system icon cache is stale
+        args = (APP_ID, APP_NAME, lambda: self.win.present(), self.win.tray_menu, self._on_tray_availability)
+        if wants_helper():
+            # Cinnamon: XApp.StatusIcon in a GTK 3 helper process; fall back to StatusNotifier if it cannot start
+            self.tray = HelperTray(*args, private_icon_dir(), on_failure=self._helper_failed)
+            if self.tray.start():
+                self.tray.set_state("%s-disconnected-symbolic" % APP_ID, "VPNMan")
+                return
+        self._start_sni()
+
+    def _helper_failed(self):
+        print("vpnman: tray helper unavailable (GTK 3 / XApp missing?) - using StatusNotifier", file=sys.stderr)
+        self._start_sni()
+
+    def _start_sni(self):
         self.tray = Tray(APP_ID, APP_NAME, lambda: self.win.present(), self.win.tray_menu,
                          self._on_tray_availability, private_icon_dir())
         self.tray.set_state("%s-disconnected-symbolic" % APP_ID, "VPNMan")

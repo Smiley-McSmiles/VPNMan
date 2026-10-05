@@ -391,17 +391,20 @@ class Cli:
             except RuntimeError as e:
                 print("Firewall:  %s" % red(str(e)))
         print("Root:      %s" % ("yes" if plat.is_root() else "no"))
-        from . import icons
-        print("Icons:")
-        for ok, msg in icons.check():
+        from . import desktop, icons
+        print("Launcher & icons:")
+        for ok, msg in desktop.check() + icons.check():
             print("  %s %s" % (green("✔") if ok else red("✘"), msg))
+        print("Tray:")
+        for ok, msg in desktop.tray_check():
+            print("  %s %s" % (green("✔") if ok else yellow("!"), msg))
         if getattr(a, "fix", False):
             if not plat.is_root():
                 print(red("  --fix needs root: sudo vpnman doctor --fix"))
             else:
-                for m in icons.fix():
+                for m in desktop.link_system_dirs() + icons.fix():
                     print("  " + green("fixed: ") + m)
-                print("  Log out and back in (or restart GNOME Shell) so the desktop re-reads the icons.")
+                print("  Log out and back in (or restart the desktop shell) so it re-reads launchers and icons.")
         print()
         return self.cmd_protocols(a)
 
@@ -614,7 +617,7 @@ def build_parser():
     s.add_argument("-n", "--lines", type=int, default=50)
     add("protocols", "list supported protocols and whether their tools are installed")
     s = add("doctor", "check the system (icons, daemon, protocols)")
-    s.add_argument("--fix", action="store_true", help="rebuild stale icon caches (root)")
+    s.add_argument("--fix", action="store_true", help="link launcher/icons into /usr/share and rebuild icon caches (root)")
     s = add("service", "install/control the background service")
     s.add_argument("action", choices=["install", "uninstall", "enable", "disable", "start", "stop", "restart", "status"])
     s.add_argument("--init", choices=["systemd", "runit", "openrc", "sysv", "openbsd-rc", "bsd-rc"],
