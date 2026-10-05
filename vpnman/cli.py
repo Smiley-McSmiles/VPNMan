@@ -229,6 +229,33 @@ class Cli:
                     nl["backend"], ", ".join(nl["ifaces"]) or "-", ", ".join(nl["endpoints"]) or "-"))
         return 0
 
+    def cmd_dns(self, a):
+        from .settings import DNS_PRESETS
+        if not a.choice:
+            d = self.call("settings.get", key="dns")
+            if not d["force"]:
+                print("DNS: left unchanged while connected")
+            else:
+                print("DNS: %s" % (", ".join(d["servers"]) if d["servers"] else "the VPN provider's servers"))
+            print("\nPresets:")
+            for name, ips in DNS_PRESETS:
+                print("  %-30s %s" % (name, ", ".join(ips)))
+            print("\nvpnman dns <preset name | IP[,IP...] | provider | off>")
+            return 0
+        text = " ".join(a.choice)
+        low = text.lower()
+        if low in ("provider", "default", "vpn"):
+            tree = {"force": True, "servers": []}
+        elif low in ("off", "none", "system"):
+            tree = {"force": False}
+        else:
+            hit = [ips for name, ips in DNS_PRESETS if low in name.lower()]
+            ips = hit[0] if hit else [x.strip() for x in text.replace(";", ",").replace(" ", ",").split(",") if x.strip()]
+            tree = {"force": True, "servers": ips}
+        self.call("settings.update", tree={"dns": tree})
+        print("DNS updated (applied immediately if connected).")
+        return 0
+
     def cmd_get(self, a):
         v = self.call("settings.get", key=a.key)
         if a.key and not isinstance(v, (dict, list)):
@@ -479,6 +506,7 @@ def build_parser():
         s = add(n, h); s.add_argument("profiles", nargs="+")
     s = add("ping", "measure latency to profiles"); s.add_argument("profiles", nargs="*")
     s = add("lock", "network lock (kill switch)"); s.add_argument("action", choices=["on", "off", "status"], nargs="?", default="status")
+    s = add("dns", "choose the DNS servers used while connected"); s.add_argument("choice", nargs="*")
     s = add("get", "show settings"); s.add_argument("key", nargs="?")
     s = add("set", "change a setting"); s.add_argument("key"); s.add_argument("value")
     s = add("logs", "show daemon log"); s.add_argument("-f", "--follow", action="store_true")

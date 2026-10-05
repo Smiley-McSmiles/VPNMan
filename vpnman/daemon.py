@@ -54,6 +54,12 @@ class Handler(socketserver.StreamRequestHandler):
             pass
 
 
+def _changed(m, key, result):
+    if key.startswith("dns"):
+        m.reapply_dns()
+    return result
+
+
 def _import(m, **kw):
     return m.import_profile(**kw)
 
@@ -76,8 +82,9 @@ METHODS = {
     "netlock.enable": lambda m: m.netlock_enable(),
     "netlock.disable": lambda m: m.netlock_disable(),
     "settings.get": lambda m, key=None: m.settings.get(key),
-    "settings.set": lambda m, key, value: m.settings.set(key, value),
-    "settings.update": lambda m, tree: (m.settings.update(tree), m.settings.get())[1],
+    "settings.set": lambda m, key, value: _changed(m, key, m.settings.set(key, value)),
+    "settings.update": lambda m, tree: (m.settings.update(tree), _changed(m, "dns" if "dns" in tree else "", None),
+                                        m.settings.get())[2],
     "logs": lambda m, since=0, limit=1000: dict(zip(("entries", "last"), m.log.since(since, limit))),
     "discover.networkmanager": lambda m: backends.NetworkManager.discover(),
     "system": lambda m: {"os": plat.os_family(), "distro": plat.distro()[1], "init": plat.init_system(),

@@ -56,7 +56,7 @@ imported together with those files.
 | Auto-connect on start (`off`, `last`, `fastest`, or a profile) | ✔ |
 | Network lock: nftables, iptables(+ip6tables), pf; LAN/DHCP/ping/IPv6 toggles; in/out whitelists; persist across reboots | ✔ |
 | Lock engaged *before* connecting, kept while reconnecting, endpoint pre-resolved (no DNS needed under lock) | ✔ |
-| DNS leak protection (pushed or custom DNS; systemd-resolved or `resolv.conf` swap with crash-safe restore) | ✔ |
+| DNS leak protection + DNS picker (provider, Cloudflare, Google, Quad9, OpenDNS, AdGuard, Mullvad, custom; switches live; `vpnman dns`) | ✔ |
 | Custom routes that bypass the tunnel | ✔ (IPv4) |
 | Event hooks (pre-connect / connected / disconnected) | ✔ |
 | Live stats (up/down, rates, duration), public-IP check, log viewer | ✔ |

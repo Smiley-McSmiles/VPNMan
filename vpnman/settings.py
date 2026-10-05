@@ -52,6 +52,18 @@ DEFAULTS = {
 }
 
 
+# (label, servers) offered by the GUI and `vpnman dns`
+DNS_PRESETS = [
+    ("Cloudflare", ["1.1.1.1", "1.0.0.1"]),
+    ("Cloudflare (blocks malware)", ["1.1.1.2", "1.0.0.2"]),
+    ("Google", ["8.8.8.8", "8.8.4.4"]),
+    ("Quad9", ["9.9.9.9", "149.112.112.112"]),
+    ("OpenDNS", ["208.67.222.222", "208.67.220.220"]),
+    ("AdGuard (blocks ads)", ["94.140.14.14", "94.140.15.15"]),
+    ("Mullvad", ["194.242.2.2"]),
+]
+
+
 def _merge(base, over):
     out = copy.deepcopy(base)
     for k, v in (over or {}).items():

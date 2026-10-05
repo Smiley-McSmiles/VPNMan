@@ -101,6 +101,7 @@ class Manager:
         self._lock_ifaces = set()
         self._status = self._blank_status()
         self._state_cache = {}
+        self._current = None      # (ctx, iface) of the live tunnel
 
     # ------------------------------------------------------------------ status
     @staticmethod
@@ -452,6 +453,7 @@ class Manager:
                 except Exception as e:  # noqa: BLE001
                     raise ConnectError("Network lock update failed: %s" % e)
             self._apply_dns(ctx, primary)
+            self._current = (ctx, primary)
             routes_added = self._apply_routes(gw)
             up = True
             self._set(state="connected", iface=primary, since=time.time(), message="", attempt=0)
@@ -481,6 +483,7 @@ class Manager:
             return up
         finally:
             self._proc = None
+            self._current = None
             if proc is not None and proc.poll() is None:
                 _terminate(proc)
             if reader:
@@ -531,6 +534,13 @@ class Manager:
                 self.log.add("info", self._dns.apply(servers, iface))
             except OSError as e:
                 self.log.add("warn", "DNS change failed: %s" % e)
+
+    def reapply_dns(self):
+        """Switch DNS on the live tunnel after the user changed the setting."""
+        cur = self._current
+        if cur and self._status["state"] == "connected":
+            self._dns.restore()
+            self._apply_dns(*cur)
 
     def _apply_routes(self, gw):
         added = []

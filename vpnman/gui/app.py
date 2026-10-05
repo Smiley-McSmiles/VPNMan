@@ -15,6 +15,7 @@ except (ImportError, ValueError) as exc:  # pragma: no cover
     raise SystemExit(1)
 
 from .. import APP_ID, APP_NAME, __version__, profiles as prof
+from ..settings import DNS_PRESETS, DEFAULTS
 from ..ipc import Client, DaemonUnavailable, RpcError
 
 ACTIVE = ("connected", "connecting", "reconnecting")
@@ -66,6 +67,27 @@ def choose_files(parent, title, callback, multiple=True):
         dlg.connect("response", lambda d, r: callback([f.get_path() for f in d.get_files()]) if r == Gtk.ResponseType.ACCEPT else None)
         dlg.show()
         parent._native = dlg
+
+
+class Hero(Gtk.Box):
+    """Big icon + title + description + child; StatusPage collapses inside a scrolled page."""
+
+    def __init__(self, icon_name, title, description):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=24, margin_start=12,
+                         margin_end=12, halign=Gtk.Align.CENTER)
+        self.icon = Gtk.Image(icon_name=icon_name, pixel_size=96)
+        self.icon.add_css_class("dim-label")
+        self.title = Gtk.Label(label=title, css_classes=["title-1"], wrap=True, justify=Gtk.Justification.CENTER)
+        self.desc = Gtk.Label(label=description, wrap=True, justify=Gtk.Justification.CENTER,
+                              css_classes=["dim-label"])
+        self.holder = Gtk.Box(halign=Gtk.Align.CENTER, margin_top=6)
+        for w in (self.icon, self.title, self.desc, self.holder):
+            self.append(w)
+
+    def set_icon_name(self, n): self.icon.set_from_icon_name(n)
+    def set_title(self, t): self.title.set_label(t)
+    def set_description(self, d): self.desc.set_label(d or "")
+    def set_child(self, w): self.holder.append(w)
 
 
 # ------------------------------------------------------------------ dialogs
@@ -279,11 +301,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ---- overview ----------------------------------------------------
     def _build_overview(self):
-        page = Adw.PreferencesPage()
-        hero = Adw.PreferencesGroup()
-        self.hero = Adw.StatusPage(icon_name="network-vpn-disabled-symbolic", title="Not Connected",
-                                   description="Choose a server and connect.")
-        self.hero.set_vexpand(False)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24, margin_bottom=24)
+        self.hero = Hero("network-vpn-disabled-symbolic", "Not Connected", "Choose a server and connect.")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER)
         self.server_row = Adw.ComboRow(title="Server", model=Gtk.StringList.new([]))
         self.server_row.set_size_request(320, -1)
@@ -296,8 +315,11 @@ class MainWindow(Adw.ApplicationWindow):
         self.main_btn.connect("clicked", self.on_main_button)
         box.append(self.main_btn)
         self.hero.set_child(box)
-        hero.add(self.hero)
-        page.add(hero)
+        page.append(self.hero)
+        groups = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        clamp = Adw.Clamp(maximum_size=600, margin_start=12, margin_end=12)
+        clamp.set_child(groups)
+        page.append(clamp)
 
         self.stats = Adw.PreferencesGroup(title="Connection Details")
         self.stat_rows = {}
@@ -312,15 +334,71 @@ class MainWindow(Adw.ApplicationWindow):
             self.stats.add(row)
             self.stat_rows[key] = row
         self.stats.set_visible(False)
-        page.add(self.stats)
+        groups.append(self.stats)
+
+        dns = Adw.PreferencesGroup(title="DNS", description="Name servers used while the VPN is active. "
+                                   "Changes apply immediately, even when connected.")
+        self.dns_labels = (["VPN provider's"] + [n for n, _ in DNS_PRESETS]
+                           + ["Custom…", "Don't change DNS"])
+        self.dns_row = Adw.ComboRow(title="DNS servers", model=Gtk.StringList.new(self.dns_labels))
+        self.dns_row.add_prefix(Gtk.Image.new_from_icon_name("network-server-symbolic"))
+        self.dns_row.connect("notify::selected", self._on_dns_choice)
+        dns.add(self.dns_row)
+        self.dns_custom = Adw.EntryRow(title="Custom DNS servers (comma separated)", show_apply_button=True,
+                                       visible=False)
+        self.dns_custom.connect("apply", lambda r: self._save_dns(True, self._parse_ips(r.get_text())))
+        dns.add(self.dns_custom)
+        groups.append(dns)
 
         quick = Adw.PreferencesGroup()
         self.lock_switch = Adw.SwitchRow(title="Network Lock", subtitle="Block all traffic outside the VPN (kill switch)")
         self.lock_switch.add_prefix(Gtk.Image.new_from_icon_name("changes-prevent-symbolic"))
         self.lock_switch.connect("notify::active", self._on_lock_toggled)
         quick.add(self.lock_switch)
-        page.add(quick)
-        return page
+        groups.append(quick)
+        scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+        scroll.set_child(page)
+        return scroll
+
+    @staticmethod
+    def _parse_ips(text):
+        return [x.strip() for x in text.replace(";", ",").replace(" ", ",").split(",") if x.strip()]
+
+    def _save_dns(self, force, servers):
+        rpc("settings.update", lambda *_: (self.toast("DNS updated"), self.refresh(full=True)), self._fail,
+            tree={"dns": {"force": force, "servers": servers}})
+
+    def _on_dns_choice(self, row, _p):
+        i = row.get_selected()
+        n = len(DNS_PRESETS)
+        self.dns_custom.set_visible(i == n + 1)
+        if self._quiet:
+            return
+        if i == 0:
+            self._save_dns(True, [])
+        elif 1 <= i <= n:
+            self._save_dns(True, DNS_PRESETS[i - 1][1])
+        elif i == n + 2:
+            self._save_dns(False, [])
+        elif self.dns_custom.get_text():
+            self._save_dns(True, self._parse_ips(self.dns_custom.get_text()))
+
+    def _sync_dns(self, dns):
+        n = len(DNS_PRESETS)
+        servers = dns.get("servers", [])
+        if not dns.get("force", True):
+            idx = n + 2
+        elif not servers:
+            idx = 0
+        else:
+            idx = n + 1
+            for k, (_name, ips) in enumerate(DNS_PRESETS, 1):
+                if ips == servers:
+                    idx = k
+        self.dns_row.set_selected(idx)
+        self.dns_custom.set_visible(idx == n + 1)
+        if idx == n + 1:
+            self.dns_custom.set_text(", ".join(servers))
 
     # ---- servers -----------------------------------------------------
     def _build_servers(self):
@@ -637,6 +715,7 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_settings(self, settings):
         self.settings = settings
         self._quiet = True
+        self._sync_dns(settings["dns"])
         for key, row in self.lock_bindings.items():
             sec, name = key.split(".")
             val = settings[sec][name]
@@ -729,7 +808,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
 
         page = Adw.PreferencesPage(title="DNS & Routes", icon_name="network-wired-symbolic")
         g = Adw.PreferencesGroup(title="DNS")
-        g.add(self._switch("dns.force", "Use the VPN's DNS", "Prevents DNS leaks"))
+        g.add(self._switch("dns.force", "Change DNS while connected", "Prevents DNS leaks; pick servers on the Connection page"))
         g.add(self._entry("dns.servers", "Custom DNS servers", "comma separated, overrides pushed servers"))
         page.add(g)
         g = Adw.PreferencesGroup(title="Checks")
@@ -809,7 +888,14 @@ class Application(Adw.Application):
         self.win.present()
 
     def on_prefs(self, *_):
-        PreferencesWindow(self.win, self.win.settings or Client().call("settings.get")).present()
+        def show(settings):
+            self.win.settings = settings
+            PreferencesWindow(self.win, settings).present()
+
+        def fail(msg, down=False):
+            self.win.toast("Preferences need the background service: " + msg if down else msg)
+            self.win._set_daemon(False, msg) if down else None
+        rpc("settings.get", show, fail)
 
     def on_about(self, *_):
         kw = dict(application_name=APP_NAME, application_icon=APP_ID, version=__version__,
