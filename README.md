@@ -147,7 +147,8 @@ session inside is still authenticated); a warning is logged.
 
   How it works (Linux): the daemon moves matching running programs into a dedicated cgroup v2, nftables marks that
   cgroup's packets, a policy-routing rule sends marked packets out of the physical gateway (masqueraded, with the
-  system's original DNS), and the kill switch lets the marked traffic through. No program has to be started specially,
+  system's original DNS), and the kill switch lets the marked traffic through. The apps are exempt from the kill switch
+  too: while the lock is engaged they stay online even if the VPN drops or is switched off. No program has to be started specially,
   and programs started later are picked up within about two seconds. Needs `nft`, `ip` and a pure cgroup v2 system
   (`/sys/fs/cgroup` is cgroup2 - the default on Fedora, Ubuntu 22.04+, Debian 11+, Arch, Void with elogind/systemd).
   The Apps tab says so when the machine can't do it. Not available on the BSDs (pf cannot match by program).

@@ -105,6 +105,7 @@ class Manager:
         self._reserved_ifnames = set()
         self._split = split.SplitTunnel(lambda: split.names_from_settings(self.settings.get("split")), self.log.add)
         self._split_ctx = None    # (gateway, device, dns) of the live session, while the tunnel is up
+        self._split_cur = None    # (gateway, device) the running bypass was built for
         self.scheduler = schedule.Scheduler(self)
 
     # ------------------------------------------------------------------ status
@@ -175,6 +176,7 @@ class Manager:
             self.lock_manual = True
             self._save_state(lock_manual=True)
             self._lock_apply()
+            self._split_sync()
         return self.netlock_status()
 
     def netlock_disable(self):
@@ -182,6 +184,7 @@ class Manager:
             self.lock_manual = False
             self._save_state(lock_manual=False)
             self._lock_remove()
+            self._split_sync()
         return self.netlock_status()
 
     def _lock_wanted(self):
@@ -196,6 +199,7 @@ class Manager:
         else:
             self._lock_endpoints.clear()
             self._lock_remove()
+        self._split_sync()
 
     # --------------------------------------------------------------- start / stop
     def startup(self):
@@ -211,6 +215,7 @@ class Manager:
                 self._lock_apply()
             except Exception as e:  # noqa: BLE001
                 self.log.add("error", "Could not restore network lock: %s" % e)
+            self._split_sync()
         auto = self.settings.get("connection.autoconnect")
         if auto and auto != "off":
             self._autoconnect(auto)
@@ -500,7 +505,7 @@ class Manager:
             self._current = (ctx, primary)
             routes_added = self._apply_routes(gw)
             self._split_ctx = (gw, gwif, orig_dns)
-            self._split_start()
+            self._split_sync()
             up = True
             self._set(state="connected", iface=primary, since=time.time(), message="", attempt=0)
             self.log.add("info", "Connected to %s via %s" % (profile["name"], primary or "(no interface)"))
@@ -557,7 +562,7 @@ class Manager:
                     self.log.add("warn", "cleanup failed: %s" % e)
             self._remove_routes(routes_added)
             self._split_ctx = None
-            self._split_stop()
+            self._split_sync()              # stays up for the whitelisted apps if the kill switch is still engaged
             self._dns.restore()
             if up:
                 self._hook("disconnected", ctx)
@@ -648,42 +653,58 @@ class Manager:
             self._apply_dns(*cur)
 
     # ---------------------------------------------------------- app bypass
-    def _split_start(self):
-        """Let the whitelisted programs keep using the normal connection (needs a live tunnel)."""
-        ctx = self._split_ctx
+    def _split_context(self):
+        """(gateway, device, dns) the bypassed apps should use, or None when no bypass is needed right now.
+
+        It is needed while the tunnel is up and while the kill switch is engaged: the whitelisted apps are
+        exempt from the lock, so they keep working when the VPN drops or is switched off."""
         sp = self.settings.get("split")
-        if not ctx or not sp["enabled"] or not sp["apps"]:
-            return
-        gw, dev, dns_servers = ctx
-        try:
-            self._split.start(gw, dev, dns_servers)
-        except Exception as e:  # noqa: BLE001
-            self.log.add("warn", "App bypass unavailable: %s" % e)
-            return
-        self.log.add("info", "App bypass active for: %s" % ", ".join(a["name"] for a in sp["apps"]))
+        if not sp["enabled"] or not sp["apps"]:
+            return None
+        if self._split_ctx:
+            return self._split_ctx
         if self.lock_engaged:
-            try:
-                self._lock_apply()              # let the kill switch pass the bypassed traffic
-            except Exception as e:  # noqa: BLE001
-                self.log.add("error", "Network lock update failed: %s" % e)
+            gw, dev = plat.default_gateway()
+            if dev:
+                return (gw, dev, system_dns(gw))
+        return None
 
-    def _split_stop(self):
-        if self._split.active:
-            self._split.stop()
-            self.log.add("info", "App bypass stopped")
-
-    def split_changed(self):
-        """The whitelist changed: apply it to the live tunnel."""
+    def _split_sync(self):
+        """Bring the app bypass in line with the connection / kill switch state (idempotent)."""
         with self._mlock:
-            if not self._split_ctx:
-                return
-            self._split_stop()
-            self._split_start()
-            if self.lock_engaged:
+            was = (self._split.active, self._split_cur)
+            ctx = self._split_context()
+            if not ctx:
+                if self._split.active:
+                    self._split.stop()
+                    self._split_cur = None
+                    self.log.add("info", "App bypass stopped")
+            elif not (self._split.active and self._split_cur == ctx[:2]):
                 try:
-                    self._lock_apply()
+                    self._split.start(*ctx)
+                    self._split_cur = ctx[:2]
+                    apps = ", ".join(a["name"] for a in self.settings.get("split.apps"))
+                    self.log.add("info", "App bypass active for: %s%s" % (
+                        apps, "" if self._split_ctx else " (VPN down, network lock keeps them online)"))
+                except Exception as e:  # noqa: BLE001
+                    self._split_cur = None
+                    self.log.add("warn", "App bypass unavailable: %s" % e)
+            if (self._split.active, self._split_cur) != was and self.lock_engaged:
+                try:
+                    self._lock_apply()          # let the kill switch pass (or stop passing) the bypassed traffic
                 except Exception as e:  # noqa: BLE001
                     self.log.add("error", "Network lock update failed: %s" % e)
+
+    def _split_stop(self):
+        with self._mlock:
+            if self._split.active:
+                self._split.stop()
+                self._split_cur = None
+                self.log.add("info", "App bypass stopped")
+
+    def split_changed(self):
+        """The whitelist changed: apply it now."""
+        self._split_sync()
 
     def split_status(self):
         ok, why = split.supported()

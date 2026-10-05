@@ -733,6 +733,46 @@ while :; do sleep 0.1; done
             self.c.call("split.set", apps=[])
             self.c.call("profiles.remove", ident="byp")
 
+    def test_bypassed_apps_stay_online_when_the_vpn_drops_under_the_kill_switch(self):
+        from vpnman import platform as plat
+        m = self.mgr
+        calls, locks = [], []
+        real = (m._split.start, m._split.stop, m._lock_apply, plat.default_gateway, m.lock_engaged)
+
+        def fake_start(gw, dev, dns=()):
+            calls.append(("start", gw, dev))
+            m._split.active = True
+
+        def fake_stop():
+            calls.append(("stop",))
+            m._split.active = False
+
+        m._split.start, m._split.stop = fake_start, fake_stop
+        m._lock_apply = lambda: locks.append(m._split.active)
+        plat.default_gateway = lambda: ("192.168.1.1", "eno1")
+        try:
+            m.settings.update({"split": {"enabled": True, "apps": [{"id": "s", "name": "Web", "match": ["epiphany"]}]}})
+            m.lock_engaged, m._split_ctx = True, None
+            m._split_sync()                                   # no tunnel, kill switch engaged -> apps stay online
+            self.assertEqual(calls, [("start", "192.168.1.1", "eno1")])
+            self.assertEqual(locks, [True])                   # and the lock was told to let them through
+            m._split_sync()
+            self.assertEqual(len(calls), 1)                   # idempotent
+            m.lock_engaged = False                            # kill switch released, nothing connected
+            m._split_sync()
+            self.assertEqual(calls[-1], ("stop",))
+            self.assertEqual(locks, [True])                   # lock already gone: nothing to update
+            m.lock_engaged = True
+            m._split_sync()
+            self.assertEqual(locks, [True, True])
+            m.settings.update({"split": {"apps": []}})        # list emptied while locked: stop and close the exemption
+            m._split_sync()
+            self.assertEqual((calls[-1], locks[-1]), (("stop",), False))
+        finally:
+            m._split.start, m._split.stop, m._lock_apply, plat.default_gateway, m.lock_engaged = real
+            m._split.active, m._split_cur = False, None
+            m.settings.update({"split": {"apps": []}})
+
     def test_openvpn_over_stunnel(self):
         opts = {"stunnel": {"enabled": True, "host": "127.0.0.1", "port": 8443, "sni": "cdn.example.com"}}
         self.c.call("profiles.import", name="tls", text=OVPN.replace("auth-user-pass\n", ""),
