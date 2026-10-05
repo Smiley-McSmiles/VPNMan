@@ -81,6 +81,7 @@ CTL
 #!/bin/sh
 set -e
 if [ "$1" = configure ]; then
+    find /usr/lib/vpnman -name __pycache__ -type d -exec rm -rf {} + >/dev/null 2>&1 || true
     getent group vpnman >/dev/null || addgroup --system vpnman >/dev/null 2>&1 || groupadd -r vpnman
     mkdir -p /etc/vpnman && chmod 700 /etc/vpnman
 # GTK only validates icon-theme.cache against the mtime of hicolor/ itself, so new icons stay invisible until it is rebuilt
@@ -142,6 +143,11 @@ PRM
 recipe_rpm() {
     mkdir -p "$DIST/recipes"
     cat > "$DIST/recipes/$NAME.spec" <<SPEC
+# Do not clamp file mtimes to the changelog date: with identical mtimes and same-size edits (1.0.0 -> 1.0.2) Python
+# keeps trusting stale __pycache__ files and the upgraded program silently keeps running the old code.
+%global clamp_mtime_to_source_date_epoch 0
+%global source_date_epoch_from_changelog 0
+
 Name:           $NAME
 Version:        $VERSION
 Release:        1%{?dist}
@@ -166,6 +172,8 @@ DESTDIR=%{buildroot} ./install.sh --prefix /usr --init systemd --no-post
 mkdir -p %{buildroot}/etc/vpnman
 
 %post
+# stale compiled caches from the previous version must never survive an upgrade
+find /usr/lib/vpnman -name __pycache__ -type d -exec rm -rf {} + >/dev/null 2>&1 || :
 getent group vpnman >/dev/null || groupadd -r vpnman
 mkdir -p /etc/vpnman && chmod 700 /etc/vpnman
 # GTK only validates icon-theme.cache against the mtime of hicolor/ itself, so new icons stay invisible until it is rebuilt

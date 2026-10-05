@@ -213,6 +213,9 @@ if [ -z "\$PY" ]; then
         if command -v "\$c" >/dev/null 2>&1; then PY=\$c; break; fi
     done
 fi
+# Never write bytecode caches into the (root-owned) install tree: Python validates them by source mtime + size only,
+# so a same-size file with an equal mtime (rpm clamps all mtimes to one date) would keep running the OLD code.
+export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$LIBDIR\${PYTHONPATH:+:\$PYTHONPATH}"
 export VPNMAN_DATA_DIR="$SHAREDIR/vpnman"
 exec "\$PY" -m vpnman $* "\$@"
@@ -402,7 +405,8 @@ chmod 644 "$D$SHAREDIR/applications/io.github.smiley_mcsmiles.VPNMan.desktop" \
 find "$D$SHAREDIR/icons/hicolor" -name 'io.github.smiley_mcsmiles.VPNMan*' -type f -exec chmod 644 {} +
 chmod 755 "$D$BINDIR/vpnman" "$D$BINDIR/vpnmand" "$D$BINDIR/vpnman-gtk"
 # pre-compile so unprivileged users (who cannot write to /usr) do not recompile on every start
-if [ -z "$DESTDIR" ]; then "$PY" -m compileall -q "$D$LIBDIR" >/dev/null 2>&1 || true; fi
+# (checked-hash: validated against the source contents, immune to mtime games)
+if [ -z "$DESTDIR" ]; then "$PY" -m compileall -q --invalidation-mode checked-hash "$D$LIBDIR" >/dev/null 2>&1 || "$PY" -m compileall -q "$D$LIBDIR" >/dev/null 2>&1 || true; fi
 
 if [ "$INIT" = auto ]; then INIT=$(detect_init); fi
 case "$INIT" in

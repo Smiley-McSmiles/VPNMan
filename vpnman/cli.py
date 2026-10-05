@@ -392,6 +392,9 @@ class Cli:
                 print("Firewall:  %s" % red(str(e)))
         print("Root:      %s" % ("yes" if plat.is_root() else "no"))
         from . import desktop, icons
+        print("Program:")
+        for ok, msg in desktop.bytecode_check():
+            print("  %s %s" % (green("✔") if ok else red("✘"), msg))
         print("Launcher & icons:")
         for ok, msg in desktop.check() + icons.check():
             print("  %s %s" % (green("✔") if ok else red("✘"), msg))
@@ -402,7 +405,7 @@ class Cli:
             if not plat.is_root():
                 print(red("  --fix needs root: sudo vpnman doctor --fix"))
             else:
-                for m in desktop.link_system_dirs() + icons.fix():
+                for m in desktop.purge_bytecode() + desktop.link_system_dirs() + icons.fix():
                     print("  " + green("fixed: ") + m)
                 print("  Log out and back in (or restart the desktop shell) so it re-reads launchers and icons.")
         print()

@@ -1177,7 +1177,10 @@ class Application(Adw.Application):
             print("vpnman: version %s is installed, restarting the running %s instance" % (disk, __version__), file=sys.stderr)
             if self.tray:
                 self.tray.stop()
-            os.execv(sys.executable, [sys.executable, "-m", "vpnman", "gui"])
+            # also bypass any stale __pycache__ in the install tree (valid by mtime+size only) with a private cache
+            import tempfile
+            os.execv(sys.executable, [sys.executable, "-X", "pycache_prefix=" + tempfile.mkdtemp(prefix="vpnman-pyc-"),
+                                      "-m", "vpnman", "gui"])
 
     def do_activate(self):
         if self.win is not None:

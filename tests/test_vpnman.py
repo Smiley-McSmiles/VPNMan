@@ -1,5 +1,6 @@
 import base64
 import os
+import sys
 import stat
 import tempfile
 import threading
@@ -319,6 +320,58 @@ class InstallTests(unittest.TestCase):
         pkg = open(os.path.join(self.ROOT, "package.sh")).read()
         self.assertGreaterEqual(pkg.count("systemctl restart vpnmand"), 2)       # rpm %post and deb postinst
         self.assertGreaterEqual(pkg.count("-m vpnman gui"), 2)
+
+    def test_same_size_upgrade_with_equal_mtime_does_not_keep_old_code(self):
+        """Regression: 1.0.0 -> 1.0.2 is the same length and rpm clamps mtimes, so stale __pycache__ kept the old version."""
+        import subprocess
+        pkg = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(pkg + "/p")
+        src = pkg + "/p/__init__.py"
+        clamp = 1791158400
+
+        def write(v):
+            open(src, "w").write('__version__ = "%s"\n' % v)
+            os.utime(src, (clamp, clamp))
+
+        def run(extra=()):
+            return subprocess.run([sys.executable] + list(extra) + ["-c", "import sys; sys.path.insert(0, %r); import p; print(p.__version__)" % pkg],
+                                  capture_output=True, text=True).stdout.strip()
+        write("1.0.0")
+        self.assertEqual(run(), "1.0.0")
+        write("1.0.2")
+        self.assertEqual(run(), "1.0.0", "premise: stale bytecode wins")        # the bug being guarded against
+        self.assertEqual(run(["-X", "pycache_prefix=" + tempfile.mkdtemp(dir=TMP)]), "1.0.2")   # what the GUI re-exec uses
+        import shutil
+        shutil.rmtree(pkg + "/p/__pycache__")                                                      # what the packages purge
+        self.assertEqual(run(), "1.0.2")
+
+    def test_packages_purge_stale_bytecode_and_do_not_clamp_mtimes(self):
+        pkg = open(os.path.join(self.ROOT, "package.sh")).read()
+        self.assertIn("%global clamp_mtime_to_source_date_epoch 0", pkg)
+        self.assertGreaterEqual(pkg.count("-name __pycache__ -type d -exec rm -rf"), 2)   # rpm %post + deb postinst
+        self.assertIn("PYTHONDONTWRITEBYTECODE=1", open(os.path.join(self.ROOT, "install.sh")).read())
+
+    def test_installed_program_never_writes_bytecode_into_the_install_tree(self):
+        import subprocess
+        if os.geteuid() != 0:
+            self.skipTest("install.sh needs root")
+        prefix = tempfile.mkdtemp(dir=TMP)
+        r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", prefix, "--init", "none", "--no-post"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        import shutil
+        for root, dirs, _f in os.walk(prefix):
+            if "__pycache__" in dirs:
+                shutil.rmtree(os.path.join(root, "__pycache__"))
+        out = subprocess.run([prefix + "/bin/vpnman", "--version"], capture_output=True, text=True)
+        self.assertIn("vpnman", out.stdout, out.stderr)
+        made = [root for root, dirs, _f in os.walk(prefix) if "__pycache__" in dirs]
+        self.assertEqual(made, [], "runtime wrote stale-prone bytecode into the install tree")
+
+    def test_doctor_detects_stale_bytecode(self):
+        from vpnman import desktop
+        ok, msg = desktop.bytecode_check()[0]
+        self.assertTrue(ok, msg)
 
     def test_check_mode_installs_nothing(self):
         import subprocess

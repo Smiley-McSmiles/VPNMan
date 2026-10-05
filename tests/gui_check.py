@@ -56,7 +56,7 @@ class App(A.Application):
                 self._restart_if_stale()
             finally:
                 A.os.execv, A.__version__ = real_execv, real_version
-            assert calls and calls[0][1:] == ["-m", "vpnman", "gui"], "stale GUI did not restart itself: %r" % calls
+            assert calls and calls[0][-3:] == ["-m", "vpnman", "gui"] and calls[0][1] == "-X", "stale GUI did not restart itself: %r" % calls
             calls.clear()
             A.os.execv = lambda exe, argv: calls.append(argv)
             try:
