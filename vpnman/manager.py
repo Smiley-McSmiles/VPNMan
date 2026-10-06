@@ -216,6 +216,11 @@ class Manager:
             except Exception as e:  # noqa: BLE001
                 self.log.add("error", "Could not restore network lock: %s" % e)
             self._split_sync()
+        else:
+            # a lock left by a daemon that crashed must not keep blocking the network once nobody owns it
+            stale = netlock.cleanup_all()
+            if stale:
+                self.log.add("warn", "Removed a stale network lock left by a previous run (%s)" % ", ".join(stale))
         auto = self.settings.get("connection.autoconnect")
         if auto and auto != "off":
             self._autoconnect(auto)

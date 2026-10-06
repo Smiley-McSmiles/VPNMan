@@ -310,3 +310,20 @@ def pick_backend(name="auto"):
         if cls.usable():
             return cls()
     raise RuntimeError("no supported firewall found (need nft, iptables or pf)")
+
+
+def cleanup_all():
+    """Remove every kill-switch rule any backend may have left behind (crashed daemon, uninstall).  Returns the
+    names of the backends that had something to remove."""
+    cleaned = []
+    for name, cls in BACKENDS.items():
+        try:
+            if not cls.usable():
+                continue
+            fw = cls()
+            if fw.active():
+                fw.remove()
+                cleaned.append(name)
+        except Exception:  # noqa: BLE001
+            continue
+    return cleaned

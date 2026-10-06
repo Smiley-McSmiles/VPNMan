@@ -245,6 +245,10 @@ class SplitTunnel:
             os.makedirs(self.path, exist_ok=True)
             rc, out = plat.run([plat.which("nft"), "-f", "-"], input=ruleset(dns))
             if rc:
+                try:
+                    os.rmdir(self.path)                  # do not leave the empty cgroup behind
+                except OSError:
+                    pass
                 raise RuntimeError("nft: " + out.strip())
             self._rules = True
             plat.run([plat.which("ip"), "rule", "del", "fwmark", "0x%x" % MARK, "lookup", str(TABLE)])
