@@ -1077,7 +1077,7 @@ class AppsTests(unittest.TestCase):
         self.assertNotIn("NoExec", names)
         steam = [a for a in found if a["name"] == "Steam"][0]
         self.assertEqual(steam["match"], ["steam"])
-        self.assertEqual(apps.custom_entry("/usr/bin/qbittorrent")["match"], ["qbittorrent"])
+        self.assertEqual(apps.custom_entry("/usr/bin/firefox")["match"], ["firefox"])
         with self.assertRaises(ValueError):
             apps.custom_entry("  ")
 

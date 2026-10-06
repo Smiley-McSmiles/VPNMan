@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.3-blue.svg?style=flat-square" alt="Version 1.0.3"></a>
+  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.4-blue.svg?style=flat-square" alt="Version 1.0.4"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
   <a href="https://gtk.org"><img src="https://img.shields.io/badge/toolkit-GTK4%20%7C%20Libadwaita-red.svg?style=flat-square" alt="GTK4 Libadwaita"></a>
@@ -107,7 +107,6 @@ session inside is still authenticated); a warning is logged.
 | Auto-connect at system start (daemon-side: waits for the network, keeps retrying; `last` / `fastest` / a profile) | ✔ |
 | System tray (StatusNotifierItem): status icon, Connect/Disconnect, Network Lock toggle, Show, Quit | ✔ |
 | Start the tray app at login (XDG autostart; GNOME, KDE, XFCE, …) | ✔ |
-| AirVPN-specific API (server list/keys fetch, per-country scoring) | ✘ – import their generated configs instead |
 | Proxy / Tor / SSH / SSL tunnels as transports | ✘ |
 
 ## Schedule and app bypass

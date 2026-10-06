@@ -248,7 +248,7 @@ class AppPicker(Adw.Window):
                                    margin_bottom=12)
         self.listbox.add_css_class("boxed-list")
         self.listbox.set_filter_func(self._filter)
-        self.custom = Adw.EntryRow(title="Other program (process name, e.g. qbittorrent)")
+        self.custom = Adw.EntryRow(title="Other program (process name, e.g. firefox)")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         box.append(self.listbox)
         cbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, margin_start=12, margin_end=12, margin_bottom=12)

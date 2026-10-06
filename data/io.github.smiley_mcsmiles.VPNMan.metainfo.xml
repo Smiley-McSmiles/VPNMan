@@ -17,6 +17,18 @@
   <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.0.4" date="2026-10-06">
+      <description>
+        <ul>
+          <li>Schedule tab and "vpnman schedule": connect at set times, optionally disconnect again</li>
+          <li>Apps tab and "vpnman bypass": whitelisted apps skip the VPN and stay online under the kill switch</li>
+          <li>Fixed the app bypass being bypassed by WireGuard's routing rules</li>
+          <li>Fixed launching from the app menu when another Python without PyGObject came first in PATH</li>
+          <li>Installer copies the launcher and icons, restores SELinux contexts, validates the launcher</li>
+          <li>Removes stale kill-switch and bypass rules at startup and on uninstall; new "vpnman cleanup"</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.3" date="2026-10-05"/>
     <release version="1.0.2" date="2026-10-05"/>
     <release version="1.0.1" date="2026-10-05"/>
