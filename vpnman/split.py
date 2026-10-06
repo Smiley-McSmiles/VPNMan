@@ -60,6 +60,27 @@ def route_commands(gw, dev, link_routes=(), table=TABLE, mark=MARK, priority=PRI
     return cmds
 
 
+def rule_fix(rules_text, mark=MARK, table=TABLE):
+    """(old, new) priorities when another rule would be consulted before ours, else None.
+
+    `ip rule show` text in.  VPN tools (wg-quick) add their rules *below* the lowest-numbered rule that exists when
+    they run, so a bypass rule created earlier ends up behind theirs and marked traffic is pulled into the tunnel."""
+    ours, others = None, []
+    for line in rules_text.splitlines():
+        head, _, body = line.partition(":")
+        if not head.strip().isdigit():
+            continue
+        pref = int(head)
+        if "fwmark 0x%x" % mark in body and ("lookup %d" % table) in body:
+            ours = pref
+        elif pref > 0:
+            others.append(pref)
+    if ours is None or not others or ours < min(others):
+        return None
+    new = min(others) - 1
+    return (ours, new) if new >= 1 else None
+
+
 # --------------------------------------------------------------- process matching
 
 def _stat(proc, pid):
@@ -269,6 +290,24 @@ class SplitTunnel:
             except OSError:
                 pass
 
+    def ensure_rule_first(self):
+        """Keep our policy rule ahead of every other one (see rule_fix)."""
+        ip = plat.which("ip")
+        if not ip or not self.active:
+            return
+        rc, out = plat.run([ip, "-4", "rule", "show"])
+        fix = rule_fix(out) if rc == 0 else None
+        if not fix:
+            return
+        old, new = fix
+        sel = ["fwmark", "0x%x" % MARK, "lookup", str(TABLE)]
+        rc, msg = plat.run([ip, "rule", "add"] + sel + ["priority", str(new)])
+        if rc:
+            self.log("warn", "App bypass: could not reorder the routing rule: %s" % msg.strip())
+            return
+        plat.run([ip, "rule", "del"] + sel + ["priority", str(old)])
+        self.log("info", "App bypass: moved its routing rule ahead of the VPN's (priority %d -> %d)" % (old, new))
+
     # -- process handling
     def _cgroup_of(self, pid):
         try:
@@ -327,6 +366,7 @@ class SplitTunnel:
     def _loop(self, stop):
         while not stop.is_set():
             try:
+                self.ensure_rule_first()
                 self.scan_once()
             except Exception as e:  # noqa: BLE001
                 self.log("warn", "App bypass scan failed: %s" % e)

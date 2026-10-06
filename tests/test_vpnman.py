@@ -901,6 +901,18 @@ class SplitTests(unittest.TestCase):
         cmds = netlock.ipt_commands(netlock.Spec(ifaces=["tun0"], split_mark=0x5652))
         self.assertIn(["-A", "VPNMAN_OUT", "-m", "mark", "--mark", "0x5652", "-j", "ACCEPT"], cmds)
 
+    def test_rule_is_moved_ahead_of_wg_quick_rules(self):
+        from vpnman import split
+        bad = ("0:\tfrom all lookup local\n78:\tfrom all lookup main suppress_prefixlength 0\n"
+               "79:\tnot from all fwmark 0xca6c lookup 51820\n80:\tfrom all fwmark 0x5652 lookup 5652\n"
+               "32766:\tfrom all lookup main\n32767:\tfrom all lookup default\n")
+        self.assertEqual(split.rule_fix(bad), (80, 77))               # the exact layout seen on a real Fedora box
+        good = bad.replace("78:", "32764:").replace("79:", "32765:")
+        self.assertIsNone(split.rule_fix(good))
+        self.assertIsNone(split.rule_fix("0:\tfrom all lookup local\n32766:\tfrom all lookup main\n"))
+        self.assertIsNone(split.rule_fix("0:\tfrom all lookup local\n1:\tfrom all lookup 9\n"
+                                         "2:\tfrom all fwmark 0x5652 lookup 5652\n"))     # no room below: leave it
+
     def _fake_proc(self, procs):
         root = tempfile.mkdtemp(dir=TMP)
         for pid, (comm, ppid, argv) in procs.items():

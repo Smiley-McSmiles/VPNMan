@@ -689,6 +689,8 @@ class Manager:
                 except Exception as e:  # noqa: BLE001
                     self._split_cur = None
                     self.log.add("warn", "App bypass unavailable: %s" % e)
+            if self._split.active:
+                self._split.ensure_rule_first()     # a VPN that came up after us (wg-quick) must not outrank us
             if (self._split.active, self._split_cur) != was and self.lock_engaged:
                 try:
                     self._lock_apply()          # let the kill switch pass (or stop passing) the bypassed traffic
