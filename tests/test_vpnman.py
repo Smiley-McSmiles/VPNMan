@@ -901,6 +901,116 @@ class SplitTests(unittest.TestCase):
         cmds = netlock.ipt_commands(netlock.Spec(ifaces=["tun0"], split_mark=0x5652))
         self.assertIn(["-A", "VPNMAN_OUT", "-m", "mark", "--mark", "0x5652", "-j", "ACCEPT"], cmds)
 
+    def test_rule_is_moved_ahead_of_wg_quick_rules(self):
+        from vpnman import split
+        bad = ("0:\tfrom all lookup local\n78:\tfrom all lookup main suppress_prefixlength 0\n"
+               "79:\tnot from all fwmark 0xca6c lookup 51820\n80:\tfrom all fwmark 0x5652 lookup 5652\n"
+               "32766:\tfrom all lookup main\n32767:\tfrom all lookup default\n")
+        self.assertEqual(split.rule_fix(bad), (80, 77))               # the exact layout seen on a real Fedora box
+        good = bad.replace("78:", "32764:").replace("79:", "32765:")
+        self.assertIsNone(split.rule_fix(good))
+        self.assertIsNone(split.rule_fix("0:\tfrom all lookup local\n32766:\tfrom all lookup main\n"))
+        self.assertIsNone(split.rule_fix("0:\tfrom all lookup local\n1:\tfrom all lookup 9\n"
+                                         "2:\tfrom all fwmark 0x5652 lookup 5652\n"))     # no room below: leave it
+
+    def _fake_system(self):
+        """Patch platform helpers so SplitTunnel can run unprivileged; returns (recorded commands, undo)."""
+        from vpnman import platform as plat, split
+        cmds, cg = [], tempfile.mkdtemp(dir=TMP)
+        real = (plat.run, plat.which, split.supported, split.cgroup_root)
+        state = {"nft_ok": True, "rules": 1}
+
+        def run(cmd, **kw):
+            cmds.append(" ".join(cmd[1:]) if cmd[0].startswith("/") else " ".join(cmd))
+            joined = " ".join(cmd)
+            if "-f -" in joined:
+                return (0, "") if state["nft_ok"] else (1, "boom")
+            if "rule del" in joined:                          # one rule exists, then none: the cleanup loop must stop
+                state["rules"] -= 1
+                return (0, "") if state["rules"] >= 0 else (2, "")
+            return 0, ""
+        plat.run, plat.which = run, lambda n: "/usr/sbin/" + n
+        split.supported, split.cgroup_root = (lambda: (True, "")), (lambda: cg)
+
+        def undo():
+            plat.run, plat.which, split.supported, split.cgroup_root = real
+        return cmds, cg, state, undo
+
+    def test_bypass_removes_everything_it_created(self):
+        from vpnman import split
+        cmds, cg, state, undo = self._fake_system()
+        try:
+            st = split.SplitTunnel(lambda: [], proc=tempfile.mkdtemp(dir=TMP))
+            st.start("192.168.1.1", "eno1", ["192.168.1.1"])
+            self.assertTrue(os.path.isdir(os.path.join(cg, "vpnman-bypass")))
+            st.stop()
+            joined = "\n".join(cmds)
+            self.assertIn("delete table inet vpnman_split", joined)
+            self.assertIn("rule del fwmark 0x5652 lookup 5652", joined)
+            self.assertIn("route flush table 5652", joined)
+            self.assertFalse(os.path.exists(os.path.join(cg, "vpnman-bypass")))
+            self.assertFalse(st.active)
+        finally:
+            undo()
+
+    def test_failed_start_leaves_nothing_behind(self):
+        from vpnman import split
+        cmds, cg, state, undo = self._fake_system()
+        state["nft_ok"] = False
+        try:
+            st = split.SplitTunnel(lambda: [], proc=tempfile.mkdtemp(dir=TMP))
+            with self.assertRaises(RuntimeError):
+                st.start("192.168.1.1", "eno1")
+            self.assertFalse(os.path.exists(os.path.join(cg, "vpnman-bypass")))
+            self.assertFalse(st.active)
+        finally:
+            undo()
+
+    def test_cleanup_all_and_stale_lock_removed_at_startup(self):
+        calls = []
+
+        class Fake:
+            def __init__(self, name, usable, active):
+                self.name, self._u, self._a = name, usable, active
+                outer = self
+
+                class C:
+                    @staticmethod
+                    def usable():
+                        return outer._u
+
+                    def __new__(cls):
+                        return outer
+                self.cls = C
+
+            def active(self):
+                return self._a
+
+            def remove(self):
+                calls.append(self.name)
+        real = dict(netlock.BACKENDS)
+        netlock.BACKENDS.clear()
+        for f in (Fake("nftables", True, True), Fake("iptables", True, False), Fake("pf", False, True)):
+            netlock.BACKENDS[f.name] = f.cls
+        try:
+            self.assertEqual(netlock.cleanup_all(), ["nftables"])      # only usable AND active backends are touched
+            self.assertEqual(calls, ["nftables"])
+            from vpnman import split
+            s = settings.Settings(TMP + "/stale.json")
+            m = Manager(settings=s)
+            real_split = split.cleanup
+            split.cleanup = lambda: calls.append("split.cleanup")
+            try:
+                m.startup()                                           # lock not wanted -> stale one is removed
+            finally:
+                split.cleanup = real_split
+                m.scheduler.stop()
+            self.assertEqual(calls.count("nftables"), 2)
+            self.assertIn("split.cleanup", calls)
+        finally:
+            netlock.BACKENDS.clear()
+            netlock.BACKENDS.update(real)
+
     def _fake_proc(self, procs):
         root = tempfile.mkdtemp(dir=TMP)
         for pid, (comm, ppid, argv) in procs.items():

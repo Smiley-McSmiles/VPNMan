@@ -111,6 +111,7 @@ if [ "$1" = remove ] || [ "$1" = upgrade ]; then
     if [ -d /run/systemd/system ]; then systemctl stop vpnmand || true
     elif [ -x /etc/init.d/vpnmand ]; then /etc/init.d/vpnmand stop || true; fi
 fi
+if [ "$1" = remove ] && [ -x /usr/bin/vpnman ]; then /usr/bin/vpnman cleanup --force >/dev/null 2>&1 || true; fi
 exit 0
 PRM
     cat > "$root/DEBIAN/postrm" <<'PRM'
@@ -198,6 +199,8 @@ pkill -f -- '^[^ ]*python[0-9.]* -m vpnman gui' >/dev/null 2>&1 || :
 if [ "\$1" -eq 0 ] && [ -d /run/systemd/system ]; then
     systemctl disable --now vpnmand.service >/dev/null 2>&1 || :
 fi
+# kill-switch / app-bypass rules, routing rule and cgroup the daemon created
+if [ "\$1" -eq 0 ] && [ -x /usr/bin/vpnman ]; then /usr/bin/vpnman cleanup --force >/dev/null 2>&1 || :; fi
 
 %postun
 if [ -d /run/systemd/system ]; then

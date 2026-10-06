@@ -425,6 +425,20 @@ class Cli:
         print("Saved.")
         return 0
 
+    def cmd_cleanup(self, a):
+        from . import netlock, split
+        if self.client.alive() and not a.force:
+            raise RpcError("the VPNMan service is running and owns these rules - stop it first "
+                           "(vpnman disconnect; vpnman lock off), or use --force")
+        if os.geteuid() != 0:
+            raise RpcError("run as root: sudo vpnman cleanup")
+        gone = netlock.cleanup_all()
+        if plat.os_family() == "linux":
+            split.cleanup()
+        print("Removed: %s" % (", ".join(gone) if gone else "no kill-switch rules"),
+              "+ app-bypass rules, routing rule/table and cgroup" if plat.os_family() == "linux" else "")
+        return 0
+
     def cmd_get(self, a):
         v = self.call("settings.get", key=a.key)
         if a.key and not isinstance(v, (dict, list)):
@@ -771,6 +785,8 @@ def build_parser():
     s.add_argument("--name"); s.add_argument("--days", help="all | weekdays | weekends | mon,wed | mon-fri")
     s.add_argument("--start", metavar="HH:MM"); s.add_argument("--end", metavar="HH:MM", help="disconnect again at this time")
     s.add_argument("--profile", help="profile name/id, 'fastest' or 'last' (default: last used)")
+    s = add("cleanup", "remove firewall rules, routes and cgroups VPNMan left behind (root)")
+    s.add_argument("--force", action="store_true", help="even if the service is running")
     s = add("get", "show settings"); s.add_argument("key", nargs="?")
     s = add("set", "change a setting"); s.add_argument("key"); s.add_argument("value")
     s = add("logs", "show daemon log"); s.add_argument("-f", "--follow", action="store_true")

@@ -344,6 +344,8 @@ uninstall() {
         sysv) /etc/init.d/vpnmand stop 2>/dev/null || true; update-rc.d -f vpnmand remove 2>/dev/null || true ;;
         openbsd) rcctl disable vpnmand 2>/dev/null || true; rcctl stop vpnmand 2>/dev/null || true ;;
     esac
+    # firewall rules, routing rule/table and cgroup created by the daemon (while the program still exists)
+    if [ -z "$DESTDIR" ] && [ -x "$BINDIR/vpnman" ]; then "$BINDIR/vpnman" cleanup --force >/dev/null 2>&1 || true; fi
     rm -rf "$D$LIBDIR" "$D$SHAREDIR/vpnman"
     rm -f "$D$BINDIR/vpnman" "$D$BINDIR/vpnmand" "$D$BINDIR/vpnman-gtk"
     rm -f "$D$SHAREDIR/applications/io.github.smiley_mcsmiles.VPNMan.desktop" \
