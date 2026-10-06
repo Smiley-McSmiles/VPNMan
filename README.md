@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.4-blue.svg?style=flat-square" alt="Version 1.0.4"></a>
+  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.5-blue.svg?style=flat-square" alt="Version 1.0.5"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
   <a href="https://gtk.org"><img src="https://img.shields.io/badge/toolkit-GTK4%20%7C%20Libadwaita-red.svg?style=flat-square" alt="GTK4 Libadwaita"></a>
@@ -90,13 +90,21 @@ session inside is still authenticated); a warning is logged.
 
 | Feature | Status |
 |---------|--------|
-| Server/profile list, favourites, blacklist, search, latency test, "fastest" | ✔ |
+| Server/profile list, favourites, blacklist, search, latency test, "fastest"; multi-select (Ctrl+click, Shift+click, Ctrl+A) for bulk remove | ✔ |
 | Connect / disconnect / auto-reconnect / fail-over to next favourite | ✔ |
 | Auto-connect on start (`off`, `last`, `fastest`, or a profile) | ✔ |
 | Network lock: nftables, iptables(+ip6tables), pf; LAN/DHCP/ping/IPv6 toggles; in/out whitelists; persist across reboots | ✔ |
 | Lock engaged *before* connecting, kept while reconnecting, endpoint pre-resolved (no DNS needed under lock) | ✔ |
 | DNS leak protection + DNS picker (provider, Cloudflare, Google, Quad9, OpenDNS, AdGuard, Mullvad, custom; switches live; `vpnman dns`) | ✔ |
 | Custom routes that bypass the tunnel | ✔ (IPv4) |
+| Login prompt: when the server rejects the username/password the app asks for them right there and reconnects (no retry loop against a wrong password) | ✔ |
+| **Connection test** (GUI "Test connection", `vpnman leaktest`): tunnel, public IP, kill switch really blocking, DNS and IPv6 leaks | ✔ (Linux) |
+| **Trusted networks**: connect automatically on Wi-Fi/wired networks you have not marked as trusted; optionally disconnect on trusted ones | ✔ |
+| Network change handling: the app bypass and bypass routes follow a new gateway (Wi-Fi ⇄ Ethernet) | ✔ |
+| Server groups (folders become groups on import), sort by name / favourites / latency, optional automatic latency test | ✔ |
+| Connection history and a live traffic graph | ✔ |
+| Backup and restore of all profiles (with credentials) and settings | ✔ |
+| Shell completions for bash, zsh and fish (profile names included) | ✔ |
 | **Schedule**: connect (and optionally disconnect) at set times on chosen days, overnight windows, per-entry server; runs in the daemon | ✔ |
 | **App bypass** (per-app split tunnel): whitelist installed apps such as Steam or Firefox so they ignore the VPN | ✔ (Linux: nftables + cgroup v2) |
 | Event hooks (pre-connect / connected / disconnected) | ✔ |
@@ -140,6 +148,30 @@ session inside is still authenticated); a warning is logged.
   and programs started later are picked up within about two seconds. Needs `nft`, `ip` and a pure cgroup v2 system
   (`/sys/fs/cgroup` is cgroup2 - the default on Fedora, Ubuntu 22.04+, Debian 11+, Arch, Void with elogind/systemd).
   The Apps tab says so when the machine can't do it. Not available on the BSDs (pf cannot match by program).
+
+  *Only listed apps use the VPN* (experimental): the same machinery inverted - everything on the computer uses the
+  normal connection except the listed apps. Switch with the "How the list works" row or `vpnman bypass mode include`.
+  Everything else is unprotected in this mode, and the kill switch lets that traffic through; use it deliberately.
+
+* **Addresses that skip the VPN** – IPs, networks (`10.0.0.0/8`) or domain names (resolved periodically) in the Apps tab
+  or `vpnman routes add 10.0.0.0/8 nas.example.com`. They use the normal connection and the kill switch never blocks them.
+
+## Networks, tests and backups
+
+* **Trusted networks** – *Preferences → Networks* or `vpnman networks`. Mark home/office Wi-Fi as trusted; on any other
+  network VPNMan can connect automatically (`vpnman set network.untrusted_action connect`) and, if you want, disconnect
+  again on a trusted one (only when it was the automation that connected). A network is identified by its Wi-Fi name or
+  its router's MAC address, so "192.168.1.1" at the cafe is not mistaken for your home.
+* **Connection test** – *Connection → Test connection* or `vpnman leaktest`. It checks the tunnel, your public IP, that
+  traffic outside the tunnel is blocked while the kill switch is engaged, that DNS servers sit behind the tunnel, and that
+  IPv6 does not bypass it. Exit status 1 on a failure, so it can run from a script.
+* **History** – the Connection page lists recent sessions with duration and traffic (`vpnman history`); a graph shows the
+  last two minutes of traffic while connected.
+* **Backup** – main menu *Export Backup… / Restore Backup…* or `vpnman backup export FILE` / `vpnman backup import FILE
+  [--replace] [--settings]`. The file contains your passwords and private keys: it is written `0600` and should be kept safe.
+  Restoring validates the archive and by default only adds profiles that are missing.
+* **Completions** – installed for bash, zsh and fish; profile names complete too. They are generated from the real
+  argument parser (`python3 tools/gen_completions.py`) and a test fails if they go stale.
 
 ## Auto-start and the system tray
 
@@ -191,12 +223,25 @@ Service control later: `sudo vpnman service enable|disable|start|stop|restart|st
 ### Packages
 
 ```sh
-./package.sh            # dist/: .tar.gz, .deb (built by packaging/mkdeb.py - no dpkg needed), .rpm if rpmbuild exists,
-                        # Arch pkg if makepkg exists
+./package.sh                   # everything this machine can build; a missing tool only skips that target
+./package.sh arch deb          # or pick targets: tar deb rpm arch void alpine openbsd recipes clean
 ./package.sh --container rpm   # build the .rpm inside a Fedora container (podman/docker) from ANY distro
-                        # dist/recipes/: PKGBUILD, .spec, Void template, Alpine APKBUILD, OpenBSD port skeleton
-./package.sh deb        # or pick targets: tar deb rpm arch void alpine openbsd recipes clean
 ```
+
+| Target | Needs | Notes |
+|--------|-------|-------|
+| `tar` | nothing | source tarball with `install.sh` |
+| `deb` | python3 | built by `packaging/mkdeb.py` - no `dpkg` needed |
+| `rpm` | `rpmbuild` | or `--container` |
+| `arch` | python3 | built by `packaging/mkarch.py` - works on **any** distro, no `makepkg`/`pacman`; install with `pacman -U` |
+| `void` | `xbps-create` (Void) | otherwise the template is written to `dist/recipes/void/` |
+| `alpine`, `openbsd` | - | recipes only (`APKBUILD`, port skeleton) in `dist/recipes/` |
+
+With no argument, `package.sh` builds every target it can and ends with a summary of what was built, skipped and failed.
+
+GitHub Actions (`.github/workflows`): CI runs the tests and builds every package on each push/PR; pushing a tag
+`vX.Y.Z` (which must match the version in the code - checked by `tools/check_version.py`) publishes a release with all
+packages, `SHA256SUMS` and notes taken from the metainfo file.
 
 ## Usage
 
@@ -241,7 +286,7 @@ want them to start while the lock is engaged.
 ## Tests
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 -m unittest tests.test_vpnman -v        # GUI tests need xvfb-run, dbus-run-session, xdotool (they skip otherwise)
 ```
 
 The suite covers rule generation, importers, command construction, settings, DNS handling and a full

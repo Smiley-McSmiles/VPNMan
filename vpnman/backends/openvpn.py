@@ -1,8 +1,19 @@
+import os
 import re
+import shlex
+import shutil
 
+from .. import platform as plat
 from .. import stunnel
-from .base import Backend
+from .base import Backend, CredentialsRequired
 
+# Script hooks that Debian-style configs ship: they either do not exist on this distribution (update-resolv-conf is
+# a Debian/Ubuntu file) or fight with vpnman, which sets the DNS servers itself. A missing hook is fatal for OpenVPN
+# ("up" failing aborts the connection), so such lines are dropped from the runtime copy.
+_HOOKS = ("up", "down", "route-up", "route-pre-down", "ipchange", "up-restart", "client-connect", "client-disconnect")
+_DNS_HELPERS = re.compile(r"update-resolv-conf|update-systemd-resolved|resolvconf|openresolv|systemd-resolve|"
+                          r"resolved-up|dns-up|dns-down", re.I)
+_HOOK_LINE = re.compile(r"^\s*(%s)\s+(.+?)\s*$" % "|".join(re.escape(h) for h in _HOOKS), re.I)
 _REMOTE = re.compile(r"^\s*remote\s+(\S+)(?:\s+(\d+))?(?:\s+(udp6?|tcp6?(?:-client)?))?", re.M | re.I)
 
 
@@ -15,6 +26,7 @@ class OpenVPN(Backend):
     ready_re = re.compile(r"Initialization Sequence Completed")
     named_iface = True
     fields = ("username", "password", "key_password")
+    probe_cache = {}               # "option value" -> does this openvpn binary accept it?
 
     @classmethod
     def sniff(cls, filename, text):
@@ -67,6 +79,41 @@ class OpenVPN(Backend):
         m = re.search(r"^\s*dev\s+(tun|tap)", text, re.M)
         return m.group(1) if m else "tun"
 
+    @staticmethod
+    def sanitize_hooks(text, profile_dir):
+        """Drop up/down-style script hooks that cannot work here.  Returns (new text, [explanations])."""
+        out, notes, inline = [], [], None
+        for line in text.splitlines():
+            st = line.strip()
+            if inline:
+                if st.startswith("</" + inline):
+                    inline = None
+                out.append(line)
+                continue
+            m = re.match(r"^<([a-z0-9-]+)>$", st)
+            if m:
+                inline = m.group(1)
+                out.append(line)
+                continue
+            hook = _HOOK_LINE.match(line) if not st.startswith(("#", ";")) else None
+            if hook:
+                try:
+                    cmd = shlex.split(hook.group(2))
+                except ValueError:
+                    cmd = hook.group(2).split()
+                exe = cmd[0] if cmd else ""
+                why = None
+                if _DNS_HELPERS.search(exe):
+                    why = "vpnman sets the DNS servers itself"
+                elif exe and not (os.path.isfile(exe) if os.path.isabs(exe) else
+                                  (os.path.isfile(os.path.join(profile_dir, exe)) or shutil.which(exe))):
+                    why = "the script does not exist on this system"
+                if why:
+                    notes.append("Ignoring '%s %s' from the config: %s" % (hook.group(1), exe, why))
+                    continue
+            out.append(line)
+        return "\n".join(out) + ("\n" if text.endswith("\n") else ""), notes
+
     def prepare(self, ctx):
         """Write a runtime copy whose ``remote`` hosts are already resolved, so
         OpenVPN never needs DNS while the kill switch is up."""
@@ -79,6 +126,14 @@ class OpenVPN(Backend):
             return m.group(1) + ip + m.group(3) if ip else m.group(0)
 
         text = re.sub(r"^(\s*remote\s+)(\S+)(.*)$", sub, text, flags=re.M)
+        text, notes = self.sanitize_hooks(text, ctx.profile_dir)
+        ctx.state["notes"] = notes
+        # DNS servers written into the config itself ("dhcp-option DNS x") and a filter that ignores the pushed ones
+        for m in re.finditer(r"^\s*dhcp-option\s+DNS6?\s+([0-9a-fA-F.:]+)\s*$", text, re.M | re.I):
+            if m.group(1) not in ctx.dns:
+                ctx.dns.append(m.group(1))
+        ctx.state["ignore_pushed_dns"] = bool(
+            re.search(r"^\s*pull-filter\s+ignore\s+[\"']?dhcp-option\s+DNS", text, re.M | re.I))
         tun = ctx.state.get("stunnel")
         if tun:
             # OpenVPN talks TCP to the local stunnel; stunnel carries it over TLS to the server.
@@ -91,6 +146,18 @@ class OpenVPN(Backend):
         ctx.state["text"] = text
         ctx.state["path"] = ctx.write("runtime.ovpn", text)
 
+    def _accepts(self, *opt):
+        """Does the installed openvpn understand this option?  Probed once (an option error makes it exit non-zero
+        before it does anything), so one code path works with OpenVPN 2.4 up to 2.7."""
+        key = " ".join(opt)
+        if key not in self.probe_cache:
+            try:
+                rc, _out = plat.run([self.binary()] + list(opt) + ["--verb", "3", "--show-digests"], timeout=10)
+            except Exception:  # noqa: BLE001
+                rc = 1
+            self.probe_cache[key] = rc == 0
+        return self.probe_cache[key]
+
     def connect_cmd(self, ctx):
         p = ctx.profile
         text = ctx.state["text"]
@@ -98,10 +165,14 @@ class OpenVPN(Backend):
                "--auth-nocache"]
         if ctx.ifname:
             cmd += ["--dev", ctx.ifname, "--dev-type", self._dev(text)]
+        if self._accepts("--dns-updown", "disable"):
+            # OpenVPN 2.7 applies pushed DNS itself (resolvconf/systemd-resolved) on top of vpnman's own handling;
+            # the two fight on teardown ("resolvconf: signature mismatch"). vpnman owns DNS.
+            cmd += ["--dns-updown", "disable"]
         if p.get("username"):
             cmd += ["--auth-user-pass", ctx.write("auth", "%s\n%s\n" % (p["username"], p.get("password", "")))]
         elif re.search(r"^\s*auth-user-pass\s*$", text, re.M):
-            raise ValueError("this profile needs a username and password")
+            raise CredentialsRequired("this profile needs a username and password")
         if p.get("key_password"):
             cmd += ["--askpass", ctx.write("askpass", p["key_password"] + "\n")]
         cmd += [str(a) for a in ctx.settings.get("connection.openvpn_args")]
@@ -109,9 +180,18 @@ class OpenVPN(Backend):
         return cmd
 
     def parse_line(self, line, ctx):
+        m = re.search(r"AUTH_FAILED(?:,(.*?))?'?$", line) if "AUTH_FAILED" in line else None
+        if m:
+            reason = (m.group(1) or "").strip(" '")
+            ctx.state["fatal_kind"] = "auth"
+            ctx.state["fatal"] = ("Authentication failed - the server rejected the username or password%s. "
+                                  "Edit the profile and re-enter them (some providers use a separate VPN username "
+                                  "or password, not your website login)." % (" (%s)" % reason if reason else ""))
         m = re.search(r"TUN/TAP device (\S+) opened", line)
         if m:
             ctx.iface = m.group(1)
         m = re.search(r"dhcp-option DNS6?\s+([0-9a-fA-F.:]+)", line)
+        if m and ctx.state.get("ignore_pushed_dns"):
+            m = None                    # the config told OpenVPN to ignore the server's DNS; keep the config's own
         if m and m.group(1) not in ctx.dns:
             ctx.dns.append(m.group(1))

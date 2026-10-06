@@ -77,7 +77,17 @@ class Cli:
 
     def cmd_list(self, a):
         ps = self.call("profiles.list")
+        if getattr(a, "names", False):
+            for p in ps:
+                print(p["name"])
+            return 0
+        if getattr(a, "sort", None) == "latency":
+            a.latency = True
         lat = self.call("latency") if a.latency else {}
+        if getattr(a, "sort", None):
+            key = {"name": lambda p: p["name"].lower(), "group": lambda p: ((p.get("group") or "~").lower(), p["name"].lower()),
+                   "latency": lambda p: (lat.get(p["id"]) is None, lat.get(p["id"]) or 0, p["name"].lower())}[a.sort]
+            ps = sorted(ps, key=key)
         if a.json:
             print(json.dumps(ps, indent=2))
             return 0
@@ -89,8 +99,10 @@ class Cli:
             flags = ("★" if p["favorite"] else " ") + ("⊘" if p["blacklisted"] else " ")
             ms = lat.get(p["id"])
             extra = ("  %6.1f ms" % ms) if ms else ("  %9s" % "-" if a.latency else "")
-            print("%s %-*s  %-12s %s%s" % (flags, w, p["name"], p["protocol"],
-                                            dim("%s:%s" % (p["server"], p["port"]) if p["server"] else ""), extra))
+            grp = ("  [%s]" % p["group"]) if p.get("group") else ""
+            print("%s %-*s  %-12s %s%s%s" % (flags, w, p["name"], p["protocol"],
+                                              dim("%s:%s" % (p["server"], p["port"]) if p["server"] else ""), extra,
+                                              dim(grp)))
         return 0
 
     def cmd_connect(self, a):
@@ -99,7 +111,24 @@ class Cli:
         if a.no_wait:
             print("Connecting...")
             return 0
-        return self.wait_connected(a.timeout, mark)
+        rc = self.wait_connected(a.timeout, mark)
+        for _ in range(3):
+            st = self.call("status")
+            if rc == 0 or st.get("state") != "error" or st.get("error_kind") != "auth" or not sys.stdin.isatty():
+                break
+            # wrong or missing credentials: ask right here instead of sending the user off to edit the profile
+            pid = st["profile_id"]
+            cur = self.call("profiles.get", ident=pid)
+            print(yellow("The server rejected the login for %s." % st["profile"]))
+            user = ask("Username", cur.get("username") or None)
+            pw = getpass.getpass("Password: ")
+            if not user or not pw:
+                break
+            self.call("profiles.update", ident=pid, changes={"username": user, "password": pw})
+            mark = self.call("logs", since=0, limit=1)["last"]
+            self.call("connect", ident=pid)
+            rc = self.wait_connected(a.timeout, mark)
+        return rc
 
     def wait_connected(self, timeout=90, seen=None):
         end = time.time() + timeout
@@ -132,13 +161,18 @@ class Cli:
         return 0
 
     def cmd_import(self, a):
-        targets = []
+        targets, groups = [], {}
         for path in a.paths:
             if os.path.isdir(path):
+                top = os.path.abspath(path)
                 for root, _d, files in os.walk(path):
                     for f in sorted(files):
                         if f.lower().endswith((".ovpn", ".conf", ".swanctl", ".vpnc", ".fortivpn", ".yml", ".yaml")):
-                            targets.append(os.path.join(root, f))
+                            full = os.path.join(root, f)
+                            targets.append(full)
+                            rel = os.path.relpath(os.path.abspath(root), top)
+                            if rel != ".":                    # files in sub-folders: the folder name becomes the group
+                                groups[full] = rel.replace(os.sep, " / ")
             else:
                 targets.append(path)
         if not targets:
@@ -157,7 +191,9 @@ class Cli:
                 text, files = prof.collect_files(path)
                 name = a.name if (a.name and len(targets) == 1) else os.path.splitext(os.path.basename(path))[0]
                 p = self.call("profiles.import", name=name, text=text, files=files, protocol=a.protocol,
-                              filename=os.path.basename(path), fields=fields, options=options)
+                              filename=os.path.basename(path), fields=dict(fields, **({"group": groups[path]}
+                                                                              if path in groups and "group" not in fields else {})),
+                              options=options)
                 if a.stunnel_ca and a.stunnel:
                     self.upload_ca(p["id"], a.stunnel_ca)
                 print("%s %s  (%s)" % (green("imported"), p["name"], p["protocol"]))
@@ -340,7 +376,8 @@ class Cli:
         st = self.call("split.status")
         cur = st["apps"]
         if act == "list":
-            print("App bypass: %s%s" % ("on" if st["enabled"] else "off", " (active)" if st["active"] else ""))
+            print("App bypass: %s%s%s" % ("on" if st["enabled"] else "off", " (active)" if st["active"] else "",
+                                    "  [only the listed apps use the VPN]" if st["mode"] == "include" else ""))
             if not st["supported"]:
                 print(yellow("  not available here: %s" % st["reason"]))
             for ap in cur:
@@ -351,6 +388,13 @@ class Cli:
         if act in ("on", "off"):
             self.call("split.set", enabled=(act == "on"))
             print("App bypass %s." % ("enabled" if act == "on" else "disabled"))
+            return 0
+        if act == "mode":
+            if not rest or rest[0] not in ("exclude", "include"):
+                print("Mode: %s  (exclude = listed apps skip the VPN, include = ONLY listed apps use it)" % st["mode"])
+                return 0
+            self.call("split.set", mode=rest[0])
+            print("Mode set to %s." % rest[0])
             return 0
         if act == "available":
             flt = " ".join(rest).lower()
@@ -424,6 +468,103 @@ class Cli:
         self.call("schedule.set", entries=[{k: e[k] for k in keys if k in e} for e in entries])
         print("Saved.")
         return 0
+
+    def cmd_backup(self, a):
+        import base64
+        if a.action == "export":
+            if os.path.exists(a.file) and not a.force:
+                raise RpcError("%s exists - use --force to overwrite it" % a.file)
+            res = self.call("backup.export")
+            fd = os.open(a.file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(base64.b64decode(res["data"]))
+            print("Backup written to %s (%s)." % (a.file, human_bytes(res["size"])))
+            print(yellow("It contains your passwords and private keys - keep it somewhere safe."))
+            return 0
+        if not os.path.isfile(a.file):
+            raise RpcError("no such file: %s" % a.file)
+        with open(a.file, "rb") as fh:
+            raw = fh.read()
+        if a.replace and sys.stdin.isatty() and ask("This REPLACES every profile on this computer. Continue? (y/N)").lower() != "y":
+            return 1
+        res = self.call("backup.import", data=base64.b64encode(raw).decode(), replace=a.replace,
+                        restore_settings=True if a.settings else None)
+        print("Restored: %d profile(s) added, %d already present%s%s." % (
+            res["added"], res["skipped"], ", %d removed first" % res["removed"] if a.replace else "",
+            ", settings restored" if res["settings"] else ""))
+        return 0
+
+    def cmd_history(self, a):
+        if a.clear:
+            self.call("history.clear")
+            print("History cleared.")
+            return 0
+        rows = self.call("history", limit=a.lines)
+        if a.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            print("No connections recorded yet.")
+            return 0
+        for r in rows:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["start"]))
+            d = r["duration"]
+            print("%s  %-28s %8s  down %-10s up %-10s %s" % (when, r["profile"][:28], "%d:%02d:%02d" % (d // 3600, d % 3600 // 60, d % 60),
+                                                           human_bytes(r["rx"]), human_bytes(r["tx"]), dim(r["reason"])))
+        return 0
+
+    def cmd_networks(self, a):
+        act = a.action or "show"
+        if act in ("trust", "untrust"):
+            st = self.call("network.trust", name=a.name, trusted=(act == "trust"))
+            print("%s %s" % ("Trusted:" if act == "trust" else "No longer trusted:", a.name or st["id"]))
+            return 0
+        if act != "show":
+            raise RpcError("unknown action %r (show, trust, untrust)" % act)
+        st = self.call("network.status")
+        cfg = self.call("settings.get", key="network")
+        if st["id"]:
+            print("Current network: %s  (%s via %s)  %s" % (st["id"], st["kind"], st["device"],
+                  green("trusted") if st["trusted"] else yellow("not trusted")))
+        else:
+            print("Current network: none detected")
+        print("Trusted:   %s" % (", ".join(cfg["trusted"]) or "-"))
+        print("On an untrusted network: %s    On a trusted network: %s    Server: %s"
+              % (cfg["untrusted_action"], cfg["trusted_action"], cfg["profile"]))
+        print(dim("Change with: vpnman set network.untrusted_action connect | vpnman set network.trusted_action disconnect"))
+        return 0
+
+    def cmd_routes(self, a):
+        cur = [r.get("ip") or r.get("host") for r in self.call("settings.get", key="routes") if r.get("action") == "out"]
+        act = a.action or "list"
+        if act == "list":
+            print("Addresses that skip the VPN (and are never blocked by the kill switch):")
+            for x in cur:
+                print("  " + x)
+            if not cur:
+                print("  none - e.g.: vpnman routes add 10.0.0.0/8 intranet.example.com")
+            return 0
+        if act == "add":
+            new = cur + [x for x in a.items if x not in cur]
+        elif act in ("remove", "rm"):
+            new = [x for x in cur if x not in a.items]
+        else:
+            raise RpcError("unknown action %r (list, add, remove)" % act)
+        res = self.call("routes.set", entries=new)
+        print("Saved: %s" % (", ".join(r.get("ip") or r.get("host") for r in res) or "nothing"))
+        return 0
+
+    def cmd_leaktest(self, a):
+        res = self.call("leaktest")
+        if a.json:
+            print(json.dumps(res, indent=2))
+        else:
+            mark = {"ok": green("✔"), "warn": yellow("!"), "fail": red("✘"), "info": dim("·")}
+            for c in res["checks"]:
+                print("%s %-16s %s" % (mark.get(c["status"], "?"), c["name"], c["detail"]))
+            print("\n" + {"ok": green("All checks passed."), "warn": yellow("Passed with warnings."),
+                          "fail": red("Problems found - see the lines marked ✘.")}[res["summary"]])
+        return 1 if res["summary"] == "fail" else 0
 
     def cmd_cleanup(self, a):
         from . import netlock, split
@@ -573,6 +714,14 @@ def pick(items, label, render):
             return it
     print(red("No match."))
     return None
+
+
+def human_bytes(n):
+    n = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return ("%d %s" % (n, unit)) if unit == "B" else "%.1f %s" % (n, unit)
+        n /= 1024
 
 
 def _parse_days(text):
@@ -749,6 +898,8 @@ def build_parser():
 
     s = add("status", "show connection status"); s.add_argument("--json", action="store_true")
     s = add("list", "list profiles", aliases=["ls"]); s.add_argument("--latency", "-l", action="store_true")
+    s.add_argument("--names", action="store_true", help="one profile name per line (used by shell completion)")
+    s.add_argument("--sort", choices=["name", "latency", "group"], help="sort order (latency implies --latency)")
     s.add_argument("--json", action="store_true")
     s = add("connect", "connect to a profile", aliases=["up"])
     s.add_argument("profile", nargs="?"); s.add_argument("--fastest", action="store_true")
@@ -778,13 +929,27 @@ def build_parser():
     s.add_argument("target", nargs="?", help="off | last | fastest | profile name")
     s.add_argument("--login-app", choices=["on", "off"], help="start the tray app at login (this user)")
     s = add("dns", "choose the DNS servers used while connected"); s.add_argument("choice", nargs="*")
-    s = add("bypass", "apps that skip the VPN (split tunnel): list|add|remove|available|on|off", aliases=["split"])
+    s = add("bypass", "apps that skip the VPN (split tunnel): list|add|remove|available|on|off|mode", aliases=["split"])
     s.add_argument("action", nargs="?"); s.add_argument("items", nargs="*")
     s = add("schedule", "connect the VPN at set times: list|add|remove|enable|disable|on|off")
     s.add_argument("action", nargs="?"); s.add_argument("target", nargs="?")
     s.add_argument("--name"); s.add_argument("--days", help="all | weekdays | weekends | mon,wed | mon-fri")
     s.add_argument("--start", metavar="HH:MM"); s.add_argument("--end", metavar="HH:MM", help="disconnect again at this time")
     s.add_argument("--profile", help="profile name/id, 'fastest' or 'last' (default: last used)")
+    s = add("backup", "export or restore all profiles (with credentials) and settings")
+    s.add_argument("action", choices=["export", "import"]); s.add_argument("file")
+    s.add_argument("--replace", action="store_true", help="import: make this computer match the backup")
+    s.add_argument("--settings", action="store_true", help="import: also restore the settings (always with --replace)")
+    s.add_argument("--force", action="store_true", help="export: overwrite an existing file")
+    s = add("history", "recent connections: when, how long, how much traffic")
+    s.add_argument("-n", "--lines", type=int, default=20); s.add_argument("--json", action="store_true")
+    s.add_argument("--clear", action="store_true")
+    s = add("networks", "show the current network; trust/untrust it (auto-connect on untrusted networks)")
+    s.add_argument("action", nargs="?", choices=["show", "trust", "untrust"]); s.add_argument("name", nargs="?")
+    s = add("routes", "addresses, networks or domains that skip the VPN: list|add|remove")
+    s.add_argument("action", nargs="?"); s.add_argument("items", nargs="*")
+    s = add("leaktest", "check the live connection: tunnel, public IP, kill switch, DNS and IPv6 leaks")
+    s.add_argument("--json", action="store_true")
     s = add("cleanup", "remove firewall rules, routes and cgroups VPNMan left behind (root)")
     s.add_argument("--force", action="store_true", help="even if the service is running")
     s = add("get", "show settings"); s.add_argument("key", nargs="?")

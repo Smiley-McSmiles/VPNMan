@@ -110,7 +110,7 @@ pm_name() {
 # gui_hint: the command that installs the GTK4/libadwaita Python dependencies
 gui_hint() {
     case "$(pm_name)" in
-        apt-get) echo "apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1" ;;
+        apt-get) echo "apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1" ;;
         dnf) echo "dnf install python3-gobject gtk4 libadwaita" ;;
         pacman) echo "pacman -S python-gobject gtk4 libadwaita" ;;
         xbps-install) echo "xbps-install -S python3-gobject gtk4 libadwaita" ;;
@@ -140,7 +140,7 @@ install_deps() {
     say "Installing dependencies with $(pm_name)"
     case "$(pm_name)" in
         apt-get) apt-get update || warn "apt-get update failed"
-                 REQ="python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 iproute2"
+                 REQ="python3 python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 iproute2"
                  OPT="openvpn wireguard-tools nftables openresolv desktop-file-utils libgtk-4-bin stunnel4 gir1.2-xapp-1.0" ;;
         dnf) REQ="python3 python3-gobject gtk4 libadwaita iproute"
              OPT="openvpn wireguard-tools nftables desktop-file-utils gtk-update-icon-cache stunnel" ;;
@@ -352,7 +352,8 @@ uninstall() {
           "$D$SHAREDIR/metainfo/io.github.smiley_mcsmiles.VPNMan.metainfo.xml" \
           "$D$SHAREDIR/icons/hicolor/scalable/apps/io.github.smiley_mcsmiles.VPNMan.svg" \
           "$D$SHAREDIR/pixmaps/io.github.smiley_mcsmiles.VPNMan.svg" \
-          "$D$MANDIR/vpnman.1"
+          "$D$MANDIR/vpnman.1" "$D$SHAREDIR/bash-completion/completions/vpnman" \
+          "$D$SHAREDIR/zsh/site-functions/_vpnman" "$D$SHAREDIR/fish/vendor_completions.d/vpnman.fish"
     rm -f "$D$SHAREDIR"/icons/hicolor/symbolic/apps/io.github.smiley_mcsmiles.VPNMan*.svg \
           "$D$SHAREDIR"/icons/hicolor/*/apps/io.github.smiley_mcsmiles.VPNMan.png
     if [ -z "$DESTDIR" ]; then unlink_system_dirs; refresh_icon_cache; fi
@@ -417,6 +418,15 @@ cp "$SRC/data/icons/hicolor/scalable/apps/io.github.smiley_mcsmiles.VPNMan.svg" 
 mkdir -p "$D$SHAREDIR/vpnman/icons"
 cp -R "$SRC/data/icons/hicolor" "$D$SHAREDIR/vpnman/icons/"
 cp "$SRC/data/vpnman.1" "$D$MANDIR/vpnman.1"
+# shell completions (generated from the real argument parser by tools/gen_completions.py)
+if [ -d "$SRC/data/completions" ]; then
+    mkdir -p "$D$SHAREDIR/bash-completion/completions" "$D$SHAREDIR/zsh/site-functions" "$D$SHAREDIR/fish/vendor_completions.d"
+    cp "$SRC/data/completions/vpnman.bash" "$D$SHAREDIR/bash-completion/completions/vpnman"
+    cp "$SRC/data/completions/_vpnman" "$D$SHAREDIR/zsh/site-functions/_vpnman"
+    cp "$SRC/data/completions/vpnman.fish" "$D$SHAREDIR/fish/vendor_completions.d/vpnman.fish"
+    chmod 644 "$D$SHAREDIR/bash-completion/completions/vpnman" "$D$SHAREDIR/zsh/site-functions/_vpnman" \
+              "$D$SHAREDIR/fish/vendor_completions.d/vpnman.fish"
+fi
 # the launcher must find the wrapper even for non-default prefixes
 sed -i.bak "s|^Exec=.*|Exec=$BINDIR/vpnman-gtk|" "$D$SHAREDIR/applications/io.github.smiley_mcsmiles.VPNMan.desktop" 2>/dev/null \
     && rm -f "$D$SHAREDIR/applications/io.github.smiley_mcsmiles.VPNMan.desktop.bak"

@@ -34,10 +34,10 @@ class Spec:
         self.split_mark = int(split_mark or 0)       # packets of apps that bypass the VPN (see split.py)
 
     @classmethod
-    def from_settings(cls, s, endpoints=(), ifaces=(), split_mark=0):
+    def from_settings(cls, s, endpoints=(), ifaces=(), split_mark=0, extra_out=()):
         n = s.get("netlock")
         return cls(endpoints, ifaces, n["allow_lan"], n["allow_dhcp"], n["allow_ping"], n["block_ipv6"],
-                   n["whitelist_in"], n["whitelist_out"], split_mark)
+                   n["whitelist_in"], list(n["whitelist_out"]) + list(extra_out), split_mark)
 
 
 def _norm(addr):

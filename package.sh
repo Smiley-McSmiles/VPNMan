@@ -7,6 +7,8 @@
 #   ./package.sh --container rpm    build inside a Fedora container (podman/docker) - works from any distro
 #
 # Targets: tar  deb  rpm  arch  void  alpine  openbsd  recipes  clean
+#   arch needs nothing but python3 (packaging/mkarch.py); void needs xbps-create; alpine/openbsd get recipes.
+#   With no target (all) a missing tool only skips that target - the rest still build.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -22,9 +24,11 @@ DESC="Multi-protocol VPN manager with GTK4/libadwaita UI, interactive CLI and ki
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
+# A target that cannot be built on this machine (tool missing) exits 3: "skipped", not "failed".
+skip() { warn "$*"; exit 3; }
 
 # Files that make up the program, shared by every package type.
-SRC_ITEMS=(vpnman data packaging install.sh package.sh README.md LICENSE tests)
+SRC_ITEMS=(vpnman data packaging tools install.sh package.sh README.md LICENSE tests)
 
 stage() {  # stage <destdir> <init>
     local dest=$1 init=$2
@@ -36,6 +40,7 @@ stage() {  # stage <destdir> <init>
 }
 
 build_tar() {
+    [ -n "${PKG_TAR_DONE:-}" ] && [ -f "$DIST/$SRCNAME.tar.gz" ] && return 0
     log "tarball"
     mkdir -p "$DIST" "$BUILD"
     local t=$BUILD/$SRCNAME
@@ -51,7 +56,7 @@ build_tar() {
 }
 
 build_deb() {
-    have python3 || { warn "python3 not found, skipping deb"; return; }
+    have python3 || skip "python3 not found, cannot build the deb"
     log "deb"
     local root=$BUILD/deb/${NAME}_$VERSION
     stage "$root" all-linux
@@ -67,7 +72,7 @@ Section: net
 Priority: optional
 Architecture: all
 Installed-Size: $size
-Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), iproute2
+Depends: python3 (>= 3.9), python3-gi, python3-gi-cairo, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), iproute2
 Recommends: openvpn, wireguard-tools, nftables | iptables, openresolv | resolvconf
 Suggests: stunnel4, gnome-shell-extension-appindicator, openconnect, openfortivpn, sstp-client, pptp-linux, strongswan-swanctl, vpnc, network-manager
 Maintainer: VPNMan contributors <noreply@example.invalid>
@@ -157,7 +162,7 @@ License:        MIT
 URL:            $URL
 Source0:        $SRCNAME.tar.gz
 BuildArch:      noarch
-Requires:       python3 >= 3.9, python3-gobject, gtk4, libadwaita >= 1.4, iproute
+Requires:       python3 >= 3.9, python3-gobject, python3-cairo, gtk4, libadwaita >= 1.4, iproute
 Recommends:     openvpn, wireguard-tools, nftables
 Suggests:       stunnel, gnome-shell-extension-appindicator, openconnect, openfortivpn, strongswan, NetworkManager
 
@@ -233,6 +238,9 @@ fi
 /usr/share/icons/hicolor/*/apps/io.github.smiley_mcsmiles.VPNMan*
 /usr/share/pixmaps/io.github.smiley_mcsmiles.VPNMan.svg
 /usr/share/man/man1/vpnman.1*
+/usr/share/bash-completion/completions/vpnman
+/usr/share/zsh/site-functions/_vpnman
+/usr/share/fish/vendor_completions.d/vpnman.fish
 
 %changelog
 * Mon Oct 05 2026 VPNMan contributors <noreply@example.invalid> - $VERSION-1
@@ -242,7 +250,7 @@ SPEC
 
 build_rpm() {
     recipe_rpm
-    have rpmbuild || { warn "rpmbuild not found; spec written to dist/recipes/$NAME.spec"; return; }
+    have rpmbuild || skip "rpmbuild not found (dnf/apt install rpm-build); spec written to dist/recipes/$NAME.spec"
     log "rpm"
     build_tar
     local top=$BUILD/rpm
@@ -266,7 +274,7 @@ pkgdesc="$DESC"
 arch=('any')
 url="$URL"
 license=('MIT')
-depends=('python' 'python-gobject' 'gtk4' 'libadwaita' 'iproute2')
+depends=('python' 'python-gobject' 'python-cairo' 'gtk4' 'libadwaita' 'iproute2')
 optdepends=('openvpn: OpenVPN' 'wireguard-tools: WireGuard' 'nftables: kill switch (preferred)'
             'iptables: kill switch fallback' 'openconnect: AnyConnect/GlobalProtect' 'openfortivpn: Fortinet'
             'strongswan: IKEv2' 'networkmanager: L2TP and others')
@@ -282,12 +290,52 @@ PKG
 }
 
 build_arch() {
+    # packaging/mkarch.py writes the package itself, so this works on ANY distribution: no makepkg, no pacman
+    # (makepkg fails on a non-Arch host with "failed to initialize alpm library"). The PKGBUILD is still generated
+    # for people who build it the Arch way or submit it to the AUR.
     recipe_arch
-    build_tar
-    cp "$DIST/$SRCNAME.tar.gz" "$DIST/recipes/arch/"
-    have makepkg || { warn "makepkg not found; PKGBUILD written to dist/recipes/arch"; return; }
+    have python3 || skip "python3 not found, cannot build the Arch package"
     log "arch"
-    (cd "$DIST/recipes/arch" && makepkg -f --skipinteg >/dev/null) && cp "$DIST"/recipes/arch/*.pkg.tar.* "$DIST/"
+    local root=$BUILD/arch/${NAME}-$VERSION
+    stage "$root" systemd
+    mkdir -p "$BUILD/arch" "$DIST"
+    cat > "$BUILD/arch/vpnman.install" <<'INST'
+post_install() {
+    getent group vpnman >/dev/null || groupadd -r vpnman
+    mkdir -p /etc/vpnman && chmod 700 /etc/vpnman
+    find /usr/lib/vpnman -name __pycache__ -type d -exec rm -rf {} + >/dev/null 2>&1 || true
+    for d in /usr/share/icons/hicolor; do
+        [ -d "$d" ] || continue
+        for t in gtk4-update-icon-cache gtk-update-icon-cache; do
+            if command -v $t >/dev/null 2>&1; then $t -q -f -t "$d" >/dev/null 2>&1 && break; fi
+        done
+    done
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || true
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable vpnmand.service >/dev/null 2>&1 || true
+        systemctl restart vpnmand.service >/dev/null 2>&1 || true
+    fi
+    pkill -f -- '^[^ ]*python[0-9.]* -m vpnman gui' >/dev/null 2>&1 || true
+}
+post_upgrade() { post_install; }
+pre_remove() {
+    if [ -d /run/systemd/system ]; then systemctl disable --now vpnmand.service >/dev/null 2>&1 || true; fi
+    [ -x /usr/bin/vpnman ] && /usr/bin/vpnman cleanup --force >/dev/null 2>&1 || true
+}
+post_remove() {
+    [ -d /run/systemd/system ] && systemctl daemon-reload >/dev/null 2>&1 || true
+}
+INST
+    python3 "$ROOT/packaging/mkarch.py" "$root" "$DIST/$NAME-$VERSION-1-any.pkg.tar.xz" \
+        --name "$NAME" --version "$VERSION" --desc "$DESC" --url "$URL" \
+        --depend python --depend python-gobject --depend python-cairo --depend gtk4 --depend libadwaita --depend iproute2 \
+        --optdepend 'openvpn: OpenVPN' --optdepend 'wireguard-tools: WireGuard' \
+        --optdepend 'nftables: kill switch and app bypass (preferred)' --optdepend 'iptables: kill switch fallback' \
+        --optdepend 'stunnel: OpenVPN over TLS' --optdepend 'openconnect: AnyConnect/GlobalProtect' \
+        --optdepend 'openfortivpn: Fortinet' --optdepend 'strongswan: IKEv2' \
+        --optdepend 'networkmanager: L2TP and others' --install "$BUILD/arch/vpnman.install" >/dev/null
+    log "  -> dist/$NAME-$VERSION-1-any.pkg.tar.xz   (install with: sudo pacman -U ...)"
 }
 
 recipe_void() {
@@ -297,7 +345,7 @@ recipe_void() {
 pkgname=$NAME
 version=$VERSION
 revision=1
-depends="python3 python3-gobject gtk4 libadwaita iproute2 nftables openvpn wireguard-tools"
+depends="python3 python3-gobject python3-cairo gtk4 libadwaita iproute2 nftables openvpn wireguard-tools"
 short_desc="$DESC"
 maintainer="VPNMan contributors <noreply@example.invalid>"
 license="MIT"
@@ -317,6 +365,29 @@ post_install() {
 TPL
 }
 
+build_void() {
+    recipe_void
+    have xbps-create || skip "xbps-create not found (it ships with Void's xbps); template written to dist/recipes/void/template - copy it to void-packages/srcpkgs/$NAME/"
+    log "void"
+    local root=$BUILD/void/${NAME}-$VERSION
+    stage "$root" runit
+    mkdir -p "$DIST"
+    (cd "$DIST" && xbps-create -A noarch -n "${NAME}-${VERSION}_1" -s "$DESC" \
+        -D "python3>=3.9 python3-gobject python3-cairo gtk4 libadwaita iproute2" -H "$URL" -l MIT \
+        -m "VPNMan contributors <noreply@example.invalid>" -t "net security" "$root" >/dev/null)
+    log "  -> dist/${NAME}-${VERSION}_1.noarch.xbps   (install: sudo xbps-install -R dist $NAME; enable: sudo ln -s /etc/sv/vpnmand /var/service/)"
+}
+
+build_alpine() {
+    recipe_alpine
+    skip "an Alpine .apk can only be built with abuild on Alpine; APKBUILD written to dist/recipes/alpine/ (run: abuild -r there)"
+}
+
+build_openbsd() {
+    recipe_openbsd
+    skip "an OpenBSD package is built from a port; the port was written to dist/recipes/openbsd/ (see README)"
+}
+
 recipe_alpine() {
     mkdir -p "$DIST/recipes/alpine"
     cat > "$DIST/recipes/alpine/APKBUILD" <<APK
@@ -328,7 +399,7 @@ pkgdesc="$DESC"
 url="$URL"
 arch="noarch"
 license="MIT"
-depends="python3 py3-gobject3 gtk4.0 libadwaita iproute2 nftables openvpn wireguard-tools"
+depends="python3 py3-gobject3 py3-cairo gtk4.0 libadwaita iproute2 nftables openvpn wireguard-tools"
 source="\$pkgname-\$pkgver.tar.gz"
 builddir="\$srcdir/\$pkgname-\$pkgver"
 options="!check"
@@ -387,19 +458,46 @@ fi
 
 targets=("$@")
 [ ${#targets[@]} -eq 0 ] && targets=(all)
+
+if [ "${targets[0]}" = all ]; then
+    # Every target runs in its own process: one that cannot be built here (missing tool) or that fails must not stop
+    # the others, and a failure is reported at the end instead of silently skipping everything after it.
+    built=(); skipped=(); failed=()
+    build_tar || { warn "tarball failed"; failed+=(tar); }
+    export PKG_TAR_DONE=1
+    for t in deb rpm arch void alpine openbsd recipes; do
+        set +e
+        bash "$ROOT/package.sh" "$t"
+        rc=$?
+        set -e
+        case $rc in
+            0) built+=("$t") ;;
+            3) skipped+=("$t") ;;
+            *) failed+=("$t") ;;
+        esac
+    done
+    log "built:   tar ${built[*]:-}"
+    [ ${#skipped[@]} -eq 0 ] || log "skipped: ${skipped[*]}  (recipes for these are in dist/recipes/)"
+    if [ ${#failed[@]} -gt 0 ]; then
+        echo "FAILED:  ${failed[*]}" >&2
+        exit 1
+    fi
+    log "done. Output in $DIST"
+    exit 0
+fi
+
 for t in "${targets[@]}"; do
     case "$t" in
-        all) build_tar; build_deb; build_rpm; build_arch; build_recipes ;;
         tar) build_tar ;;
         deb) build_deb ;;
         rpm) build_rpm ;;
         arch) build_arch ;;
-        void) recipe_void ;;
-        alpine) recipe_alpine ;;
-        openbsd) recipe_openbsd ;;
+        void) build_void ;;
+        alpine) build_alpine ;;
+        openbsd) build_openbsd ;;
         recipes) build_recipes ;;
         clean) rm -rf "$DIST" "$BUILD" ;;
         *) echo "unknown target: $t" >&2; exit 2 ;;
     esac
 done
-log "done. Output in $DIST"
+[ -n "${PKG_TAR_DONE:-}" ] || log "done. Output in $DIST"

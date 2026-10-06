@@ -19,6 +19,17 @@ os.environ["PATH"] = TMP + "/bin" + os.pathsep + os.environ["PATH"]
 
 from vpnman import backends, daemon, dns, ipc, netlock, profiles, settings  # noqa: E402
 from vpnman.manager import Manager  # noqa: E402
+from vpnman.backends.openvpn import OpenVPN  # noqa: E402
+
+OpenVPN.probe_cache["--dns-updown disable"] = False      # the fake openvpn scripts must never be run as a probe
+
+# Manager.startup() removes stale firewall/bypass rules.  The tests run it, possibly as root on a developer machine
+# with a live kill switch or app bypass, so the real cleanups are stubbed out for the whole process.  The tests that
+# exercise them use REAL_* with fakes.
+from vpnman import split as _split  # noqa: E402
+REAL_NETLOCK_CLEANUP, REAL_SPLIT_CLEANUP = netlock.cleanup_all, _split.cleanup
+netlock.cleanup_all = lambda: []
+_split.cleanup = lambda: None
 
 OVPN = "client\ndev tun\nproto udp\nremote vpn.example.net 1194\nremote 192.0.2.7 443 tcp\nca ca.crt\nauth-user-pass\n"
 WG = """[Interface]
@@ -572,6 +583,396 @@ class IfnameTests(unittest.TestCase):
         self.assertEqual(self.mgr._ifname_for(backends.get("wireguard"), self.make("wireguard")), "wg1")
 
 
+class BackupHistoryTests(unittest.TestCase):
+    def _manager(self, name):
+        root = tempfile.mkdtemp(dir=TMP)
+        from vpnman import profiles as P
+        m = Manager(store=P.ProfileStore(root + "/profiles"), settings=settings.Settings(root + "/settings.json"))
+        m.history = __import__("vpnman.history", fromlist=["History"]).History(root + "/history.json")
+        return m, root
+
+    def _populate(self, m):
+        a = m.import_profile("alpha", "client\nremote 192.0.2.1 1194\nca ca.crt\n", files={"ca.crt": "Q0E="},
+                             filename="a.ovpn", fields={"username": "bob", "password": "hunter2"})
+        b = m.import_profile("beta", "client\nremote 192.0.2.2 1194\n", filename="b.ovpn")
+        m.settings.update({"dns": {"servers": ["9.9.9.9"]}})
+        return a, b
+
+    @staticmethod
+    def _b64(m):
+        return m.backup_export()["data"]
+
+    def test_round_trip_merge_and_replace(self):
+        src, _ = self._manager("src")
+        a, b = self._populate(src)
+        data = self._b64(src)
+        dst, droot = self._manager("dst")
+        res = dst.backup_import(data)                                      # merge into an empty machine
+        self.assertEqual((res["added"], res["skipped"], res["settings"]), (2, 0, False))
+        got = {p["name"]: p for p in dst.store.list()}
+        self.assertEqual(got["alpha"]["username"], "bob")
+        self.assertEqual(got["alpha"]["password"], "hunter2")             # credentials travel with the profile
+        self.assertTrue(os.path.isfile(os.path.join(droot, "profiles", a["id"], "ca.crt")))
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(droot, "profiles", a["id"], "profile.json")).st_mode), 0o600)
+        self.assertEqual(dst.settings.get("dns.servers"), [])             # merge keeps the local settings
+        again = dst.backup_import(data)
+        self.assertEqual((again["added"], again["skipped"]), (0, 2))      # nothing is duplicated or overwritten
+        dst.store.update(a["id"], {"notes": "local edit"})
+        dst.backup_import(data)
+        self.assertEqual(dst.store.find(a["id"])["notes"], "local edit")
+        extra = dst.import_profile("only-here", "client\nremote 192.0.2.3 1194\n", filename="c.ovpn")
+        rep = dst.backup_import(data, replace=True)
+        self.assertEqual((rep["added"], rep["removed"], rep["settings"]), (2, 3, True))
+        self.assertEqual(sorted(p["name"] for p in dst.store.list()), ["alpha", "beta"])
+        self.assertEqual(dst.settings.get("dns.servers"), ["9.9.9.9"])
+        self.assertNotIn(extra["id"], [p["id"] for p in dst.store.list()])
+
+    def test_hostile_archives_are_rejected(self):
+        import base64
+        import io
+        import tarfile
+        from vpnman.profiles import ProfileError
+        m, _ = self._manager("evil")
+
+        def archive(members, manifest=True):
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+                if manifest:
+                    body = b'{"format": 1, "vpnman": "x", "created": 1, "profiles": 0}'
+                    ti = tarfile.TarInfo("vpnman-backup.json")
+                    ti.size = len(body)
+                    tf.addfile(ti, io.BytesIO(body))
+                for ti, body in members:
+                    tf.addfile(ti, io.BytesIO(body) if body is not None else None)
+            return base64.b64encode(buf.getvalue()).decode()
+
+        def reg(name, body=b"x"):
+            ti = tarfile.TarInfo(name)
+            ti.size = len(body)
+            return ti, body
+        link = tarfile.TarInfo("profiles/aaaaaaaaaaaa/profile.json")
+        link.type, link.linkname = tarfile.SYMTYPE, "/etc/shadow"
+        for label, data in (("traversal", archive([reg("../../etc/cron.d/evil")])),
+                            ("absolute", archive([reg("/etc/passwd")])),
+                            ("deep path", archive([reg("profiles/aaaaaaaaaaaa/sub/dir/file")])),
+                            ("bad id", archive([reg("profiles/../../x/profile.json")])),
+                            ("symlink", archive([(link, None)])),
+                            ("no manifest", archive([], manifest=False)),
+                            ("damaged profile", archive([reg("profiles/aaaaaaaaaaaa/profile.json", b"{}")])),
+                            ("not a tar", base64.b64encode(b"hello").decode())):
+            with self.assertRaises(ProfileError, msg=label):
+                m.backup_import(data)
+        with self.assertRaises(ProfileError):
+            m.backup_import("%%%not base64%%%")
+        self.assertEqual(m.store.list(), [])
+
+    def test_history_records_and_trims(self):
+        from vpnman.history import History
+        h = History(tempfile.mkdtemp(dir=TMP) + "/h.json", limit=3)
+        for i in range(5):
+            h.add("srv%d" % i, "openvpn", 1000 + i, end=1060 + i, rx=i, tx=2 * i, reason="Disconnected")
+        rows = h.list()
+        self.assertEqual([r["profile"] for r in rows], ["srv4", "srv3", "srv2"])      # newest first, oldest dropped
+        self.assertEqual((rows[0]["duration"], rows[0]["rx"], rows[0]["tx"]), (60, 4, 8))
+        self.assertEqual(stat.S_IMODE(os.stat(h.path).st_mode), 0o600)
+        h.clear()
+        self.assertEqual(h.list(), [])
+
+
+class NetworkTests(unittest.TestCase):
+    def _mgr(self, **net):
+        s = settings.Settings(TMP + "/net-%d.json" % id(net))
+        s.update({"network": net, "connection": {"autoconnect": "off"}})
+        m = Manager(settings=s)
+        m.calls = []
+        m.connect = lambda ident=None, fastest=False, last=False, persistent=False: m.calls.append(
+            ("connect", ident, fastest, last)) or {"profile": "p"}
+        m.disconnect = lambda release_lock=True: m.calls.append(("disconnect",))
+        return m
+
+    @staticmethod
+    def net(nid, dev="wlan0", gw="192.168.1.1"):
+        return {"id": nid, "name": nid, "kind": "wifi", "device": dev, "gateway": gw}
+
+    def test_current_network_ids(self):
+        from vpnman import network, platform as plat
+        real = (plat.default_gateway, network.wifi_ssid, network.gateway_mac, network.is_wireless)
+        try:
+            plat.default_gateway = lambda: ("192.168.1.1", "wlan0")
+            network.is_wireless = lambda d: d.startswith("wl")
+            network.wifi_ssid = lambda d: "HomeNet"
+            self.assertEqual(network.current()["id"], "HomeNet")
+            plat.default_gateway = lambda: ("192.168.1.1", "enp3s0")
+            network.gateway_mac = lambda gw, dev=None: "aa:bb:cc:dd:ee:ff"
+            cur = network.current()
+            self.assertEqual((cur["id"], cur["kind"]), ("wired:aa:bb:cc:dd:ee:ff", "wired"))
+            plat.default_gateway = lambda: (None, None)
+            self.assertIsNone(network.current()["id"])
+        finally:
+            plat.default_gateway, network.wifi_ssid, network.gateway_mac, network.is_wireless = real
+        self.assertTrue(network.is_trusted("homenet", ["HomeNet"]))
+        self.assertFalse(network.is_trusted("Cafe", ["HomeNet"]))
+        self.assertFalse(network.is_trusted(None, ["HomeNet"]))
+
+    def test_connects_on_untrusted_and_disconnects_on_trusted_only_if_it_connected(self):
+        m = self._mgr(trusted=["Home"], untrusted_action="connect", trusted_action="disconnect", profile="fastest")
+        m.network_tick(self.net("Cafe"))
+        self.assertEqual(m.calls, [("connect", None, True, False)])
+        self.assertTrue(m._net_owned)
+        m._status["state"] = "connected"
+        m.network_tick(self.net("Cafe"))                      # nothing changed: nothing happens
+        self.assertEqual(len(m.calls), 1)
+        m.network_tick(self.net("Home"))
+        self.assertEqual(m.calls[-1], ("disconnect",))
+        # a connection the user made by hand is never dropped by the trusted rule
+        m.calls.clear()
+        m._net_owned = False
+        m._status["state"] = "connected"
+        m.network_tick(self.net("Cafe"))
+        m.network_tick(self.net("Home"))
+        self.assertEqual(m.calls, [])
+
+    def test_rules_are_off_by_default_and_skip_the_first_look_when_autoconnect_is_set(self):
+        m = self._mgr()
+        m.network_tick(self.net("Cafe"))
+        self.assertEqual(m.calls, [])
+        m = self._mgr(untrusted_action="connect")
+        m.settings.update({"connection": {"autoconnect": "last"}})
+        m.network_tick(self.net("Cafe"))                       # boot: the boot-time auto-connect owns this
+        self.assertEqual(m.calls, [])
+        m.network_tick(self.net("Other", gw="10.0.0.1"))       # a later change is ours
+        self.assertEqual(len(m.calls), 1)
+
+    def test_gateway_change_rebuilds_the_bypass_and_routes_but_the_tunnel_does_not_count(self):
+        m = self._mgr()
+        seen = []
+        m._split_sync = lambda: seen.append(("split", m._split_ctx[:2]))
+        m._reapply_routes = lambda gw=None: seen.append(("routes", gw))
+        m._status.update(state="connected", iface="tun0")
+        m._split_ctx = ("192.168.1.1", "eno1", ["192.168.1.1"])
+        m.network_tick(self.net("A", dev="eno1"))                        # first look: same gateway as the session
+        m.network_tick(self.net("B", dev="wlan0", gw="10.1.1.1"))
+        self.assertIn(("split", ("10.1.1.1", "wlan0")), seen)
+        self.assertIn(("routes", "10.1.1.1"), seen)
+        n = len(seen)
+        m.network_tick(self.net("tunnel", dev="tun0", gw="10.8.0.1"))      # def1-less redirect: default is the tunnel
+        self.assertEqual(len(seen), n)
+
+    def test_trust_toggle_and_listing(self):
+        m = self._mgr()
+        m._net = self.net("Home")
+        self.assertTrue(m.network_trust(None, True)["trusted"])
+        self.assertEqual(m.settings.get("network.trusted"), ["Home"])
+        self.assertFalse(m.network_trust("home", False)["trusted"])
+        self.assertEqual(m.settings.get("network.trusted"), [])
+
+
+class BypassAddressTests(unittest.TestCase):
+    def test_validation_and_normalisation(self):
+        from vpnman.profiles import ProfileError
+        s = settings.Settings(TMP + "/routes.json")
+        m = Manager(settings=s)
+        m._reapply_routes = lambda gw=None: None
+        m._refresh_route_hosts = lambda apply=True: False
+        out = m.routes_set(["10.0.0.5", "192.168.0.0/16", "Example.COM", {"host": "intranet.example.org"}])
+        self.assertEqual([r.get("ip") or r.get("host") for r in out],
+                         ["10.0.0.5/32", "192.168.0.0/16", "example.com", "intranet.example.org"])
+        for bad in ("not a host", "fe80::/10", "localhost", "-bad-.com"):
+            with self.assertRaises(ProfileError):
+                m.routes_set([bad])
+
+    def test_nets_include_cached_domain_addresses_and_reach_the_kill_switch(self):
+        s = settings.Settings(TMP + "/routes2.json")
+        m = Manager(settings=s)
+        m._reapply_routes = lambda gw=None: None
+        s.update({"routes": [{"ip": "10.0.0.0/8", "action": "out"}, {"host": "files.example.net", "action": "out"},
+                             {"ip": "172.16.0.0/12", "action": "in"}]})
+        self.assertEqual(m._route_nets(), ["10.0.0.0/8"])                 # a name is only used once it is resolved
+        m._host_ips["files.example.net"] = ["203.0.113.7"]
+        self.assertEqual(m._route_nets(), ["10.0.0.0/8", "203.0.113.7/32"])
+        spec = netlock.Spec.from_settings(s, extra_out=m._route_nets())
+        self.assertIn("203.0.113.7/32", netlock.nft_ruleset(spec))        # never blocked by the kill switch
+
+
+class LeakTestTests(unittest.TestCase):
+    def test_dns_decisions(self):
+        from vpnman import leaktest as lt
+        via = lambda m: (lambda a: m.get(a))                                    # noqa: E731
+        ok = lt.dns_check("nameserver 10.8.0.1\n", "tun0", via({"10.8.0.1": "tun0"}))
+        self.assertEqual(ok["status"], "ok")
+        leak = lt.dns_check("nameserver 192.168.1.1\nnameserver 10.8.0.1\n", "tun0",
+                            via({"192.168.1.1": "eth0", "10.8.0.1": "tun0"}))
+        self.assertEqual(leak["status"], "fail")
+        self.assertIn("192.168.1.1", leak["detail"])
+        stub = lt.dns_check("nameserver 127.0.0.53\n", "tun0", via({}), resolved_dns={"tun0": ["10.8.0.1"]})
+        self.assertEqual(stub["status"], "ok")
+        self.assertEqual(lt.dns_check("nameserver 127.0.0.53\n", "tun0", via({}), resolved_dns={})["status"], "warn")
+        self.assertEqual(lt.dns_check("nameserver 1.1.1.1\n", "tun0", via({}), forced=False)["status"], "info")
+
+    def test_ipv6_decisions(self):
+        from vpnman import leaktest as lt
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: None, lambda: False, False, False)["status"], "ok")
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: "tun0", lambda: False, False, False)["status"], "ok")
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: "eth0", lambda: True, False, False)["status"], "fail")
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: "eth0", lambda: True, True, True)["status"], "ok")
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: "eth0", lambda: False, False, False)["status"], "warn")
+
+    def test_kill_switch_decisions(self):
+        from vpnman import leaktest as lt
+        self.assertEqual(lt.killswitch_check(False, "eth0", lambda: True)["status"], "info")
+        self.assertEqual(lt.killswitch_check(True, "eth0", lambda: False)["status"], "ok")
+        self.assertEqual(lt.killswitch_check(True, "eth0", lambda: True)["status"], "fail")
+        self.assertEqual(lt.killswitch_check(True, None, lambda: True)["status"], "info")
+
+    def test_run_summary_and_rpc(self):
+        from vpnman import leaktest as lt
+        st = {"state": "disconnected", "iface": None, "netlock": {"engaged": False}}
+        res = lt.run(st, settings.Settings(TMP + "/lt.json"), True, resolv_path=TMP + "/none")
+        self.assertEqual(res["checks"][0]["status"], "warn")                     # not connected
+        self.assertIn(res["summary"], ("ok", "warn"))
+        self.assertIn("leaktest", daemon.METHODS)
+
+
+class ReleaseToolingTests(unittest.TestCase):
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def _tool(self, *args):
+        import subprocess
+        return subprocess.run([sys.executable] + list(args), capture_output=True, text=True, cwd=self.ROOT)
+
+    def test_version_is_the_same_everywhere(self):
+        r = self._tool("tools/check_version.py")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self._tool("tools/check_version.py", "v0.0.1")                      # a tag that does not match must fail
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("wrong", r.stderr)
+
+    def test_release_notes_come_from_the_metainfo(self):
+        import vpnman
+        r = self._tool("tools/release_notes.py", "v" + vpnman.__version__)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("## VPNMan %s" % vpnman.__version__, r.stdout)
+        self.assertGreaterEqual(r.stdout.count("\n- "), 1)
+        self.assertEqual(self._tool("tools/release_notes.py", "9.9.9").returncode, 1)
+
+    def test_workflows_are_valid_and_wired_to_the_tooling(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        for name in ("ci", "release"):
+            wf = yaml.safe_load(open(os.path.join(self.ROOT, ".github", "workflows", name + ".yml")))
+            self.assertIn("jobs", wf)
+        release = open(os.path.join(self.ROOT, ".github", "workflows", "release.yml")).read()
+        for needle in ("tools/check_version.py", "tools/release_notes.py", "./package.sh", "gh release create"):
+            self.assertIn(needle, release)
+        ci = open(os.path.join(self.ROOT, ".github", "workflows", "ci.yml")).read()
+        for needle in ("unittest tests.test_vpnman", "tools/gen_completions.py --check", "./package.sh"):
+            self.assertIn(needle, ci)
+
+
+class PackagingTests(unittest.TestCase):
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def _pkg(self, *args):
+        import subprocess
+        return subprocess.run(["bash", os.path.join(self.ROOT, "package.sh")] + list(args), capture_output=True, text=True,
+                              timeout=300)
+
+    def test_arch_package_builds_on_any_distribution_without_pacman(self):
+        """Regression: makepkg aborted package.sh on Fedora ('failed to initialize alpm library')."""
+        import tarfile
+        r = self._pkg("arch")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        path = [f for f in os.listdir(os.path.join(self.ROOT, "dist")) if f.endswith("-any.pkg.tar.xz")]
+        self.assertEqual(len(path), 1)
+        with tarfile.open(os.path.join(self.ROOT, "dist", path[0])) as tf:
+            names = tf.getnames()
+            self.assertEqual(names[:2], [".PKGINFO", ".INSTALL"])
+            for want in ("usr/bin/vpnman", "usr/lib/systemd/system/vpnmand.service",
+                         "usr/share/bash-completion/completions/vpnman"):
+                self.assertIn(want, names)
+            self.assertTrue(all(m.uid == 0 and m.gid == 0 for m in tf.getmembers()))
+            info = tf.extractfile(".PKGINFO").read().decode()
+            self.assertIn("pkgver = %s-1" % __import__("vpnman").__version__, info)
+            self.assertIn("depend = python-gobject", info)
+            self.assertIn("pre_remove()", tf.extractfile(".INSTALL").read().decode())
+
+    def test_targets_that_need_foreign_tools_are_skipped_not_fatal(self):
+        r = self._pkg("alpine")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)             # 3 = skipped
+        self.assertTrue(os.path.isfile(os.path.join(self.ROOT, "dist", "recipes", "alpine", "APKBUILD")))
+        self.assertEqual(self._pkg("no-such-target").returncode, 2)
+
+    def test_void_template_has_no_duplicate_lines(self):
+        self._pkg("recipes")
+        text = open(os.path.join(self.ROOT, "dist", "recipes", "void", "template")).read()
+        self.assertEqual(text.count("pkgname="), 1)
+
+
+class CompletionTests(unittest.TestCase):
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def test_checked_in_completions_match_the_parser(self):
+        import subprocess
+        r = subprocess.run([sys.executable, os.path.join(self.ROOT, "tools", "gen_completions.py"), "--check"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_bash_completion_offers_commands_choices_and_profile_option_flags(self):
+        import subprocess
+        bash = shutil_which("bash")
+        if not bash:
+            self.skipTest("no bash")
+        script = os.path.join(self.ROOT, "data", "completions", "vpnman.bash")
+
+        def complete(*words):
+            cmd = 'source %s; COMP_WORDS=(%s); COMP_CWORD=%d; _vpnman; printf "%%s\\n" "${COMPREPLY[@]}"' % (
+                script, " ".join("'%s'" % w for w in words), len(words) - 1)
+            return subprocess.run([bash, "-c", cmd], capture_output=True, text=True).stdout.split()
+        self.assertIn("connect", complete("vpnman", "con"))
+        self.assertEqual(sorted(complete("vpnman", "lock", "")), ["off", "on", "status"])
+        self.assertIn("--stunnel-sni", complete("vpnman", "import", "--stunnel-s"))
+        self.assertEqual(sorted(complete("vpnman", "import", "--stunnel-verify", "")), ["ca", "none", "system"])
+
+    def test_installer_ships_the_completions(self):
+        import subprocess
+        d = tempfile.mkdtemp(dir=TMP)
+        r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", "/usr", "--init", "none", "--no-post"],
+                           env=dict(os.environ, DESTDIR=d), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for rel in ("usr/share/bash-completion/completions/vpnman", "usr/share/zsh/site-functions/_vpnman",
+                    "usr/share/fish/vendor_completions.d/vpnman.fish"):
+            self.assertTrue(os.path.isfile(os.path.join(d, rel)), rel)
+
+
+class OpenVpnDnsUpdownTests(unittest.TestCase):
+    def test_builtin_dns_handling_is_disabled_only_when_openvpn_accepts_it(self):
+        from vpnman import backends as B
+        from vpnman.backends.openvpn import OpenVPN
+        ov = OpenVPN()
+        saved = dict(OpenVPN.probe_cache)
+        try:
+            for accepts in (True, False):
+                OpenVPN.probe_cache.clear()
+                exe = TMP + "/probe-openvpn-%s" % accepts
+                with open(exe, "w") as fh:     # exits 0 like OpenVPN 2.7 does for a known option, 1 like 2.6 does
+                    fh.write("#!/bin/sh\n%s\n" % ("exit 0" if accepts else 'case "$*" in *dns-updown*) exit 1;; esac; exit 0'))
+                os.chmod(exe, 0o755)
+                ov.binary = lambda exe=exe: exe
+                d = tempfile.mkdtemp(dir=TMP)
+                ctx = B.Context({"id": "x", "name": "x", "config": "c.ovpn", "username": "", "options": {}}, d, d, "tun0",
+                                settings.Settings(TMP + "/dnsud.json"))
+                ctx.state["text"], ctx.state["path"] = "client\nremote 1.2.3.4\n", d + "/runtime.ovpn"
+                cmd = ov.connect_cmd(ctx)
+                self.assertEqual("--dns-updown" in cmd, accepts, cmd)
+                if accepts:
+                    self.assertEqual(cmd[cmd.index("--dns-updown") + 1], "disable")
+        finally:
+            OpenVPN.probe_cache.clear()
+            OpenVPN.probe_cache.update(saved)
+
+
 class StunnelTests(unittest.TestCase):
     def prof(self, **st):
         return profiles.new_profile("s", "openvpn", options={"stunnel": dict({"enabled": True, "host": "h.example.com"}, **st)})
@@ -652,14 +1053,18 @@ trap 'exit 0' TERM
 while :; do sleep 0.1; done
 """ % TMP)
         os.chmod(TMP + "/bin/stunnel", 0o755)
+        from vpnman.backends.openvpn import OpenVPN
+        OpenVPN.probe_cache["--dns-updown disable"] = False        # never run the fake as a capability probe
         open(fake, "w").write("""#!/bin/sh
+echo run >> "%s/invocations"
+if grep -q "# FAIL-AUTH" "$2"; then echo "AUTH: Received control message: AUTH_FAILED"; exit 0; fi
 cp "$2" "%s/last.ovpn"
 echo "TUN/TAP device lo opened"
 echo "PUSH: dhcp-option DNS 10.8.0.1"
 echo "Initialization Sequence Completed"
 trap 'exit 0' TERM
 while :; do sleep 0.1; done
-""" % TMP)
+""" % (TMP, TMP))
         os.chmod(fake, 0o755)
         s = settings.Settings(TMP + "/etc/settings.json")
         s.set("checks.tunnel", False)
@@ -708,7 +1113,7 @@ while :; do sleep 0.1; done
         calls = []
         real_start, real_stop = self.mgr._split.start, self.mgr._split.stop
 
-        def fake_start(gw, dev, dns=()):
+        def fake_start(gw, dev, dns=(), mode="exclude"):
             calls.append(("start", dev))
             self.mgr._split.active = True
 
@@ -739,7 +1144,7 @@ while :; do sleep 0.1; done
         calls, locks = [], []
         real = (m._split.start, m._split.stop, m._lock_apply, plat.default_gateway, m.lock_engaged)
 
-        def fake_start(gw, dev, dns=()):
+        def fake_start(gw, dev, dns=(), mode="exclude"):
             calls.append(("start", gw, dev))
             m._split.active = True
 
@@ -772,6 +1177,172 @@ while :; do sleep 0.1; done
             m._split.start, m._split.stop, m._lock_apply, plat.default_gateway, m.lock_engaged = real
             m._split.active, m._split_cur = False, None
             m.settings.update({"split": {"apps": []}})
+
+    DEBIAN_OVPN = """verb 4
+client
+tls-client
+script-security 2
+remote-cert-tls server
+dev tun
+nobind
+remote test.example 1196 udp
+pull-filter ignore "dhcp-option DNS"
+dhcp-option DNS 203.0.113.53
+dhcp-option DNS 203.0.113.54
+persist-key
+persist-tun
+redirect-gateway def1 ipv6
+up /etc/openvpn/update-resolv-conf
+down /etc/openvpn/update-resolv-conf
+<ca>
+-----BEGIN CERTIFICATE-----
+AAAA
+-----END CERTIFICATE-----
+</ca>
+"""
+
+    def _openvpn_procs(self):
+        n = 0
+        for pid in os.listdir("/proc"):
+            if pid.isdigit():
+                try:
+                    cmd = open("/proc/%s/cmdline" % pid, "rb").read().replace(b"\0", b" ")
+                except OSError:
+                    continue
+                if b"bin/openvpn --config" in cmd and b"sleep" not in cmd:
+                    n += 1
+        return n
+
+    def test_switching_servers_never_leaves_two_tunnels(self):
+        base = self._openvpn_procs()                                          # processes of other tests/runs
+        a = self.c.call("profiles.import", name="swA", text="client\nremote 192.0.2.1 1194\n", filename="a.ovpn", files={})
+        b = self.c.call("profiles.import", name="swB", text="client\nremote 192.0.2.2 1194\n", filename="b.ovpn", files={})
+        try:
+            self.c.call("connect", ident=a["id"])
+            self.wait("connected")
+            errs = []
+
+            def go(ident):
+                try:
+                    ipc.Client(timeout=40).call("connect", ident=ident)      # two clicks racing each other
+                except Exception as e:  # noqa: BLE001
+                    errs.append(e)
+            ts = [threading.Thread(target=go, args=(b["id"],)) for _ in range(2)]
+            for t in ts:
+                t.start()
+            time.sleep(0.05)
+            self.assertEqual(self.c.call("status")["profile"], "swB")         # the UI sees the new server at once
+            for t in ts:
+                t.join()
+            self.assertEqual(errs, [])
+            st = self.wait("connected")
+            self.assertEqual(st["profile"], "swB")
+            time.sleep(0.5)
+            self.assertEqual(self._openvpn_procs() - base, 1)
+            self.c.call("connect", ident=a["id"])                              # and straight back again
+            st = self.wait("connected")
+            self.assertEqual((st["profile"], self._openvpn_procs() - base), ("swA", 1))
+        finally:
+            self.c.call("disconnect")
+            for ident in (a["id"], b["id"]):
+                self.c.call("profiles.remove", ident=ident)
+        self.assertEqual(self._openvpn_procs(), base)
+
+    def test_remove_many_drops_a_live_connection_and_reports_failures(self):
+        a = self.c.call("profiles.import", name="rmA", text="client\nremote 192.0.2.1 1194\n", filename="a.ovpn", files={})
+        b = self.c.call("profiles.import", name="rmB", text="client\nremote 192.0.2.2 1194\n", filename="b.ovpn", files={})
+        self.c.call("connect", ident=a["id"])
+        self.wait("connected")
+        res = self.c.call("profiles.remove_many", ids=[a["id"], "nope-nothing", b["id"]])
+        self.assertEqual(sorted(res["removed"]), ["rmA", "rmB"])
+        self.assertEqual([f["id"] for f in res["failed"]], ["nope-nothing"])
+        self.assertEqual(self.c.call("status")["state"], "disconnected")       # the removed profile's tunnel is gone
+        self.assertEqual(self.c.call("profiles.list"), [])
+
+    def test_debian_style_config_runs_without_its_missing_scripts(self):
+        """up/down update-resolv-conf exist only on Debian/Ubuntu; a missing 'up' script aborts OpenVPN."""
+        p = self.c.call("profiles.import", name="deb", text=self.DEBIAN_OVPN, filename="deb.ovpn", files={})
+        try:
+            self.c.call("connect", ident=p["id"])
+            self.wait("connected")
+            runtime = open(TMP + "/last.ovpn").read()
+            self.assertNotIn("update-resolv-conf", runtime)
+            self.assertIn("pull-filter ignore", runtime)                      # everything else is kept
+            logs = " ".join(e["msg"] for e in self.c.call("logs")["entries"])
+            self.assertIn("Ignoring 'up /etc/openvpn/update-resolv-conf'", logs)
+            # the config's own DNS servers are used, not the ones the server pushes (which the config filters out)
+            resolv = open(os.environ["VPNMAN_RESOLV_CONF"]).read()
+            self.assertIn("203.0.113.53", resolv)
+            self.assertNotIn("10.8.0.1", resolv)
+        finally:
+            self.c.call("disconnect")
+            self.c.call("profiles.remove", ident=p["id"])
+
+    def test_auth_failure_stops_instead_of_retrying(self):
+        """AUTH_FAILED is not transient: retrying hammers the server with the same wrong credentials."""
+        inv = TMP + "/invocations"
+        p = self.c.call("profiles.import", name="badauth", text="client\nremote 192.0.2.9 1194\n# FAIL-AUTH\n",
+                        filename="b.ovpn", files={})
+        self.c.call("settings.update", tree={"connection": {"reconnect": True, "retry_delay": 1}})
+        try:
+            before = open(inv).read().count("run") if os.path.exists(inv) else 0
+            self.c.call("connect", ident=p["id"])
+            st = self.wait("error")
+            self.assertIn("Authentication failed", st["message"])
+            time.sleep(2.5)                                       # long enough for a retry to have happened
+            self.assertEqual(self.c.call("status")["state"], "error")
+            self.assertEqual(open(inv).read().count("run") - before, 1)
+            logs = " ".join(e["msg"] for e in self.c.call("logs")["entries"])
+            self.assertNotIn("Reconnecting in", logs.split("Authentication failed")[-1])
+        finally:
+            self.c.call("settings.update", tree={"connection": {"reconnect": False, "retry_delay": 5}})
+            self.c.call("disconnect")
+            self.c.call("profiles.remove", ident=p["id"])
+
+    def test_concurrent_imports_get_distinct_names(self):
+        names, errs = [], []
+
+        def imp():
+            try:
+                names.append(ipc.Client(timeout=20).call("profiles.import", name="twin", text="client\nremote 192.0.2.5 1194\n",
+                                                          filename="t.ovpn", files={})["name"])
+            except Exception as e:  # noqa: BLE001
+                errs.append(e)
+        ts = [threading.Thread(target=imp) for _ in range(6)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        try:
+            self.assertEqual(errs, [])
+            self.assertEqual(len(set(names)), 6, names)
+        finally:
+            for p in self.c.call("profiles.list"):
+                if p["name"].startswith("twin"):
+                    self.c.call("profiles.remove", ident=p["id"])
+
+    def test_session_is_recorded_in_the_history(self):
+        p = self.c.call("profiles.import", name="hist", text="client\nremote 192.0.2.1 1194\n", filename="h.ovpn", files={})
+        try:
+            self.c.call("history.clear")
+            self.c.call("connect", ident=p["id"])
+            self.wait("connected")
+            time.sleep(1.2)
+            self.c.call("disconnect")
+            rows = self.c.call("history", limit=5)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual((rows[0]["profile"], rows[0]["reason"]), ("hist", "Disconnected"))
+            self.assertGreaterEqual(rows[0]["duration"], 1)
+        finally:
+            self.c.call("history.clear")
+            self.c.call("profiles.remove", ident=p["id"])
+
+    def test_backup_rpc_round_trip(self):
+        p = self.c.call("profiles.import", name="bk", text="client\nremote 192.0.2.1 1194\n", filename="k.ovpn", files={})
+        data = self.c.call("backup.export")["data"]
+        self.c.call("profiles.remove", ident=p["id"])
+        res = self.c.call("backup.import", data=data)
+        self.assertEqual(res["added"] >= 1, True)
+        self.assertIn("bk", [x["name"] for x in self.c.call("profiles.list")])
+        self.c.call("profiles.remove", ident=self.c.call("profiles.get", ident="bk")["id"])
 
     def test_openvpn_over_stunnel(self):
         opts = {"stunnel": {"enabled": True, "host": "127.0.0.1", "port": 8443, "sni": "cdn.example.com"}}
@@ -892,6 +1463,46 @@ class SplitTests(unittest.TestCase):
         self.assertIn(["route", "add", "default", "via", "192.168.1.1", "dev", "eth0", "table", "5652"], cmds)
         self.assertEqual(cmds[-1][:4], ["rule", "add", "fwmark", "0x5652"])
 
+    def test_include_mode_marks_everything_except_the_listed_apps(self):
+        from vpnman import split
+        inc = split.ruleset(["192.168.1.1"], mode="include")
+        lines = [l.strip() for l in inc.splitlines()]
+        mark = lines.index("meta mark 0 meta mark set 0x5652 ct mark set 0x5652")
+        unmark = lines.index('socket cgroupv2 level 1 "vpnman-tunnel" meta mark set 0 ct mark set 0')
+        self.assertLess(mark, unmark)                       # mark all, then take the listed apps back out
+        self.assertIn("meta mark 0x5652 udp dport 53", inc)  # DNS redirect follows the mark, not the cgroup
+        self.assertNotIn('"vpnman-bypass"', inc)
+        self.assertNotIn("vpnman-tunnel", split.ruleset(["192.168.1.1"]))
+        self.assertEqual(split.cgroup_name("include"), "vpnman-tunnel")
+        # packets that already carry a mark (WireGuard's own socket) must be left alone: only mark 0 is rewritten
+        self.assertEqual(inc.count("meta mark set 0x5652"), 1)
+
+    def test_split_mode_is_validated_and_restarts_the_bypass(self):
+        from vpnman.profiles import ProfileError
+        m = Manager(settings=settings.Settings(TMP + "/mode.json"))
+        m.split_changed = lambda: None
+        self.assertEqual(m.split_set(mode="include")["mode"], "include")
+        with self.assertRaises(ProfileError):
+            m.split_set(mode="sideways")
+        calls = []
+        from vpnman import platform as plat
+        real = (m._split.start, m._split.stop, plat.default_gateway, m._lock_apply)
+        m._split.start = lambda gw, dev, dns=(), mode="exclude": (calls.append(mode), setattr(m._split, "active", True))
+        m._split.stop = lambda: (calls.append("stop"), setattr(m._split, "active", False))
+        m._lock_apply = lambda: None
+        m.settings.update({"split": {"apps": [{"id": "a", "name": "A", "match": ["a"]}]}})
+        m.lock_engaged, m._split_ctx = True, None
+        plat.default_gateway = lambda: ("192.168.1.1", "eno1")
+        try:
+            m._split_sync()
+            m.settings.update({"split": {"mode": "exclude"}})
+            m._split_sync()                                     # same gateway, new mode: rebuilt, not left as it was
+            m._split_sync()                                     # and now idempotent again
+            self.assertEqual(calls, ["include", "exclude"])
+        finally:
+            m._split.start, m._split.stop, plat.default_gateway, m._lock_apply = real
+            m._split.active = False
+
     def test_kill_switch_lets_bypassed_traffic_through_only_when_asked(self):
         plain = netlock.nft_ruleset(netlock.Spec(endpoints=["1.2.3.4"], ifaces=["tun0"]))
         marked = netlock.nft_ruleset(netlock.Spec(endpoints=["1.2.3.4"], ifaces=["tun0"], split_mark=0x5652))
@@ -993,18 +1604,20 @@ class SplitTests(unittest.TestCase):
         for f in (Fake("nftables", True, True), Fake("iptables", True, False), Fake("pf", False, True)):
             netlock.BACKENDS[f.name] = f.cls
         try:
-            self.assertEqual(netlock.cleanup_all(), ["nftables"])      # only usable AND active backends are touched
+            self.assertEqual(REAL_NETLOCK_CLEANUP(), ["nftables"])    # only usable AND active backends are touched
             self.assertEqual(calls, ["nftables"])
             from vpnman import split
             s = settings.Settings(TMP + "/stale.json")
             m = Manager(settings=s)
-            real_split = split.cleanup
+            stub_split, stub_net = split.cleanup, netlock.cleanup_all
             split.cleanup = lambda: calls.append("split.cleanup")
+            netlock.cleanup_all = lambda: (calls.append("nftables"), ["nftables"])[1]
             try:
                 m.startup()                                           # lock not wanted -> stale one is removed
             finally:
-                split.cleanup = real_split
+                split.cleanup, netlock.cleanup_all = stub_split, stub_net
                 m.scheduler.stop()
+                m._net_stop.set()
             self.assertEqual(calls.count("nftables"), 2)
             self.assertIn("split.cleanup", calls)
         finally:
@@ -1089,6 +1702,39 @@ class AppsTests(unittest.TestCase):
         self.assertEqual(cli._parse_days(None), list(range(7)))
 
 
+class ServersGuiTests(unittest.TestCase):
+    @staticmethod
+    def _py():
+        import subprocess
+        return next((p for p in ("python3", "python3.12", "python3.11", "python3.13", "python3.10")
+                     if shutil_which(p) and subprocess.run([shutil_which(p), "-c", "import gi;gi.require_version('Gtk','4.0');gi.require_version('Adw','1');from gi.repository import Adw"],
+                                                           capture_output=True).returncode == 0), None)
+
+    def _run(self, script, need=()):
+        import subprocess
+        xvfb, runner, py = shutil_which("xvfb-run"), shutil_which("dbus-run-session"), self._py()
+        if not xvfb or not py or not runner or any(not shutil_which(n) for n in need):
+            self.skipTest("needs xvfb-run, dbus-run-session, PyGObject (GTK 4 + libadwaita) %s" % " ".join(need))
+        # the GUI saves per-user preferences (sort order, ...): keep tests out of the real ~/.config
+        env = dict(os.environ, GSK_RENDERER="cairo", GTK_A11Y="none", VPNMAN_SOCKET=TMP + "/none.sock",
+                   XDG_CONFIG_HOME=TMP + "/xdg-config")
+        return subprocess.run([xvfb, "-a", "-s", "-screen 0 1000x800x24", runner, "--", shutil_which(py),
+                               os.path.join(os.path.dirname(__file__), script)],
+                              capture_output=True, text=True, timeout=120, env=env)
+
+    def test_multiselect_bulk_remove_and_server_switching(self):
+        r = self._run("servers_check.py")
+        self.assertIn("SERVERS-OK", r.stdout, r.stdout + r.stderr[-1500:])
+
+    def test_new_dialogs_pages_groups_and_sorting(self):
+        r = self._run("features_check.py")
+        self.assertIn("FEATURES-OK", r.stdout, r.stdout + r.stderr[-2000:])
+
+    def test_ctrl_and_shift_click_selection(self):
+        r = self._run("select_check.py", need=("xdotool",))
+        self.assertIn("SELECT-OK", r.stdout, r.stdout + r.stderr[-1500:])
+
+
 class PagesGuiTests(unittest.TestCase):
     def test_schedule_and_apps_pages(self):
         import subprocess
@@ -1098,7 +1744,8 @@ class PagesGuiTests(unittest.TestCase):
                                                           capture_output=True).returncode == 0), None)
         if not xvfb or not py or not runner:
             self.skipTest("needs xvfb-run, dbus-run-session and PyGObject with GTK 4 + libadwaita")
-        env = dict(os.environ, GSK_RENDERER="cairo", GTK_A11Y="none", VPNMAN_SOCKET=TMP + "/none.sock")
+        env = dict(os.environ, GSK_RENDERER="cairo", GTK_A11Y="none", VPNMAN_SOCKET=TMP + "/none.sock",
+                   XDG_CONFIG_HOME=TMP + "/xdg-config")
         r = subprocess.run([xvfb, "-a", runner, "--", shutil_which(py), os.path.join(os.path.dirname(__file__), "pages_check.py")],
                            capture_output=True, text=True, timeout=90, env=env)
         self.assertIn("PAGES-OK", r.stdout, r.stdout + r.stderr[-1500:])

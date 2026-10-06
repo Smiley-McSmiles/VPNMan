@@ -7,6 +7,10 @@ import re
 from .. import platform as plat
 
 
+class CredentialsRequired(ValueError):
+    """The profile needs a username/password (the GUI asks for them instead of showing an error)."""
+
+
 class Context:
     """Per-connection scratch state shared between manager and backend."""
 

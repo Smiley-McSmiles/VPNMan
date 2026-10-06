@@ -1,5 +1,6 @@
 """GTK4 / libadwaita front-end for vpnman (requires libadwaita >= 1.4)."""
 
+import base64
 import os
 import sys
 import threading
@@ -17,7 +18,7 @@ except (ImportError, ValueError) as exc:  # pragma: no cover
 import json
 
 from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof
-from .pages import BypassPage, SchedulePage
+from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .tray import HelperTray, Tray, wants_helper
 from ..settings import DNS_PRESETS, DEFAULTS
 from ..ipc import Client, DaemonUnavailable, RpcError
@@ -73,9 +74,27 @@ def choose_files(parent, title, callback, multiple=True):
         parent._native = dlg
 
 
+def save_file(parent, title, name, callback):
+    if hasattr(Gtk, "FileDialog"):
+        dlg = Gtk.FileDialog(title=title, initial_name=name)
+
+        def done(d, res):
+            try:
+                callback(d.save_finish(res).get_path())
+            except GLib.Error:
+                return
+        dlg.save(parent, None, done)
+    else:  # pragma: no cover - GTK < 4.10
+        dlg = Gtk.FileChooserNative(title=title, transient_for=parent, action=Gtk.FileChooserAction.SAVE)
+        dlg.set_current_name(name)
+        dlg.connect("response", lambda d, r: callback(d.get_file().get_path()) if r == Gtk.ResponseType.ACCEPT else None)
+        dlg.show()
+        parent._native = dlg
+
+
 class UserConfig:
     """Per-user GUI preferences (~/.config/vpnman/gui.json); the daemon's settings are system-wide."""
-    DEFAULTS = {"run_in_background": True}
+    DEFAULTS = {"run_in_background": True, "server_sort": "favourites", "auto_latency": 0}
 
     def __init__(self):
         base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
@@ -201,12 +220,13 @@ class ProfileDialog(Adw.Window):
         self.opts = Adw.EntryRow(title="Options (key=value, comma separated)")
         self.dns = Adw.EntryRow(title="DNS servers (comma separated)")
         self.notes = Adw.EntryRow(title="Notes")
+        self.group_row = Adw.EntryRow(title="Group (optional, e.g. a country or a provider)")
         g2 = Adw.PreferencesGroup(title="Details")
         page.add(g2)
         if mode != "import":
             for r in (self.server, self.port):
                 g2.add(r)
-        for r in (self.user, self.password):
+        for r in (self.user, self.password, self.group_row):
             g2.add(r)
         if mode != "import":
             for r in (self.opts, self.dns, self.notes):
@@ -218,6 +238,7 @@ class ProfileDialog(Adw.Window):
             self.user.set_text(profile.get("username") or "")
             self.dns.set_text(", ".join(profile.get("dns") or []))
             self.notes.set_text(profile.get("notes") or "")
+            self.group_row.set_text(profile.get("group") or "")
             self.opts.set_text(", ".join("%s=%s" % kv for kv in profile.get("options", {}).items()
                                          if isinstance(kv[1], (str, int))))
         # ---- stunnel (TLS wrapper for OpenVPN)
@@ -299,6 +320,19 @@ class ProfileDialog(Adw.Window):
             self.on_done()
         self.close()
 
+    def _import_done(self, done, errors):
+        """Report a whole batch: what was imported, and every file that was not (with its reason)."""
+        if done and self.on_done:
+            self.on_done()                        # the list shows what was imported even if some files failed
+        if not errors:
+            return self._finish()
+        if done:
+            self.files = []                        # never re-submit the files that already went in (duplicates)
+            self.file_row.set_subtitle("None selected")
+            self.on_done = None
+            self.parent_win.toast("Imported %d of %d - see the dialog for the rest" % (done, done + len(errors)))
+        self._error("; ".join(errors))
+
     def _submit(self, *_):
         self.save.set_sensitive(False)
         if self.mode == "import":
@@ -307,6 +341,8 @@ class ProfileDialog(Adw.Window):
             fields = {}
             if self.user.get_text():
                 fields = {"username": self.user.get_text(), "password": self.password.get_text()}
+            if self.group_row.get_text().strip():
+                fields["group"] = self.group_row.get_text().strip()
             files, proto, name = list(self.files), self._selected_protocol(), self.name.get_text()
             try:
                 st_opts, st_files = self._stunnel()
@@ -314,16 +350,19 @@ class ProfileDialog(Adw.Window):
                 return self._error(e)
 
             def work():
-                err = None
+                done, errors = 0, []
                 for f in files:
                     try:
                         text, extra = prof.collect_files(f)
-                        extra.update(st_files)
-                        Client().call("profiles.import", name=(name if len(files) == 1 and name else os.path.splitext(os.path.basename(f))[0]),
-                                      text=text, files=extra, protocol=proto, filename=os.path.basename(f), fields=fields, options=st_opts)
+                        extra = dict(extra, **st_files)
+                        Client().call("profiles.import",
+                                      name=(name if len(files) == 1 and name else os.path.splitext(os.path.basename(f))[0]),
+                                      text=text, files=extra, protocol=proto, filename=os.path.basename(f),
+                                      fields=fields, options=st_opts)
+                        done += 1
                     except (RpcError, DaemonUnavailable, OSError) as e:
-                        err = "%s: %s" % (os.path.basename(f), e)
-                GLib.idle_add(self._error if err else self._finish, err)
+                        errors.append("%s: %s" % (os.path.basename(f), e))
+                GLib.idle_add(self._import_done, done, errors)
             threading.Thread(target=work, daemon=True).start()
             return
         name = self.name.get_text().strip()
@@ -346,12 +385,14 @@ class ProfileDialog(Adw.Window):
         opts.update(st_opts)
         if self.mode == "add":
             fields = {"server": self.server.get_text().strip(), "port": port, "username": self.user.get_text(),
-                      "password": self.password.get_text(), "dns": dns, "notes": self.notes.get_text()}
+                      "password": self.password.get_text(), "dns": dns, "notes": self.notes.get_text(),
+                      "group": self.group_row.get_text().strip()}
             rpc("profiles.add", self._finish, self._error, name=name, protocol=self._selected_protocol(),
                 fields=fields, options=opts, files=st_files)
         else:
             ch = {"name": name, "server": self.server.get_text().strip(), "port": port,
                   "username": self.user.get_text(), "dns": dns, "notes": self.notes.get_text(),
+                  "group": self.group_row.get_text().strip(),
                   "options": dict(self.profile.get("options", {}), **opts)}
             if self.password.get_text():
                 ch["password"] = self.password.get_text()
@@ -364,6 +405,95 @@ class ProfileDialog(Adw.Window):
                     data=st_files["stunnel-ca.pem"])
             else:
                 apply_changes()
+
+
+class CredentialsPrompt(Adw.MessageDialog):
+    """Ask for a username/password right when a login fails, then retry - no trip to the profile editor."""
+
+    def __init__(self, parent, profile, reason, on_save):
+        super().__init__(transient_for=parent, modal=True, heading="Login failed",
+                         body=GLib.markup_escape_text("%s\n\nEnter the VPN username and password for %s."
+                                                      % (reason, profile["name"])))
+        self.profile, self.on_save = profile, on_save
+        group = Adw.PreferencesGroup()
+        self.user = Adw.EntryRow(title="Username")
+        self.user.set_text(profile.get("username") or "")
+        self.password = Adw.PasswordEntryRow(title="Password")
+        group.add(self.user)
+        group.add(self.password)
+        self.set_extra_child(group)
+        self.add_response("cancel", "Cancel")
+        self.add_response("retry", "Save and Reconnect")
+        self.set_response_appearance("retry", Adw.ResponseAppearance.SUGGESTED)
+        self.set_default_response("retry")
+        self.connect("response", self._response)
+
+    def _response(self, _d, resp):
+        if resp == "retry" and self.user.get_text() and self.password.get_text():
+            self.on_save(self.profile["id"], self.user.get_text(), self.password.get_text())
+
+
+class LeakTestDialog(Adw.Window):
+    """Runs the daemon's self-test and lists every check with a pass / warning / fail mark."""
+    ICONS = {"ok": ("emblem-ok-symbolic", "success"), "warn": ("dialog-warning-symbolic", "warning"),
+             "fail": ("dialog-error-symbolic", "error"), "info": ("dialog-information-symbolic", "dim-label")}
+
+    def __init__(self, parent):
+        super().__init__(transient_for=parent, modal=True, default_width=520, default_height=480, title="Connection Test")
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        self.again = Gtk.Button(label="Run Again")
+        self.again.connect("clicked", lambda *_: self.run())
+        header.pack_start(self.again)
+        view.add_top_bar(header)
+        self.page = Adw.PreferencesPage()
+        self.group = Adw.PreferencesGroup(title="Connection Test",
+                                          description="Checks that your traffic really goes through the VPN and that "
+                                                      "the kill switch holds.")
+        self.page.add(self.group)
+        view.set_content(self.page)
+        self.set_content(view)
+        self.rows = []
+        self.run()
+
+    def run(self):
+        for r in self.rows:
+            self.group.remove(r)
+        self.rows = []
+        self.again.set_sensitive(False)
+        row = Adw.ActionRow(title="Running checks…", subtitle="This takes a few seconds")
+        row.add_prefix(Gtk.Spinner(spinning=True))
+        self.group.add(row)
+        self.rows.append(row)
+        rpc("leaktest", self._show, self._failed)
+
+    def _clear(self):
+        for r in self.rows:
+            self.group.remove(r)
+        self.rows = []
+        self.again.set_sensitive(True)
+
+    def _failed(self, msg, *_):
+        self._clear()
+        row = Adw.ActionRow(title="Test failed", subtitle=GLib.markup_escape_text(msg))
+        self.group.add(row)
+        self.rows.append(row)
+
+    def _show(self, res):
+        self._clear()
+        for c in res["checks"]:
+            icon, css = self.ICONS.get(c["status"], self.ICONS["info"])
+            row = Adw.ActionRow(title=GLib.markup_escape_text(c["name"]), subtitle=GLib.markup_escape_text(c["detail"]),
+                                subtitle_lines=0)
+            img = Gtk.Image.new_from_icon_name(icon)
+            img.add_css_class(css)
+            row.add_prefix(img)
+            self.group.add(row)
+            self.rows.append(row)
+        verdict = {"ok": "All checks passed", "warn": "Passed with warnings", "fail": "Problems found"}[res["summary"]]
+        row = Adw.ActionRow(title="<b>%s</b>" % verdict)
+        self.group.add(row)
+        self.rows.append(row)
 
 
 # ------------------------------------------------------------------- window
@@ -399,6 +529,10 @@ class MainWindow(Adw.ApplicationWindow):
         header.pack_start(add_btn)
         main_menu = Gio.Menu()
         main_menu.append("Preferences", "app.preferences")
+        backup_menu = Gio.Menu()
+        backup_menu.append("Export Backup…", "win.backup-export")
+        backup_menu.append("Restore Backup…", "win.backup-import")
+        main_menu.append_section(None, backup_menu)
         main_menu.append("About VPNMan", "app.about")
         main_menu.append("Quit", "app.quit")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=main_menu,
@@ -425,7 +559,8 @@ class MainWindow(Adw.ApplicationWindow):
         view.set_content(self.toasts)
         view.add_bottom_bar(bar)
 
-        for name, cb in (("import", self.on_import), ("add", self.on_add)):
+        for name, cb in (("import", self.on_import), ("add", self.on_add),
+                         ("backup-export", self.on_backup_export), ("backup-import", self.on_backup_import)):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", cb)
             self.add_action(act)
@@ -518,6 +653,11 @@ class MainWindow(Adw.ApplicationWindow):
             self.stat_rows[key] = row
         self.stats.set_visible(False)
         groups.append(self.stats)
+        self.graph_group = Adw.PreferencesGroup(title="Traffic")
+        self.graph = TrafficGraph()
+        self.graph_group.add(self.graph)
+        self.graph_group.set_visible(False)
+        groups.append(self.graph_group)
 
         dns = Adw.PreferencesGroup(title="DNS", description="Name servers used while the VPN is active. "
                                    "Changes apply immediately, even when connected.")
@@ -550,7 +690,15 @@ class MainWindow(Adw.ApplicationWindow):
         self.lock_switch.add_prefix(Gtk.Image.new_from_icon_name("changes-prevent-symbolic"))
         self.lock_switch.connect("notify::active", self._on_lock_toggled)
         quick.add(self.lock_switch)
+        test = Adw.ActionRow(title="Test connection", subtitle="Check for IP, DNS and IPv6 leaks and that the kill switch holds",
+                             activatable=True)
+        test.add_prefix(Gtk.Image.new_from_icon_name("emblem-system-symbolic"))
+        test.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+        test.connect("activated", lambda *_: LeakTestDialog(self).present())
+        quick.add(test)
         groups.append(quick)
+        self.history_group = HistoryGroup(rpc, self._fail)
+        groups.append(self.history_group)
         scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
         scroll.set_child(page)
         return scroll
@@ -636,13 +784,26 @@ class MainWindow(Adw.ApplicationWindow):
         top = Gtk.Box(spacing=6)
         self.search.set_hexpand(True)
         top.append(self.search)
+        self.sort_modes = [("favourites", "Favourites first"), ("name", "Name"), ("latency", "Fastest first")]
+        self.sort_drop = Gtk.DropDown(model=Gtk.StringList.new([m[1] for m in self.sort_modes]),
+                                      tooltip_text="Sort servers")
+        cur = self.get_application().userconfig.get("server_sort") if self.get_application() else "favourites"
+        self.sort_drop.set_selected(next((i for i, m in enumerate(self.sort_modes) if m[0] == cur), 0))
+        self.sort_drop.connect("notify::selected", self._on_sort_changed)
+        top.append(self.sort_drop)
         self.ping_btn = Gtk.Button(label="Test Latency")
         self.ping_btn.connect("clicked", self.on_ping)
         top.append(self.ping_btn)
-        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        # MULTIPLE gives Ctrl+click (toggle one), Shift+click (range) and Ctrl+A for free
+        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.MULTIPLE, activate_on_single_click=False)
         self.listbox.add_css_class("boxed-list")
         self.listbox.set_filter_func(self._filter)
         self.listbox.set_sort_func(self._sort)
+        self.listbox.set_header_func(self._header)
+        self.listbox.connect("selected-rows-changed", self._on_selection_changed)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_list_key)
+        self.listbox.add_controller(keys)
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         inner.append(top)
         inner.append(self.listbox)
@@ -659,8 +820,26 @@ class MainWindow(Adw.ApplicationWindow):
         b.add_css_class("suggested-action")
         b.connect("clicked", self.on_import)
         self.empty.set_child(b)
+        # selection bar: appears as soon as something is selected
+        self.sel_label = Gtk.Label(label="", hexpand=True, xalign=0, margin_start=6)
+        sel_all = Gtk.Button(label="Select All")
+        sel_all.connect("clicked", lambda *_: self.listbox.select_all())
+        sel_none = Gtk.Button(label="Clear")
+        sel_none.connect("clicked", lambda *_: self.listbox.unselect_all())
+        self.sel_remove = Gtk.Button(label="Remove…")
+        self.sel_remove.add_css_class("destructive-action")
+        self.sel_remove.connect("clicked", lambda *_: self._remove_selected())
+        bar = Gtk.ActionBar()
+        bar.pack_start(self.sel_label)
+        bar.pack_end(self.sel_remove)
+        bar.pack_end(sel_none)
+        bar.pack_end(sel_all)
+        self.sel_bar = Gtk.Revealer(child=bar, reveal_child=False, transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
+        listpage = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        listpage.append(scroll)
+        listpage.append(self.sel_bar)
         self.srv_stack = Gtk.Stack()
-        self.srv_stack.add_named(scroll, "list")
+        self.srv_stack.add_named(listpage, "list")
         self.srv_stack.add_named(self.empty, "empty")
         box.append(self.srv_stack)
         return box
@@ -670,10 +849,41 @@ class MainWindow(Adw.ApplicationWindow):
         return not q or q in row.profile["name"].lower() or q in row.profile["protocol"] or \
             q in (row.profile.get("server") or "").lower()
 
+    def sort_mode(self):
+        return self.sort_modes[self.sort_drop.get_selected()][0]
+
+    def _sort_key(self, row):
+        p = row.profile
+        group = (p.get("group") or "").lower()          # ungrouped servers first, then each group together
+        name = p["name"].lower()
+        mode = self.sort_mode()
+        if mode == "name":
+            return (group, name)
+        if mode == "latency":
+            ms = self.latency.get(p["id"])
+            return (group, ms is None, ms or 0, name)
+        return (group, not p["favorite"], name)
+
     def _sort(self, a, b):
-        ka = (not a.profile["favorite"], a.profile["name"].lower())
-        kb = (not b.profile["favorite"], b.profile["name"].lower())
+        ka, kb = self._sort_key(a), self._sort_key(b)
         return (ka > kb) - (ka < kb)
+
+    def _header(self, row, before):
+        """A heading above the first server of each group."""
+        group = row.profile.get("group") or ""
+        prev = (before.profile.get("group") or "") if before else None
+        if group and group != prev:
+            lbl = Gtk.Label(label=group, xalign=0, margin_start=12, margin_top=10, margin_bottom=4)
+            lbl.add_css_class("heading")
+            row.set_header(lbl)
+        else:
+            row.set_header(None)
+
+    def _on_sort_changed(self, *_):
+        app = self.get_application()
+        if app:
+            app.userconfig.set("server_sort", self.sort_mode())
+        self.listbox.invalidate_sort()
 
     def _make_row(self, p):
         row = Adw.ActionRow(title=GLib.markup_escape_text(p["name"]),
@@ -697,7 +907,7 @@ class MainWindow(Adw.ApplicationWindow):
         pb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         for label, cb in (("Edit…", lambda *_: self._edit(p)),
                           ("Unblock" if p["blacklisted"] else "Blacklist", lambda *_: self._toggle_block(p)),
-                          ("Remove…", lambda *_: self._remove(p))):
+                          ("Remove…", lambda *_, row=row: self._remove_for_row(row))):
             b = Gtk.Button(label=label)
             b.add_css_class("flat")
             b.connect("clicked", lambda w, cb=cb: (pop.popdown(), cb()))
@@ -718,13 +928,64 @@ class MainWindow(Adw.ApplicationWindow):
         rpc("profiles.update", lambda *_: self.refresh(full=True), ident=p["id"],
             changes={"blacklisted": not p["blacklisted"]})
 
+    def selected_profiles(self):
+        return [r.profile for r in self.listbox.get_selected_rows()]
+
+    def _on_selection_changed(self, *_):
+        n = len(self.listbox.get_selected_rows())
+        self.sel_label.set_label("%d selected" % n)
+        self.sel_bar.set_reveal_child(n > 0)
+
+    def _on_list_key(self, _ctl, keyval, _code, _state):
+        if keyval in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete) and self.listbox.get_selected_rows():
+            self._remove_selected()
+            return True
+        if keyval == Gdk.KEY_Escape and self.listbox.get_selected_rows():
+            self.listbox.unselect_all()
+            return True
+        return False
+
+    def _remove_for_row(self, row):
+        """The row's own menu: removes the whole selection when the row is part of a multi-selection."""
+        sel = self.selected_profiles()
+        self._remove_many(sel if row.is_selected() and len(sel) > 1 else [row.profile])
+
+    def _remove_selected(self):
+        sel = self.selected_profiles()
+        if sel:
+            self._remove_many(sel)
+
     def _remove(self, p):
-        d = Adw.MessageDialog(transient_for=self, heading="Remove %s?" % p["name"],
-                              body="The profile and its stored credentials will be deleted.")
+        self._remove_many([p])
+
+    def _remove_many(self, profiles):
+        if not profiles:
+            return
+        if len(profiles) == 1:
+            heading, body = "Remove %s?" % profiles[0]["name"], "The profile and its stored credentials will be deleted."
+        else:
+            names = [p["name"] for p in profiles]
+            shown = ", ".join(names[:6]) + (" and %d more" % (len(names) - 6) if len(names) > 6 else "")
+            heading = "Remove %d profiles?" % len(profiles)
+            body = "%s\n\nThe profiles and their stored credentials will be deleted." % shown
+        active = (self.status or {}).get("profile_id")
+        if active and active in [p["id"] for p in profiles] and (self.status or {}).get("state") in ACTIVE:
+            body += " The VPN will be disconnected."
+        d = Adw.MessageDialog(transient_for=self, heading=heading, body=body)
         d.add_response("cancel", "Cancel")
         d.add_response("remove", "Remove")
         d.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
-        d.connect("response", lambda d, r: r == "remove" and rpc("profiles.remove", lambda *_: self.refresh(full=True), ident=p["id"]))
+        ids = [p["id"] for p in profiles]
+
+        def done(res):
+            gone = len(res.get("removed", []))
+            if res.get("failed"):
+                self.toast("Removed %d, %d failed: %s" % (gone, len(res["failed"]), res["failed"][0]["error"]))
+            else:
+                self.toast("Removed %d profile%s" % (gone, "" if gone == 1 else "s"))
+            self.refresh(full=True)
+
+        d.connect("response", lambda d, r: r == "remove" and rpc("profiles.remove_many", done, self._fail, ids=ids))
         d.present()
 
     # ---- network lock page -------------------------------------------
@@ -857,7 +1118,58 @@ class MainWindow(Adw.ApplicationWindow):
     def on_add(self, *_):
         ProfileDialog(self, "add", self.protocols, on_done=lambda: self.refresh(full=True)).present()
 
+    def on_backup_export(self, *_):
+        d = Adw.MessageDialog(transient_for=self, heading="Export a backup?",
+                              body="The backup contains your VPN passwords and private keys. Anyone who gets the file "
+                                   "can use your VPN accounts, so keep it somewhere safe.")
+        d.add_response("cancel", "Cancel")
+        d.add_response("export", "Choose Where to Save…")
+        d.set_response_appearance("export", Adw.ResponseAppearance.SUGGESTED)
+
+        def chosen(path):
+            def write(res):
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(base64.b64decode(res["data"]))
+                    self.toast("Backup saved")
+                except OSError as e:
+                    self.toast("Could not save the backup: %s" % e)
+            rpc("backup.export", write, self._fail)
+        d.connect("response", lambda d, r: r == "export" and save_file(
+            self, "Save backup", "vpnman-backup-%s.tar.gz" % time.strftime("%Y%m%d"), chosen))
+        d.present()
+
+    def on_backup_import(self, *_):
+        def picked(files):
+            try:
+                with open(files[0], "rb") as fh:
+                    raw = fh.read(32 * 1024 * 1024 + 1)
+            except OSError as e:
+                return self.toast("Could not read the file: %s" % e)
+            if len(raw) > 32 * 1024 * 1024:
+                return self.toast("That file is too large to be a VPNMan backup")
+            data = base64.b64encode(raw).decode()
+            d = Adw.MessageDialog(transient_for=self, heading="Restore this backup?",
+                                  body="Add Missing Profiles keeps everything you have and only adds profiles that are not "
+                                       "here yet. Replace Everything deletes your current profiles and settings first.")
+            d.add_response("cancel", "Cancel")
+            d.add_response("merge", "Add Missing Profiles")
+            d.add_response("replace", "Replace Everything")
+            d.set_response_appearance("merge", Adw.ResponseAppearance.SUGGESTED)
+            d.set_response_appearance("replace", Adw.ResponseAppearance.DESTRUCTIVE)
+
+            def done(res):
+                self.toast("Restored: %d added, %d already present" % (res["added"], res["skipped"]))
+                self.refresh(full=True)
+            d.connect("response", lambda d, r: r in ("merge", "replace") and rpc(
+                "backup.import", done, self._fail, data=data, replace=(r == "replace")))
+            d.present()
+        choose_files(self, "Choose a VPNMan backup", picked, multiple=False)
+
     def on_ping(self, *_):
+        if not self.ping_btn.get_sensitive():
+            return
         self.ping_btn.set_sensitive(False)
         self.ping_btn.set_label("Testing…")
 
@@ -866,6 +1178,8 @@ class MainWindow(Adw.ApplicationWindow):
             self.ping_btn.set_sensitive(True)
             self.ping_btn.set_label("Test Latency")
             self._update_latency()
+            self.listbox.invalidate_sort()
+            self._last_ping = time.monotonic()
         rpc("latency", done, self._fail)
 
     def _update_latency(self):
@@ -874,9 +1188,24 @@ class MainWindow(Adw.ApplicationWindow):
             row.lat.set_label("%.0f ms" % ms if ms else ("timeout" if pid in self.latency else ""))
 
     def connect_to(self, pid):
+        """Connect (or switch) to a server.  The daemon replaces a live tunnel itself; here we only make sure that a
+        second click while the first request is in flight does not start a second one, and that the polling
+        refresh does not snap the selection back to the old server in the meantime."""
+        pend = getattr(self, "_pending", None)
+        if pend and pend[0] == pid and time.monotonic() < pend[1]:
+            return
         self.sel_id = pid
+        self._pending = (pid, time.monotonic() + 90)
         self.stack.set_visible_child_name("overview")
-        rpc("connect", lambda *_: self.refresh(), self._fail, ident=pid)
+
+        def settled(*_):
+            self._pending = None
+            self.refresh()
+
+        def failed(msg, down=False):
+            self._pending = None
+            self._fail(msg, down)
+        rpc("connect", settled, failed, ident=pid)
 
     def on_main_button(self, *_):
         st = self.status or {}
@@ -902,12 +1231,24 @@ class MainWindow(Adw.ApplicationWindow):
     def _tick(self):
         self._ticks = getattr(self, "_ticks", 0) + 1
         self.refresh(slow=self._ticks % 20 == 0)
+        self._auto_latency()
         return True
+
+    def _auto_latency(self):
+        """Optional: re-test server latency every N minutes while the Servers tab is on screen."""
+        app = self.get_application()
+        minutes = app.userconfig.get("auto_latency") if app else 0
+        if not minutes or not self.profiles or not self.is_visible() or self.stack.get_visible_child_name() != "servers":
+            return
+        if time.monotonic() - getattr(self, "_last_ping", 0) >= minutes * 60:
+            self._last_ping = time.monotonic()
+            self.on_ping()
 
     def refresh(self, full=False, slow=False):
         rpc("status", self._on_status, self._fail)
         rpc("logs", self._on_logs, None, since=self._log_seq)
         if full or slow:
+            rpc("history", self.history_group.update, None, limit=8)
             rpc("schedule.status", self.sched_page.update, None)
             rpc("split.status", self.bypass_page.update, None)
         if full:
@@ -931,6 +1272,7 @@ class MainWindow(Adw.ApplicationWindow):
         if self.sel_id:
             self.server_row.set_selected(ids.index(self.sel_id))
         self._quiet = False
+        keep = {r.profile["id"] for r in self.listbox.get_selected_rows()}
         child = self.listbox.get_first_child()
         while child:
             nxt = child.get_next_sibling()
@@ -941,6 +1283,8 @@ class MainWindow(Adw.ApplicationWindow):
             row = self._make_row(p)
             self._rows[p["id"]] = row
             self.listbox.append(row)
+            if p["id"] in keep:
+                self.listbox.select_row(row)
         self._update_latency()
         self.srv_stack.set_visible_child_name("list" if profiles else "empty")
         self._sync_auto()
@@ -971,7 +1315,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._quiet = False
         self.server_row.set_sensitive(not active)
         pid = st.get("profile_id")
-        if active and pid and pid != self.sel_id:
+        pend = getattr(self, "_pending", None)
+        if active and pid and pid != self.sel_id and not (pend and time.monotonic() < pend[1]):
             self.sel_id = pid             # opened mid-connection: show the server actually in use
             ids = [p["id"] for p in self.profiles]
             if pid in ids:
@@ -999,6 +1344,11 @@ class MainWindow(Adw.ApplicationWindow):
         for cls, on in (("suggested-action", not active), ("destructive-action", active)):
             (self.main_btn.add_css_class if on else self.main_btn.remove_css_class)(cls)
         self.stats.set_visible(state == "connected")
+        self.graph_group.set_visible(state == "connected")
+        if state == "connected":
+            self.graph.push(st.get("rx_rate", 0), st.get("tx_rate", 0))
+        else:
+            self.graph.reset()
         if state == "connected":
             r = self.stat_rows
             r["ip"].set_subtitle(st.get("public_ip") or "checking…")
@@ -1007,10 +1357,23 @@ class MainWindow(Adw.ApplicationWindow):
             r["down"].set_subtitle("%s  (%s/s)" % (human(st["rx"]), human(st["rx_rate"])))
             r["up"].set_subtitle("%s  (%s/s)" % (human(st["tx"]), human(st["tx_rate"])))
         self._update_tray(st)
+        if state == "error" and st.get("error_kind") == "auth" and self._last_state != "error" and self.is_visible():
+            self._ask_credentials(st)
         if state != self._last_state:
             if self._last_state is not None:
+                rpc("history", self.history_group.update, None, limit=8)       # a session just started or ended
                 self._notify(state, st)
             self._last_state = state
+
+    def _ask_credentials(self, st):
+        prof = next((p for p in self.profiles if p["id"] == st.get("profile_id")), None)
+        if not prof:
+            return
+
+        def save(pid, user, pw):
+            rpc("profiles.update", lambda *_: rpc("connect", lambda *_: self.refresh(), self._fail, ident=pid),
+                self._fail, ident=pid, changes={"username": user, "password": pw})
+        CredentialsPrompt(self, prof, st.get("message") or "The server rejected the login.", save).present()
 
     def _notify(self, state, st):
         if not self.settings.get("ui", {}).get("notifications", True):
@@ -1045,7 +1408,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         page.add(g)
         self.add(page)
 
-        page = Adw.PreferencesPage(title="DNS & Routes", icon_name="network-wired-symbolic")
+        page = Adw.PreferencesPage(title="DNS & Checks", icon_name="network-wired-symbolic")
         g = Adw.PreferencesGroup(title="DNS")
         g.add(self._switch("dns.force", "Change DNS while connected", "Prevents DNS leaks; pick servers on the Connection page"))
         g.add(self._entry("dns.servers", "Custom DNS servers", "comma separated, overrides pushed servers"))
@@ -1054,14 +1417,30 @@ class PreferencesWindow(Adw.PreferencesWindow):
         g.add(self._switch("checks.tunnel", "Look up public IP after connecting"))
         g.add(self._entry("checks.url", "Lookup URL"))
         page.add(g)
-        g = Adw.PreferencesGroup(title="Routes", description="Networks that bypass the VPN (IPv4, comma separated)")
-        row = Adw.EntryRow(title="Bypass networks", show_apply_button=True)
-        row.set_text(", ".join(r["ip"] for r in settings["routes"] if r.get("action") == "out"))
-        row.connect("apply", lambda r: self._set("routes", [{"ip": x.strip(), "action": "out"}
-                                                           for x in r.get_text().split(",") if x.strip()]))
-        g.add(row)
+        self.add(page)
+
+        page = Adw.PreferencesPage(title="Networks", icon_name="network-wireless-symbolic")
+        g = Adw.PreferencesGroup(title="This Network",
+                                 description="Trusted networks (home, office) are ones where you do not need the VPN. "
+                                             "Anything else counts as untrusted.")
+        self.net_row = Adw.ActionRow(title="Currently on", subtitle="Detecting…")
+        self.net_btn = Gtk.Button(label="Trust", valign=Gtk.Align.CENTER, sensitive=False)
+        self.net_btn.connect("clicked", self._toggle_trust)
+        self.net_row.add_suffix(self.net_btn)
+        g.add(self.net_row)
+        g.add(self._entry("network.trusted", "Trusted networks", "Wi-Fi names, comma separated"))
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Automation")
+        self.net_combo(g, "network.untrusted_action", "On an untrusted network",
+                       [("off", "Do nothing"), ("connect", "Connect the VPN")])
+        self.net_combo(g, "network.trusted_action", "On a trusted network",
+                       [("off", "Do nothing"), ("disconnect", "Disconnect the VPN (only if it was connected automatically)")])
+        self.net_combo(g, "network.profile", "Connect to",
+                       [("last", "Last used server"), ("fastest", "Fastest server")]
+                       + [(p["id"], p["name"]) for p in parent.profiles])
         page.add(g)
         self.add(page)
+        rpc("network.status", self._on_network, None)
 
         page = Adw.PreferencesPage(title="Tray & Login", icon_name="preferences-desktop-symbolic")
         app = parent.get_application()
@@ -1106,8 +1485,38 @@ class PreferencesWindow(Adw.PreferencesWindow):
         page.add(g)
         g = Adw.PreferencesGroup(title="Interface")
         g.add(self._switch("ui.notifications", "Desktop notifications"))
+        app = parent.get_application()
+        opts = [(0, "Off"), (5, "Every 5 minutes"), (15, "Every 15 minutes"), (30, "Every 30 minutes")]
+        lat = Adw.ComboRow(title="Test server latency automatically", subtitle="While the Servers tab is open",
+                           model=Gtk.StringList.new([o[1] for o in opts]))
+        lat.set_selected(next((i for i, o in enumerate(opts) if o[0] == app.userconfig.get("auto_latency")), 0))
+        lat.connect("notify::selected", lambda r, _p: app.userconfig.set("auto_latency", opts[r.get_selected()][0]))
+        g.add(lat)
         page.add(g)
         self.add(page)
+
+    def net_combo(self, group, key, title, choices):
+        row = Adw.ComboRow(title=title, model=Gtk.StringList.new([c[1] for c in choices]))
+        ids = [c[0] for c in choices]
+        cur = self._val(key)
+        row.set_selected(ids.index(cur) if cur in ids else 0)
+        row.connect("notify::selected", lambda r, _p: self._set(key, ids[r.get_selected()]))
+        group.add(row)
+        return row
+
+    def _on_network(self, st):
+        self._net = st
+        if st.get("id"):
+            self.net_row.set_subtitle(GLib.markup_escape_text("%s%s" % (st["name"], " - trusted" if st["trusted"] else "")))
+            self.net_btn.set_label("Stop Trusting" if st["trusted"] else "Trust This Network")
+            self.net_btn.set_sensitive(True)
+        else:
+            self.net_row.set_subtitle("No network detected")
+
+    def _toggle_trust(self, *_):
+        st = getattr(self, "_net", {})
+        rpc("network.trust", self._on_network, lambda m, *_: self.add_toast(Adw.Toast(title=m)),
+            name=st.get("id"), trusted=not st.get("trusted"))
 
     def _val(self, key):
         node = self.s
