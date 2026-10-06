@@ -17,6 +17,16 @@
   <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.0.5" date="2026-10-06">
+      <description>
+        <ul>
+          <li>Servers tab: select several servers (Ctrl+click, Shift+click, Ctrl+A) and remove them in one go</li>
+          <li>Switching servers is reliable: no double tunnels, immediate "connecting" feedback, no stale status</li>
+          <li>OpenVPN configs with Debian-style up/down update-resolv-conf scripts now connect on every distribution</li>
+          <li>Importing several files reports every failure and no longer creates duplicates on retry</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.4" date="2026-10-06">
       <description>
         <ul>
