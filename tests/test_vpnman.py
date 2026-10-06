@@ -809,6 +809,7 @@ AAAA
         return n
 
     def test_switching_servers_never_leaves_two_tunnels(self):
+        base = self._openvpn_procs()                                          # processes of other tests/runs
         a = self.c.call("profiles.import", name="swA", text="client\nremote 192.0.2.1 1194\n", filename="a.ovpn", files={})
         b = self.c.call("profiles.import", name="swB", text="client\nremote 192.0.2.2 1194\n", filename="b.ovpn", files={})
         try:
@@ -832,15 +833,15 @@ AAAA
             st = self.wait("connected")
             self.assertEqual(st["profile"], "swB")
             time.sleep(0.5)
-            self.assertEqual(self._openvpn_procs(), 1)
+            self.assertEqual(self._openvpn_procs() - base, 1)
             self.c.call("connect", ident=a["id"])                              # and straight back again
             st = self.wait("connected")
-            self.assertEqual((st["profile"], self._openvpn_procs()), ("swA", 1))
+            self.assertEqual((st["profile"], self._openvpn_procs() - base), ("swA", 1))
         finally:
             self.c.call("disconnect")
             for ident in (a["id"], b["id"]):
                 self.c.call("profiles.remove", ident=ident)
-        self.assertEqual(self._openvpn_procs(), 0)
+        self.assertEqual(self._openvpn_procs(), base)
 
     def test_remove_many_drops_a_live_connection_and_reports_failures(self):
         a = self.c.call("profiles.import", name="rmA", text="client\nremote 192.0.2.1 1194\n", filename="a.ovpn", files={})
