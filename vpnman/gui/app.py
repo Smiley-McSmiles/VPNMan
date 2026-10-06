@@ -10,14 +10,15 @@ try:
     import gi
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
-    from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
+    gi.require_version("Graphene", "1.0")
+    from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk, Pango
 except (ImportError, ValueError) as exc:  # pragma: no cover
     print("The GUI needs PyGObject, GTK 4 and libadwaita >= 1.4: %s" % exc, file=sys.stderr)
     raise SystemExit(1)
 
 import json
 
-from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof
+from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof, updates
 from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .tray import HelperTray, Tray, wants_helper
 from ..settings import DNS_PRESETS, DEFAULTS
@@ -94,7 +95,8 @@ def save_file(parent, title, name, callback):
 
 class UserConfig:
     """Per-user GUI preferences (~/.config/vpnman/gui.json); the daemon's settings are system-wide."""
-    DEFAULTS = {"run_in_background": True, "server_sort": "favourites", "auto_latency": 0}
+    DEFAULTS = {"run_in_background": True, "server_sort": "favourites", "auto_latency": 0,
+                "update_check": False, "update_last": 0}
 
     def __init__(self):
         base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
@@ -172,6 +174,67 @@ class Hero(Gtk.Box):
 
 # ------------------------------------------------------------------ dialogs
 
+class FailoverDialog(Adw.Window):
+    """Pick the servers to fall back to, and put them in order (top is tried first)."""
+
+    def __init__(self, parent, profiles, chosen, on_save):
+        super().__init__(transient_for=parent, modal=True, default_width=420, default_height=560,
+                         title="Failover Servers")
+        self.on_save = on_save
+        by_id = {p["id"]: p for p in profiles}
+        self.order = [by_id[i] for i in chosen if i in by_id] + [p for p in profiles if p["id"] not in chosen]
+        self.checks = {p["id"]: Gtk.CheckButton(active=p["id"] in chosen) for p in profiles}
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar(show_end_title_buttons=False, show_start_title_buttons=False)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self.close())
+        ok = Gtk.Button(label="Save")
+        ok.add_css_class("suggested-action")
+        ok.connect("clicked", self._save)
+        header.pack_start(cancel)
+        header.pack_end(ok)
+        view.add_top_bar(header)
+        self.group = Adw.PreferencesGroup(description="When this server keeps failing, the ticked servers are tried "
+                                                      "in this order, then the rest of its group and your favourites.",
+                                          margin_top=12, margin_start=12, margin_end=12, margin_bottom=12)
+        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.listbox.add_css_class("boxed-list")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(self.group)
+        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin_start=12, margin_end=12, margin_bottom=12)
+        inner.append(self.listbox)
+        scroll.set_child(inner)
+        box.append(scroll)
+        view.set_content(box)
+        self.set_content(view)
+        self._fill()
+
+    def _fill(self):
+        while (row := self.listbox.get_first_child()) is not None:
+            self.listbox.remove(row)
+        for i, p in enumerate(self.order):
+            row = Adw.ActionRow(title=GLib.markup_escape_text(p["name"]),
+                                subtitle=GLib.markup_escape_text(p.get("group") or p["protocol"]))
+            row.add_prefix(self.checks[p["id"]])
+            row.set_activatable_widget(self.checks[p["id"]])
+            for icon, delta, tip in (("go-up-symbolic", -1, "Try earlier"), ("go-down-symbolic", 1, "Try later")):
+                b = Gtk.Button(icon_name=icon, valign=Gtk.Align.CENTER, tooltip_text=tip,
+                               sensitive=0 <= i + delta < len(self.order))
+                b.add_css_class("flat")
+                b.connect("clicked", lambda _b, i=i, d=delta: self._move(i, d))
+                row.add_suffix(b)
+            self.listbox.append(row)
+
+    def _move(self, i, delta):
+        self.order[i], self.order[i + delta] = self.order[i + delta], self.order[i]
+        self._fill()
+
+    def _save(self, *_):
+        self.on_save([p["id"] for p in self.order if self.checks[p["id"]].get_active()])
+        self.close()
+
+
 class ProfileDialog(Adw.Window):
     """Import a config file, add a profile by hand, or edit an existing one."""
 
@@ -231,6 +294,14 @@ class ProfileDialog(Adw.Window):
         if mode != "import":
             for r in (self.opts, self.dns, self.notes):
                 g2.add(r)
+        self.failover = list((profile or {}).get("failover") or [])
+        self.fo_row = Adw.ActionRow(title="Failover servers")
+        fo_btn = Gtk.Button(label="Choose…", valign=Gtk.Align.CENTER)
+        fo_btn.connect("clicked", self._pick_failover)
+        self.fo_row.add_suffix(fo_btn)
+        if mode == "edit":
+            g2.add(self.fo_row)
+            self._failover_subtitle()
         if profile:
             self.name.set_text(profile["name"])
             self.server.set_text(profile.get("server") or "")
@@ -267,6 +338,19 @@ class ProfileDialog(Adw.Window):
 
     def _pick(self, *_):
         choose_files(self, "Choose VPN configuration files", self._set_files)
+
+    def _failover_subtitle(self):
+        names = {p["id"]: p["name"] for p in self.parent_win.profiles}
+        shown = [names[i] for i in self.failover if i in names]
+        self.fo_row.set_subtitle(" → ".join(shown) if shown else "None chosen: its group, then your favourites")
+
+    def _pick_failover(self, *_):
+        others = [p for p in self.parent_win.profiles if not self.profile or p["id"] != self.profile["id"]]
+
+        def saved(ids):
+            self.failover = ids
+            self._failover_subtitle()
+        FailoverDialog(self, others, self.failover, saved).present()
 
     def _set_files(self, files):
         self.files = files
@@ -320,10 +404,12 @@ class ProfileDialog(Adw.Window):
             self.on_done()
         self.close()
 
-    def _import_done(self, done, errors):
+    def _import_done(self, done, errors, warns=()):
         """Report a whole batch: what was imported, and every file that was not (with its reason)."""
         if done and self.on_done:
             self.on_done()                        # the list shows what was imported even if some files failed
+        if warns:
+            self.parent_win.show_warnings(list(warns))
         if not errors:
             return self._finish()
         if done:
@@ -350,19 +436,20 @@ class ProfileDialog(Adw.Window):
                 return self._error(e)
 
             def work():
-                done, errors = 0, []
+                done, errors, warns = 0, [], []
                 for f in files:
                     try:
                         text, extra = prof.collect_files(f)
                         extra = dict(extra, **st_files)
-                        Client().call("profiles.import",
+                        res = Client().call("profiles.import",
                                       name=(name if len(files) == 1 and name else os.path.splitext(os.path.basename(f))[0]),
                                       text=text, files=extra, protocol=proto, filename=os.path.basename(f),
                                       fields=fields, options=st_opts)
+                        warns += ["%s: %s" % (res.get("name", f), w) for w in (res or {}).get("warnings", [])]
                         done += 1
                     except (RpcError, DaemonUnavailable, OSError) as e:
                         errors.append("%s: %s" % (os.path.basename(f), e))
-                GLib.idle_add(self._import_done, done, errors)
+                GLib.idle_add(self._import_done, done, errors, warns)
             threading.Thread(target=work, daemon=True).start()
             return
         name = self.name.get_text().strip()
@@ -392,7 +479,7 @@ class ProfileDialog(Adw.Window):
         else:
             ch = {"name": name, "server": self.server.get_text().strip(), "port": port,
                   "username": self.user.get_text(), "dns": dns, "notes": self.notes.get_text(),
-                  "group": self.group_row.get_text().strip(),
+                  "group": self.group_row.get_text().strip(), "failover": self.failover,
                   "options": dict(self.profile.get("options", {}), **opts)}
             if self.password.get_text():
                 ch["password"] = self.password.get_text()
@@ -533,6 +620,7 @@ class MainWindow(Adw.ApplicationWindow):
         backup_menu.append("Export Backup…", "win.backup-export")
         backup_menu.append("Restore Backup…", "win.backup-import")
         main_menu.append_section(None, backup_menu)
+        main_menu.append("Check for Updates…", "win.check-updates")
         main_menu.append("About VPNMan", "app.about")
         main_menu.append("Quit", "app.quit")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=main_menu,
@@ -560,12 +648,14 @@ class MainWindow(Adw.ApplicationWindow):
         view.add_bottom_bar(bar)
 
         for name, cb in (("import", self.on_import), ("add", self.on_add),
-                         ("backup-export", self.on_backup_export), ("backup-import", self.on_backup_import)):
+                         ("backup-export", self.on_backup_export), ("backup-import", self.on_backup_import),
+                         ("check-updates", self.on_check_updates)):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", cb)
             self.add_action(act)
 
         self.connect("close-request", self._on_close)
+        GLib.timeout_add_seconds(20, self._auto_update_check)
         self.refresh(full=True)
         GLib.timeout_add_seconds(1, self._tick)
 
@@ -619,13 +709,15 @@ class MainWindow(Adw.ApplicationWindow):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24, margin_bottom=24)
         self.hero = Hero("network-vpn-disabled-symbolic", "Not Connected", "Choose a server and connect.")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER)
-        self.server_row = Adw.ComboRow(title="Server", model=Gtk.StringList.new([]))
+        self.server_names = Gtk.StringList.new([])
+        self.server_row = Adw.ComboRow(title="Server", model=self.server_names)
         self.server_row.connect("notify::selected", self._on_server_selected)
         # a ComboRow only reacts to clicks inside a GtkListBox (the list delivers the activation)
         pick = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         pick.add_css_class("boxed-list")
-        pick.set_size_request(340, -1)
+        pick.set_size_request(420, -1)
         pick.append(self.server_row)
+        self.server_row.connect("realize", self._style_server_popup)
         box.append(pick)
         self.main_btn = Gtk.Button(label="Connect", halign=Gtk.Align.CENTER)
         self.main_btn.add_css_class("pill")
@@ -794,6 +886,13 @@ class MainWindow(Adw.ApplicationWindow):
         self.ping_btn = Gtk.Button(label="Test Latency")
         self.ping_btn.connect("clicked", self.on_ping)
         top.append(self.ping_btn)
+        # a text button as well as the header "+": some icon themes (e.g. on Void) lack list-add-symbolic
+        add_menu = Gio.Menu()
+        add_menu.append("Import from File…", "win.import")
+        add_menu.append("Add Manually…", "win.add")
+        self.add_btn = Gtk.MenuButton(label="Add Profile", menu_model=add_menu, tooltip_text="Add a profile")
+        self.add_btn.add_css_class("suggested-action")
+        top.append(self.add_btn)
         # MULTIPLE gives Ctrl+click (toggle one), Shift+click (range) and Ctrl+A for free
         self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.MULTIPLE, activate_on_single_click=False)
         self.listbox.add_css_class("boxed-list")
@@ -819,7 +918,13 @@ class MainWindow(Adw.ApplicationWindow):
         b.add_css_class("pill")
         b.add_css_class("suggested-action")
         b.connect("clicked", self.on_import)
-        self.empty.set_child(b)
+        m = Gtk.Button(label="Add Manually…", halign=Gtk.Align.CENTER)
+        m.add_css_class("pill")
+        m.connect("clicked", lambda *_: self.activate_action("win.add", None))
+        eb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        eb.append(b)
+        eb.append(m)
+        self.empty.set_child(eb)
         # selection bar: appears as soon as something is selected
         self.sel_label = Gtk.Label(label="", hexpand=True, xalign=0, margin_start=6)
         sel_all = Gtk.Button(label="Select All")
@@ -1076,6 +1181,49 @@ class MainWindow(Adw.ApplicationWindow):
     def toast(self, text):
         self.toasts.add_toast(Adw.Toast(title=text, timeout=3))
 
+    def show_warnings(self, warns):
+        d = Adw.MessageDialog(transient_for=self, heading="Imported, with notes",
+                              body=GLib.markup_escape_text("These parts of the imported config do not work on this "
+                                                           "system and are ignored when connecting:\n\n• "
+                                                           + "\n• ".join(warns)))
+        d.add_response("ok", "OK")
+        d.present()
+
+    def on_check_updates(self, *_, silent=False):
+        def work():
+            try:
+                res = updates.check()
+            except (OSError, ValueError) as e:
+                res = {"error": str(e)}
+            GLib.idle_add(self._update_result, res, silent)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_result(self, res, silent):
+        app = self.get_application()
+        if "error" not in res:
+            app.userconfig.set("update_last", int(time.time()))
+        if "error" in res:
+            if not silent:
+                self.toast("Could not check for updates: %s" % res["error"])
+        elif not res["newer"]:
+            if not silent:
+                self.toast("VPNMan %s is the latest version" % res["current"])
+        else:
+            d = Adw.MessageDialog(transient_for=self, heading="VPNMan %s is available" % res["latest"],
+                                  body=GLib.markup_escape_text("You have %s.\n\n%s" % (res["current"], res["notes"][:600])))
+            d.add_response("later", "Later")
+            d.add_response("open", "View Release")
+            d.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
+            d.connect("response", lambda _d, r: Gtk.show_uri(self, res["url"], Gdk.CURRENT_TIME) if r == "open" else None)
+            d.present()
+        return False
+
+    def _auto_update_check(self):
+        app = self.get_application()
+        if app.userconfig.get("update_check") and time.time() - (app.userconfig.get("update_last") or 0) > 86400:
+            self.on_check_updates(silent=True)
+        return False
+
     def _fail(self, msg, daemon_down=False):
         if daemon_down:
             self._set_daemon(False, msg)
@@ -1217,6 +1365,39 @@ class MainWindow(Adw.ApplicationWindow):
         else:
             self.connect_to(self.sel_id or self.profiles[0]["id"])
 
+    def _style_server_popup(self, row):
+        """Make the server drop-down as wide as its row and centre it under the row (it points at the arrow by default)."""
+        pop = next((w for w in self._iter_widgets(row) if isinstance(w, Gtk.Popover)), None)
+        if pop is None:
+            return
+
+        def place(*_):
+            parent = pop.get_parent()
+            w, h = row.get_width(), row.get_height()
+            ok, pt = row.compute_point(parent, Graphene.Point().init(0, 0)) if parent else (False, None)
+            if ok and w:
+                rect = Gdk.Rectangle()
+                rect.x, rect.y, rect.width, rect.height = int(pt.x), int(pt.y), w, h
+                pop.set_pointing_to(rect)
+                pop.set_size_request(w, -1)
+        # the stock rows cut names at ~20 characters; give them the whole width
+        fac = Gtk.SignalListItemFactory()
+        fac.connect("setup", lambda _f, li: li.set_child(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END,
+                                                                   margin_top=8, margin_bottom=8)))
+        fac.connect("bind", lambda _f, li: li.get_child().set_label(li.get_item().get_string()))
+        row.set_list_factory(fac)
+        pop.set_has_arrow(False)
+        pop.set_position(Gtk.PositionType.BOTTOM)
+        pop.connect("map", place)
+
+    @staticmethod
+    def _iter_widgets(widget):
+        child = widget.get_first_child()
+        while child is not None:
+            yield child
+            yield from MainWindow._iter_widgets(child)
+            child = child.get_next_sibling()
+
     def _on_server_selected(self, row, _p):
         i = row.get_selected()
         if not self._quiet and 0 <= i < len(self.profiles):
@@ -1265,7 +1446,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.profiles = profiles
         self._quiet = True
         names = [p["name"] for p in profiles]
-        self.server_row.set_model(Gtk.StringList.new(names))
+        # edit the one list in place: replacing the model left removed servers in the open drop-down
+        self.server_names.splice(0, self.server_names.get_n_items(), names)
         ids = [p["id"] for p in profiles]
         if self.sel_id not in ids:
             self.sel_id = ids[0] if ids else None
@@ -1400,7 +1582,9 @@ class PreferencesWindow(Adw.PreferencesWindow):
         g.add(self._switch("connection.reconnect", "Reconnect automatically"))
         g.add(self._spin("connection.retry_max", "Retries before giving up", 0, 20))
         g.add(self._spin("connection.retry_delay", "Seconds between retries", 1, 120))
-        g.add(self._switch("connection.failover", "Fail over to next favourite"))
+        g.add(self._switch("connection.failover", "Fail over to another server",
+                           "When one keeps failing: its failover list, then its group, then favourites"))
+        g.add(self._switch("connection.failover_group", "Prefer servers in the same group"))
         g.add(self._spin("connection.timeout", "Connection timeout (s)", 10, 300))
         page.add(g)
         g = Adw.PreferencesGroup(title="OpenVPN")
@@ -1492,6 +1676,10 @@ class PreferencesWindow(Adw.PreferencesWindow):
         lat.set_selected(next((i for i, o in enumerate(opts) if o[0] == app.userconfig.get("auto_latency")), 0))
         lat.connect("notify::selected", lambda r, _p: app.userconfig.set("auto_latency", opts[r.get_selected()][0]))
         g.add(lat)
+        upd = Adw.SwitchRow(title="Check for new versions", subtitle="Once a day, contacts github.com")
+        upd.set_active(bool(app.userconfig.get("update_check")))
+        upd.connect("notify::active", lambda r, _p: app.userconfig.set("update_check", r.get_active()))
+        g.add(upd)
         page.add(g)
         self.add(page)
 

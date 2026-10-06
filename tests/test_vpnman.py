@@ -884,7 +884,8 @@ class PackagingTests(unittest.TestCase):
         import tarfile
         r = self._pkg("arch")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        path = [f for f in os.listdir(os.path.join(self.ROOT, "dist")) if f.endswith("-any.pkg.tar.xz")]
+        path = [f for f in os.listdir(os.path.join(self.ROOT, "dist")) if f.endswith("-any.pkg.tar.xz")
+                and f.startswith("vpnman-%s-" % __import__("vpnman").__version__)]
         self.assertEqual(len(path), 1)
         with tarfile.open(os.path.join(self.ROOT, "dist", path[0])) as tf:
             names = tf.getnames()
@@ -971,6 +972,76 @@ class OpenVpnDnsUpdownTests(unittest.TestCase):
         finally:
             OpenVPN.probe_cache.clear()
             OpenVPN.probe_cache.update(saved)
+
+
+class WindowsOnlyOptionTests(unittest.TestCase):
+    def test_windows_only_options_removed(self):
+        from vpnman.backends.openvpn import OpenVPN
+        text = "client\nregister-dns\nblock-outside-dns\n  dhcp-renew\n<ca>\nregister-dns\n</ca>\n"
+        out, notes = OpenVPN.sanitize_hooks(text, "/tmp")
+        lines = out.splitlines()
+        self.assertEqual(lines.count("register-dns"), 1)      # only the one inside <ca> survives
+        self.assertNotIn("block-outside-dns", lines)
+        self.assertNotIn("  dhcp-renew", lines)
+        self.assertEqual(len(notes), 3)
+
+
+class FailoverUpdateLintTests(unittest.TestCase):
+    def _mgr(self, profiles, group_pref=True):
+        import types
+        from vpnman.manager import Manager
+        m = types.SimpleNamespace(store=types.SimpleNamespace(list=lambda: profiles),
+                                  settings=types.SimpleNamespace(get=lambda k: group_pref))
+        return lambda cur, tried=(): Manager.failover_order(m, cur, tried)
+
+    def test_failover_order(self):
+        P = lambda i, **kw: dict({"id": i, "name": i, "group": "", "favorite": False, "blacklisted": False}, **kw)
+        a, b, c, d, e = P("a", group="us", failover=["d", "gone", "e"]), P("b", group="us"), P("c", favorite=True), \
+            P("d"), P("e", blacklisted=True)
+        order = self._mgr([a, b, c, d, e])
+        self.assertEqual([p["id"] for p in order(a)], ["d", "b", "c"])        # list, then group, then favourites
+        self.assertEqual([p["id"] for p in order(a, {"d"})], ["b", "c"])      # tried ones are skipped, blocked ones too
+        self.assertEqual([p["id"] for p in self._mgr([a, b, c, d, e], False)(a)], ["d", "c"])
+
+    def test_profile_store_accepts_failover_on_old_profiles(self):
+        with tempfile.TemporaryDirectory() as d:
+            from vpnman.profiles import ProfileStore, new_profile
+            st = ProfileStore(d)
+            p = new_profile("x", "openvpn")
+            p.pop("failover")
+            st.save(p)
+            st.update(p["id"], {"failover": ["abcdef012345"]})
+            self.assertEqual(st.find(p["id"])["failover"], ["abcdef012345"])
+            with self.assertRaises(Exception):
+                st.update(p["id"], {"bogus": 1})
+
+    def test_openvpn_lint_reports_what_will_be_ignored(self):
+        from vpnman.backends.openvpn import OpenVPN
+        text = "client\nregister-dns\nblock-outside-dns\nup /etc/openvpn/update-resolv-conf\n<ca>\nx\n</ca>\n"
+        w = OpenVPN().lint(text, "/tmp")
+        self.assertEqual(len(w), 3)
+        self.assertTrue(all(x.startswith("Will be ignored") for x in w))
+        self.assertEqual(OpenVPN().lint("client\n<ca>\nx\n</ca>\n", "/tmp"), [])
+        self.assertTrue(any("No CA" in x for x in OpenVPN().lint("client\nremote a 1\n", "/tmp")))
+
+    def test_update_check(self):
+        import io
+        import json as _json
+        from vpnman import updates
+        self.assertTrue(updates.is_newer("v1.0.7", "1.0.6"))
+        self.assertTrue(updates.is_newer("1.10.0", "1.9.9"))
+        self.assertFalse(updates.is_newer("1.0.6", "1.0.6"))
+        self.assertFalse(updates.is_newer("garbage", "1.0.6"))
+
+        def opener(body):
+            return lambda req, timeout=0: io.BytesIO(_json.dumps(body).encode())
+        r = updates.check(opener=opener({"tag_name": "v99.0.0", "html_url": "https://github.com/x/y", "body": "n"}))
+        self.assertTrue(r["newer"] and r["latest"] == "99.0.0")
+        r = updates.check(opener=opener({"tag_name": "v0.0.1", "html_url": "http://evil.example"}))
+        self.assertFalse(r["newer"])
+        self.assertEqual(r["url"], updates.PAGE)                              # only github.com links are passed on
+        with self.assertRaises(ValueError):
+            updates.check(opener=opener({"tag_name": "nightly"}))
 
 
 class StunnelTests(unittest.TestCase):

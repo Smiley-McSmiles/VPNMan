@@ -385,11 +385,24 @@ class Manager:
             if stop.wait(delay):
                 return
 
+    def failover_order(self, current, tried=()):
+        """Servers to try after `current` fails: its own failover list (in order), then its group, then favourites."""
+        profiles = self.store.list()
+        by_id = {p["id"]: p for p in profiles}
+        order = [by_id[i] for i in current.get("failover") or [] if i in by_id]
+        if self.settings.get("connection.failover_group") and current.get("group"):
+            order += [p for p in profiles if p.get("group") == current["group"]]
+        order += [p for p in profiles if p.get("favorite")]
+        seen, out = set(tried) | {current["id"]}, []
+        for p in order:
+            if p["id"] not in seen and not p.get("blacklisted"):
+                seen.add(p["id"])
+                out.append(p)
+        return out
+
     def _next_candidate(self, current, tried):
-        for p in self.store.list():
-            if p["id"] not in tried and p.get("favorite") and not p.get("blacklisted"):
-                return p
-        return None
+        order = self.failover_order(current, tried)
+        return order[0] if order else None
 
     def _ifname_for(self, backend, profile):
         """Standard interface names: tun0, tun1, ... (tapN for OpenVPN tap, wgN for WireGuard on BSD).
@@ -1069,7 +1082,10 @@ class Manager:
             self._unique_name(p)
             self.store.save(p, allfiles)
         self.log.add("info", "Imported profile %s (%s)" % (p["name"], backend.label))
-        return public_view(p)
+        warnings = backend.lint(text, self.store.dir_of(p))
+        for w in warnings:
+            self.log.add("warn", "%s: %s" % (p["name"], w))
+        return dict(public_view(p), warnings=warnings)
 
     def add_profile(self, name, protocol, fields=None, options=None, files=None):
         from .profiles import new_profile

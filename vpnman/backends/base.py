@@ -57,6 +57,10 @@ class Backend:
         return plat.which(name or self.binaries[0]) or (name or self.binaries[0])
 
     # ---- import
+    def lint(self, text, profile_dir=""):
+        """Warnings about a config that will not work as written here (shown after an import)."""
+        return []
+
     @classmethod
     def sniff(cls, filename, text):
         """Return a confidence 0..100 that this file belongs to the protocol."""

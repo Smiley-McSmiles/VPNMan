@@ -14,7 +14,7 @@ sys.path.insert(0, ROOT)
 from vpnman import cli  # noqa: E402
 
 # commands whose positional arguments are profile names (completed from `vpnman list --names`)
-PROFILE_CMDS = {"connect", "up", "remove", "rm", "edit", "fav", "unfav", "block", "unblock", "ping"}
+PROFILE_CMDS = {"connect", "up", "remove", "rm", "edit", "fav", "unfav", "block", "unblock", "ping", "failover"}
 
 
 def model():

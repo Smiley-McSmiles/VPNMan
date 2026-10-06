@@ -13,6 +13,12 @@ from .base import Backend, CredentialsRequired
 _HOOKS = ("up", "down", "route-up", "route-pre-down", "ipchange", "up-restart", "client-connect", "client-disconnect")
 _DNS_HELPERS = re.compile(r"update-resolv-conf|update-systemd-resolved|resolvconf|openresolv|systemd-resolve|"
                           r"resolved-up|dns-up|dns-down", re.I)
+# options that only exist in the Windows build; Linux/BSD openvpn aborts on them.
+# block-outside-dns is covered by the kill switch, which drops all DNS outside the tunnel.
+_WINDOWS_ONLY = {"register-dns", "dhcp-renew", "dhcp-release", "ip-win32", "tap-sleep", "show-net-up",
+                 "show-net", "show-adapters", "route-method", "pause-exit", "service", "win-sys",
+                 "allow-nonadmin", "cryptoapicert", "cryptoapicertstore", "dhcp-pre-release",
+                 "ip-remove-uses-dhcp", "tap-window", "block-outside-dns"}
 _HOOK_LINE = re.compile(r"^\s*(%s)\s+(.+?)\s*$" % "|".join(re.escape(h) for h in _HOOKS), re.I)
 _REMOTE = re.compile(r"^\s*remote\s+(\S+)(?:\s+(\d+))?(?:\s+(udp6?|tcp6?(?:-client)?))?", re.M | re.I)
 
@@ -95,6 +101,10 @@ class OpenVPN(Backend):
                 inline = m.group(1)
                 out.append(line)
                 continue
+            word = st.split(None, 1)[0].lower() if st and not st.startswith(("#", ";")) else ""
+            if word in _WINDOWS_ONLY:
+                notes.append("Ignoring '%s' from the config: it is a Windows-only option" % word)
+                continue
             hook = _HOOK_LINE.match(line) if not st.startswith(("#", ";")) else None
             if hook:
                 try:
@@ -113,6 +123,17 @@ class OpenVPN(Backend):
                     continue
             out.append(line)
         return "\n".join(out) + ("\n" if text.endswith("\n") else ""), notes
+
+    def lint(self, text, profile_dir=""):
+        """The same notes the connection logs ('Ignoring ...'), reported at import time instead."""
+        notes = self.sanitize_hooks(text, profile_dir or "/nonexistent")[1]
+        out = []
+        for n in notes:
+            out.append(n.replace("Ignoring ", "Will be ignored: ", 1).replace(" from the config", ""))
+        if re.search(r"^\s*client\b", text, re.M) and not re.search(
+                r"^\s*(<ca>|ca\s|peer-fingerprint\s|pkcs12\s|<pkcs12>)", text, re.M):
+            out.append("No CA certificate in the config; the server cannot be verified")
+        return out
 
     def prepare(self, ctx):
         """Write a runtime copy whose ``remote`` hosts are already resolved, so

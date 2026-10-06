@@ -1,4 +1,4 @@
-.TH VPNMAN 1 "2026" "vpnman 1.0.5" "User Commands"
+.TH VPNMAN 1 "2026" "vpnman 1.0.6" "User Commands"
 .SH NAME
 vpnman \- multi-protocol VPN manager with a kill switch
 .SH SYNOPSIS
@@ -32,6 +32,12 @@ The current network and trusted networks (automatic connect on untrusted ones).
 .TP
 leaktest
 Check the live connection: tunnel, public IP, kill switch, DNS and IPv6 leaks.
+.TP
+failover PROFILE [SERVER...] [--clear]
+Show or set the servers to try, in order, when PROFILE keeps failing.
+.TP
+update
+Check GitHub for a newer release (exit status 10 if there is one).
 .TP
 history
 Recent connections with duration and traffic.

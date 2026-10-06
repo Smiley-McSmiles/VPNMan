@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.5-blue.svg?style=flat-square" alt="Version 1.0.5"></a>
+  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.6-blue.svg?style=flat-square" alt="Version 1.0.6"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
   <a href="https://gtk.org"><img src="https://img.shields.io/badge/toolkit-GTK4%20%7C%20Libadwaita-red.svg?style=flat-square" alt="GTK4 Libadwaita"></a>
@@ -103,6 +103,9 @@ session inside is still authenticated); a warning is logged.
 | Network change handling: the app bypass and bypass routes follow a new gateway (Wi-Fi ⇄ Ethernet) | ✔ |
 | Server groups (folders become groups on import), sort by name / favourites / latency, optional automatic latency test | ✔ |
 | Connection history and a live traffic graph | ✔ |
+| **Failover lists**: per server, the servers to try in order when it keeps failing, then its group, then favourites (`vpnman failover`) | ✔ |
+| Import notes: options in a config that do not work here (Windows-only options, missing `up`/`down` scripts) are listed when you import it | ✔ |
+| Update check: *Check for Updates…* in the menu, `vpnman update`, or once a day if you switch it on in Preferences | ✔ |
 | Backup and restore of all profiles (with credentials) and settings | ✔ |
 | Shell completions for bash, zsh and fish (profile names included) | ✔ |
 | **Schedule**: connect (and optionally disconnect) at set times on chosen days, overnight windows, per-entry server; runs in the daemon | ✔ |
