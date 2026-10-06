@@ -124,6 +124,17 @@ class OpenVPN(Backend):
             out.append(line)
         return "\n".join(out) + ("\n" if text.endswith("\n") else ""), notes
 
+    def lint(self, text, profile_dir=""):
+        """The same notes the connection logs ('Ignoring ...'), reported at import time instead."""
+        notes = self.sanitize_hooks(text, profile_dir or "/nonexistent")[1]
+        out = []
+        for n in notes:
+            out.append(n.replace("Ignoring ", "Will be ignored: ", 1).replace(" from the config", ""))
+        if re.search(r"^\s*client\b", text, re.M) and not re.search(
+                r"^\s*(<ca>|ca\s|peer-fingerprint\s|pkcs12\s|<pkcs12>)", text, re.M):
+            out.append("No CA certificate in the config; the server cannot be verified")
+        return out
+
     def prepare(self, ctx):
         """Write a runtime copy whose ``remote`` hosts are already resolved, so
         OpenVPN never needs DNS while the kill switch is up."""

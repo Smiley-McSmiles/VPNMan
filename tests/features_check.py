@@ -1,6 +1,7 @@
 """Run under xvfb: the new dialogs and pages build and behave - credentials prompt, connection test, traffic graph,
 history, bypass addresses and mode, networks preferences, server groups and sorting."""
-import os, sys
+import os, sys, tempfile
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import cairo
 import gi
@@ -132,6 +133,26 @@ class App(A.Application):
         assert rows[2].get_header() is None
         w._header(rows[0], None)
         assert rows[0].get_header() is None                                   # no heading for ungrouped servers
+        # ---- failover chooser and the edit dialog
+        p1 = dict(prof(1), failover=["%012d" % 3])
+        ed = A.ProfileDialog(w, "edit", [], profile=p1)
+        assert "srv3" in ed.fo_row.get_subtitle(), ed.fo_row.get_subtitle()
+        got = []
+        fd = A.FailoverDialog(ed, [prof(2), prof(3), prof(4)], ["%012d" % 3], got.append)
+        assert [p["id"] for p in fd.order][0] == "%012d" % 3                   # chosen ones first, in order
+        fd.checks["%012d" % 4].set_active(True)
+        fd._move(0, 1)                                                          # srv3 down: srv2, srv3, srv4
+        fd._save()
+        assert got == [["%012d" % 3, "%012d" % 4]], got
+        ed.failover = got[0]
+        ed.name.set_text("srv1")
+        ed._submit()
+        ch = [kw for m, kw in CALLS if m == "profiles.update" and "failover" in kw.get("changes", {})]
+        assert ch and ch[-1]["changes"]["failover"] == got[0], ch
+        # ---- update result dialog / import notes build without errors
+        w.show_warnings(["a: Will be ignored: 'register-dns'"])
+        w._update_result({"current": "1.0.6", "latest": "9.9.9", "newer": True, "url": "https://github.com/x", "notes": "n"}, False)
+        w._update_result({"error": "offline"}, True)
         print("FEATURES-OK")
         self.quit()
         return False

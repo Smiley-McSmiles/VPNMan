@@ -197,6 +197,8 @@ class Cli:
                 if a.stunnel_ca and a.stunnel:
                     self.upload_ca(p["id"], a.stunnel_ca)
                 print("%s %s  (%s)" % (green("imported"), p["name"], p["protocol"]))
+                for w in p.get("warnings", []):
+                    print("  %s %s" % (yellow("note:"), w))
                 ok += 1
             except (RpcError, OSError) as e:
                 print("%s %s: %s" % (red("skipped"), path, e), file=sys.stderr)
@@ -512,6 +514,43 @@ class Cli:
             print("%s  %-28s %8s  down %-10s up %-10s %s" % (when, r["profile"][:28], "%d:%02d:%02d" % (d // 3600, d % 3600 // 60, d % 60),
                                                            human_bytes(r["rx"]), human_bytes(r["tx"]), dim(r["reason"])))
         return 0
+
+    def cmd_failover(self, a):
+        """vpnman failover PROFILE [SERVER ...] [--clear]: which servers to try, in order, when PROFILE keeps failing."""
+        p = self.call("profiles.get", ident=a.profile)
+        profiles = {x["id"]: x for x in self.call("profiles.list")}
+        if a.clear:
+            self.call("profiles.update", ident=p["id"], changes={"failover": []})
+            print("Failover list of %s cleared." % p["name"])
+            return 0
+        if a.servers:
+            ids = []
+            for name in a.servers:
+                t = self.call("profiles.get", ident=name)
+                if t["id"] == p["id"]:
+                    raise RpcError("a server cannot fail over to itself")
+                if t["id"] not in ids:
+                    ids.append(t["id"])
+            self.call("profiles.update", ident=p["id"], changes={"failover": ids})
+            p["failover"] = ids
+        chain = [profiles[i]["name"] for i in p.get("failover") or [] if i in profiles]
+        print("%s -> %s" % (p["name"], " -> ".join(chain) if chain else dim("(its group, then your favourites)")))
+        return 0
+
+    def cmd_update(self, a):
+        from . import updates
+        try:
+            res = updates.check()
+        except (OSError, ValueError) as e:
+            print(red("error: ") + "could not reach GitHub: %s" % e, file=sys.stderr)
+            return 1
+        if a.json:
+            print(json.dumps(res, indent=2))
+        elif res["newer"]:
+            print("%s VPNMan %s is available (you have %s): %s" % (green("update:"), res["latest"], res["current"], res["url"]))
+        else:
+            print("VPNMan %s is the latest version." % res["current"])
+        return 0 if not res["newer"] else 10
 
     def cmd_networks(self, a):
         act = a.action or "show"
@@ -944,6 +983,11 @@ def build_parser():
     s = add("history", "recent connections: when, how long, how much traffic")
     s.add_argument("-n", "--lines", type=int, default=20); s.add_argument("--json", action="store_true")
     s.add_argument("--clear", action="store_true")
+    s = add("failover", "servers to try, in order, when a profile keeps failing")
+    s.add_argument("profile"); s.add_argument("servers", nargs="*")
+    s.add_argument("--clear", action="store_true", help="remove the list")
+    s = add("update", "check GitHub for a newer VPNMan release (exit 10 if there is one)")
+    s.add_argument("--json", action="store_true")
     s = add("networks", "show the current network; trust/untrust it (auto-connect on untrusted networks)")
     s.add_argument("action", nargs="?", choices=["show", "trust", "untrust"]); s.add_argument("name", nargs="?")
     s = add("routes", "addresses, networks or domains that skip the VPN: list|add|remove")
@@ -987,6 +1031,8 @@ def main(argv=None):
             return cli.cmd_status(a)
         if cmd == "shell":
             return interactive(cli)
+        if cmd == "update":
+            return cli.cmd_update(a)
         if cmd == "protocols" and not cli.client.alive():
             return cli.cmd_protocols(a)
         return getattr(cli, "cmd_" + cmd)(a)

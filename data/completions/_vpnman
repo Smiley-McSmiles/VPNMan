@@ -24,6 +24,7 @@ _vpnman() {
         'doctor:check the system (icons, daemon, protocols)'
         'down:disconnect'
         'edit:change profile fields (name, username, password, server, port, dns, notes, group, stunnel=HOST -PORT|off, stunnel_sni, stunnel_ca=FILE, stunnel_verify)'
+        'failover:servers to try, in order, when a profile keeps failing'
         'fav:mark favourite'
         'get:show settings'
         'gui:open the GTK4/libadwaita app'
@@ -50,6 +51,7 @@ _vpnman() {
         'unblock:remove from blacklist'
         'unfav:unmark favourite'
         'up:connect to a profile'
+        'update:check GitHub for a newer VPNMan release (exit 10 if there is one)'
     )
     if (( CURRENT == 2 )); then
         _describe 'command' commands
@@ -70,6 +72,7 @@ _vpnman() {
         doctor) _arguments '--fix[link launcher/icons into /usr/share and rebuild icon caches (root)]' ;;
         down) _arguments '*:: :' ;;
         edit) _arguments '*:profile:_vpnman_profiles' ;;
+        failover) _arguments '--clear[remove the list]' '*:profile:_vpnman_profiles' ;;
         fav) _arguments '*:profile:_vpnman_profiles' ;;
         get) _arguments '*:: :' ;;
         gui) _arguments '--background[start minimised to the system tray]' ;;
@@ -96,6 +99,7 @@ _vpnman() {
         unblock) _arguments '*:profile:_vpnman_profiles' ;;
         unfav) _arguments '*:profile:_vpnman_profiles' ;;
         up) _arguments '--fastest[]' '--last[]' '--no-wait[]' '--timeout[]' '*:profile:_vpnman_profiles' ;;
+        update) _arguments '--json[]' ;;
     esac
 }
 

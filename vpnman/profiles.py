@@ -44,6 +44,7 @@ def new_profile(name, protocol, **kw):
         "favorite": False,
         "blacklisted": False,
         "group": "",
+        "failover": [],            # ids of the servers to try, in order, when this one keeps failing
         "notes": "",
         "dns": [],
         "options": {},
@@ -131,7 +132,7 @@ class ProfileStore:
         for k, v in changes.items():
             if k in ("id", "created"):
                 continue
-            if k not in p:
+            if k not in p and k != "failover":      # profiles saved before the field existed
                 raise ProfileError("unknown field: %s" % k)
             p[k] = v
         return self.save(p)

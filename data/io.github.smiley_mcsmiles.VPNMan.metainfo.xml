@@ -21,6 +21,9 @@
       <description>
         <ul>
           <li>Windows-only OpenVPN options (register-dns, block-outside-dns, ...) are ignored instead of stopping OpenVPN</li>
+          <li>Failover lists: choose the servers a profile falls back to, in order (then its group, then favourites)</li>
+          <li>Importing a config lists the options that will be ignored on this system</li>
+          <li>Check for Updates in the menu (and optionally once a day)</li>
           <li>Servers tab: an "Add Profile" button, for icon themes that lack the header "+" icon</li>
           <li>Schedule, app and address bypass, trusted networks, connection test, history and traffic graph, backup and restore, shell completions</li>
           <li>A rejected login asks for the credentials and reconnects instead of retrying</li>

@@ -29,7 +29,8 @@ DEFAULTS = {
         "reconnect": True,
         "retry_max": 3,
         "retry_delay": 5,
-        "failover": True,          # try the next favourite when a server keeps failing
+        "failover": True,          # try another server when one keeps failing
+        "failover_group": True,    # ... preferring the servers in the same group
         "timeout": 60,
         "openvpn_args": [],        # extra raw arguments appended to OpenVPN
     },
