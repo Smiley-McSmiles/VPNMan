@@ -13,11 +13,12 @@ from .base import Backend, CredentialsRequired
 _HOOKS = ("up", "down", "route-up", "route-pre-down", "ipchange", "up-restart", "client-connect", "client-disconnect")
 _DNS_HELPERS = re.compile(r"update-resolv-conf|update-systemd-resolved|resolvconf|openresolv|systemd-resolve|"
                           r"resolved-up|dns-up|dns-down", re.I)
-# options that only exist in the Windows build; Linux/BSD openvpn aborts on them
+# options that only exist in the Windows build; Linux/BSD openvpn aborts on them.
+# block-outside-dns is covered by the kill switch, which drops all DNS outside the tunnel.
 _WINDOWS_ONLY = {"register-dns", "dhcp-renew", "dhcp-release", "ip-win32", "tap-sleep", "show-net-up",
                  "show-net", "show-adapters", "route-method", "pause-exit", "service", "win-sys",
                  "allow-nonadmin", "cryptoapicert", "cryptoapicertstore", "dhcp-pre-release",
-                 "ip-remove-uses-dhcp", "tap-window"}
+                 "ip-remove-uses-dhcp", "tap-window", "block-outside-dns"}
 _HOOK_LINE = re.compile(r"^\s*(%s)\s+(.+?)\s*$" % "|".join(re.escape(h) for h in _HOOKS), re.I)
 _REMOTE = re.compile(r"^\s*remote\s+(\S+)(?:\s+(\d+))?(?:\s+(udp6?|tcp6?(?:-client)?))?", re.M | re.I)
 

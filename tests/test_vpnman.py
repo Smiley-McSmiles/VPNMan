@@ -980,9 +980,9 @@ class WindowsOnlyOptionTests(unittest.TestCase):
         out, notes = OpenVPN.sanitize_hooks(text, "/tmp")
         lines = out.splitlines()
         self.assertEqual(lines.count("register-dns"), 1)      # only the one inside <ca> survives
-        self.assertIn("block-outside-dns", lines)
+        self.assertNotIn("block-outside-dns", lines)
         self.assertNotIn("  dhcp-renew", lines)
-        self.assertEqual(len(notes), 2)
+        self.assertEqual(len(notes), 3)
 
 
 class StunnelTests(unittest.TestCase):
