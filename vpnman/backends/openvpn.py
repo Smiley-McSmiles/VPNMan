@@ -13,6 +13,11 @@ from .base import Backend, CredentialsRequired
 _HOOKS = ("up", "down", "route-up", "route-pre-down", "ipchange", "up-restart", "client-connect", "client-disconnect")
 _DNS_HELPERS = re.compile(r"update-resolv-conf|update-systemd-resolved|resolvconf|openresolv|systemd-resolve|"
                           r"resolved-up|dns-up|dns-down", re.I)
+# options that only exist in the Windows build; Linux/BSD openvpn aborts on them
+_WINDOWS_ONLY = {"register-dns", "dhcp-renew", "dhcp-release", "ip-win32", "tap-sleep", "show-net-up",
+                 "show-net", "show-adapters", "route-method", "pause-exit", "service", "win-sys",
+                 "allow-nonadmin", "cryptoapicert", "cryptoapicertstore", "dhcp-pre-release",
+                 "ip-remove-uses-dhcp", "tap-window"}
 _HOOK_LINE = re.compile(r"^\s*(%s)\s+(.+?)\s*$" % "|".join(re.escape(h) for h in _HOOKS), re.I)
 _REMOTE = re.compile(r"^\s*remote\s+(\S+)(?:\s+(\d+))?(?:\s+(udp6?|tcp6?(?:-client)?))?", re.M | re.I)
 
@@ -94,6 +99,10 @@ class OpenVPN(Backend):
             if m:
                 inline = m.group(1)
                 out.append(line)
+                continue
+            word = st.split(None, 1)[0].lower() if st and not st.startswith(("#", ";")) else ""
+            if word in _WINDOWS_ONLY:
+                notes.append("Ignoring '%s' from the config: it is a Windows-only option" % word)
                 continue
             hook = _HOOK_LINE.match(line) if not st.startswith(("#", ";")) else None
             if hook:

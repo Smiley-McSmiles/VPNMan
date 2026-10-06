@@ -973,6 +973,18 @@ class OpenVpnDnsUpdownTests(unittest.TestCase):
             OpenVPN.probe_cache.update(saved)
 
 
+class WindowsOnlyOptionTests(unittest.TestCase):
+    def test_windows_only_options_removed(self):
+        from vpnman.backends.openvpn import OpenVPN
+        text = "client\nregister-dns\nblock-outside-dns\n  dhcp-renew\n<ca>\nregister-dns\n</ca>\n"
+        out, notes = OpenVPN.sanitize_hooks(text, "/tmp")
+        lines = out.splitlines()
+        self.assertEqual(lines.count("register-dns"), 1)      # only the one inside <ca> survives
+        self.assertIn("block-outside-dns", lines)
+        self.assertNotIn("  dhcp-renew", lines)
+        self.assertEqual(len(notes), 2)
+
+
 class StunnelTests(unittest.TestCase):
     def prof(self, **st):
         return profiles.new_profile("s", "openvpn", options={"stunnel": dict({"enabled": True, "host": "h.example.com"}, **st)})
