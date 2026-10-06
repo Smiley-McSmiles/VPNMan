@@ -794,6 +794,13 @@ class MainWindow(Adw.ApplicationWindow):
         self.ping_btn = Gtk.Button(label="Test Latency")
         self.ping_btn.connect("clicked", self.on_ping)
         top.append(self.ping_btn)
+        # a text button as well as the header "+": some icon themes (e.g. on Void) lack list-add-symbolic
+        add_menu = Gio.Menu()
+        add_menu.append("Import from File…", "win.import")
+        add_menu.append("Add Manually…", "win.add")
+        self.add_btn = Gtk.MenuButton(label="Add Profile", menu_model=add_menu, tooltip_text="Add a profile")
+        self.add_btn.add_css_class("suggested-action")
+        top.append(self.add_btn)
         # MULTIPLE gives Ctrl+click (toggle one), Shift+click (range) and Ctrl+A for free
         self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.MULTIPLE, activate_on_single_click=False)
         self.listbox.add_css_class("boxed-list")
@@ -819,7 +826,13 @@ class MainWindow(Adw.ApplicationWindow):
         b.add_css_class("pill")
         b.add_css_class("suggested-action")
         b.connect("clicked", self.on_import)
-        self.empty.set_child(b)
+        m = Gtk.Button(label="Add Manually…", halign=Gtk.Align.CENTER)
+        m.add_css_class("pill")
+        m.connect("clicked", lambda *_: self.activate_action("win.add", None))
+        eb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        eb.append(b)
+        eb.append(m)
+        self.empty.set_child(eb)
         # selection bar: appears as soon as something is selected
         self.sel_label = Gtk.Label(label="", hexpand=True, xalign=0, margin_start=6)
         sel_all = Gtk.Button(label="Select All")

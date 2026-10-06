@@ -884,7 +884,8 @@ class PackagingTests(unittest.TestCase):
         import tarfile
         r = self._pkg("arch")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        path = [f for f in os.listdir(os.path.join(self.ROOT, "dist")) if f.endswith("-any.pkg.tar.xz")]
+        path = [f for f in os.listdir(os.path.join(self.ROOT, "dist")) if f.endswith("-any.pkg.tar.xz")
+                and f.startswith("vpnman-%s-" % __import__("vpnman").__version__)]
         self.assertEqual(len(path), 1)
         with tarfile.open(os.path.join(self.ROOT, "dist", path[0])) as tf:
             names = tf.getnames()
