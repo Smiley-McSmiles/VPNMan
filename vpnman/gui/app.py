@@ -382,6 +382,95 @@ class ProfileDialog(Adw.Window):
                 apply_changes()
 
 
+class CredentialsPrompt(Adw.MessageDialog):
+    """Ask for a username/password right when a login fails, then retry - no trip to the profile editor."""
+
+    def __init__(self, parent, profile, reason, on_save):
+        super().__init__(transient_for=parent, modal=True, heading="Login failed",
+                         body=GLib.markup_escape_text("%s\n\nEnter the VPN username and password for %s."
+                                                      % (reason, profile["name"])))
+        self.profile, self.on_save = profile, on_save
+        group = Adw.PreferencesGroup()
+        self.user = Adw.EntryRow(title="Username")
+        self.user.set_text(profile.get("username") or "")
+        self.password = Adw.PasswordEntryRow(title="Password")
+        group.add(self.user)
+        group.add(self.password)
+        self.set_extra_child(group)
+        self.add_response("cancel", "Cancel")
+        self.add_response("retry", "Save and Reconnect")
+        self.set_response_appearance("retry", Adw.ResponseAppearance.SUGGESTED)
+        self.set_default_response("retry")
+        self.connect("response", self._response)
+
+    def _response(self, _d, resp):
+        if resp == "retry" and self.user.get_text() and self.password.get_text():
+            self.on_save(self.profile["id"], self.user.get_text(), self.password.get_text())
+
+
+class LeakTestDialog(Adw.Window):
+    """Runs the daemon's self-test and lists every check with a pass / warning / fail mark."""
+    ICONS = {"ok": ("emblem-ok-symbolic", "success"), "warn": ("dialog-warning-symbolic", "warning"),
+             "fail": ("dialog-error-symbolic", "error"), "info": ("dialog-information-symbolic", "dim-label")}
+
+    def __init__(self, parent):
+        super().__init__(transient_for=parent, modal=True, default_width=520, default_height=480, title="Connection Test")
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        self.again = Gtk.Button(label="Run Again")
+        self.again.connect("clicked", lambda *_: self.run())
+        header.pack_start(self.again)
+        view.add_top_bar(header)
+        self.page = Adw.PreferencesPage()
+        self.group = Adw.PreferencesGroup(title="Connection Test",
+                                          description="Checks that your traffic really goes through the VPN and that "
+                                                      "the kill switch holds.")
+        self.page.add(self.group)
+        view.set_content(self.page)
+        self.set_content(view)
+        self.rows = []
+        self.run()
+
+    def run(self):
+        for r in self.rows:
+            self.group.remove(r)
+        self.rows = []
+        self.again.set_sensitive(False)
+        row = Adw.ActionRow(title="Running checks…", subtitle="This takes a few seconds")
+        row.add_prefix(Gtk.Spinner(spinning=True))
+        self.group.add(row)
+        self.rows.append(row)
+        rpc("leaktest", self._show, self._failed)
+
+    def _clear(self):
+        for r in self.rows:
+            self.group.remove(r)
+        self.rows = []
+        self.again.set_sensitive(True)
+
+    def _failed(self, msg, *_):
+        self._clear()
+        row = Adw.ActionRow(title="Test failed", subtitle=GLib.markup_escape_text(msg))
+        self.group.add(row)
+        self.rows.append(row)
+
+    def _show(self, res):
+        self._clear()
+        for c in res["checks"]:
+            icon, css = self.ICONS.get(c["status"], self.ICONS["info"])
+            row = Adw.ActionRow(title=GLib.markup_escape_text(c["name"]), subtitle=GLib.markup_escape_text(c["detail"]),
+                                subtitle_lines=0)
+            img = Gtk.Image.new_from_icon_name(icon)
+            img.add_css_class(css)
+            row.add_prefix(img)
+            self.group.add(row)
+            self.rows.append(row)
+        verdict = {"ok": "All checks passed", "warn": "Passed with warnings", "fail": "Problems found"}[res["summary"]]
+        row = Adw.ActionRow(title="<b>%s</b>" % verdict)
+        self.group.add(row)
+        self.rows.append(row)
+
+
 # ------------------------------------------------------------------- window
 
 class MainWindow(Adw.ApplicationWindow):
@@ -566,6 +655,12 @@ class MainWindow(Adw.ApplicationWindow):
         self.lock_switch.add_prefix(Gtk.Image.new_from_icon_name("changes-prevent-symbolic"))
         self.lock_switch.connect("notify::active", self._on_lock_toggled)
         quick.add(self.lock_switch)
+        test = Adw.ActionRow(title="Test connection", subtitle="Check for IP, DNS and IPv6 leaks and that the kill switch holds",
+                             activatable=True)
+        test.add_prefix(Gtk.Image.new_from_icon_name("emblem-system-symbolic"))
+        test.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+        test.connect("activated", lambda *_: LeakTestDialog(self).present())
+        quick.add(test)
         groups.append(quick)
         scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
         scroll.set_child(page)
@@ -1116,10 +1211,22 @@ class MainWindow(Adw.ApplicationWindow):
             r["down"].set_subtitle("%s  (%s/s)" % (human(st["rx"]), human(st["rx_rate"])))
             r["up"].set_subtitle("%s  (%s/s)" % (human(st["tx"]), human(st["tx_rate"])))
         self._update_tray(st)
+        if state == "error" and st.get("error_kind") == "auth" and self._last_state != "error" and self.is_visible():
+            self._ask_credentials(st)
         if state != self._last_state:
             if self._last_state is not None:
                 self._notify(state, st)
             self._last_state = state
+
+    def _ask_credentials(self, st):
+        prof = next((p for p in self.profiles if p["id"] == st.get("profile_id")), None)
+        if not prof:
+            return
+
+        def save(pid, user, pw):
+            rpc("profiles.update", lambda *_: rpc("connect", lambda *_: self.refresh(), self._fail, ident=pid),
+                self._fail, ident=pid, changes={"username": user, "password": pw})
+        CredentialsPrompt(self, prof, st.get("message") or "The server rejected the login.", save).present()
 
     def _notify(self, state, st):
         if not self.settings.get("ui", {}).get("notifications", True):

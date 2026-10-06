@@ -77,6 +77,10 @@ class Cli:
 
     def cmd_list(self, a):
         ps = self.call("profiles.list")
+        if getattr(a, "names", False):
+            for p in ps:
+                print(p["name"])
+            return 0
         lat = self.call("latency") if a.latency else {}
         if a.json:
             print(json.dumps(ps, indent=2))
@@ -99,7 +103,24 @@ class Cli:
         if a.no_wait:
             print("Connecting...")
             return 0
-        return self.wait_connected(a.timeout, mark)
+        rc = self.wait_connected(a.timeout, mark)
+        for _ in range(3):
+            st = self.call("status")
+            if rc == 0 or st.get("state") != "error" or st.get("error_kind") != "auth" or not sys.stdin.isatty():
+                break
+            # wrong or missing credentials: ask right here instead of sending the user off to edit the profile
+            pid = st["profile_id"]
+            cur = self.call("profiles.get", ident=pid)
+            print(yellow("The server rejected the login for %s." % st["profile"]))
+            user = ask("Username", cur.get("username") or None)
+            pw = getpass.getpass("Password: ")
+            if not user or not pw:
+                break
+            self.call("profiles.update", ident=pid, changes={"username": user, "password": pw})
+            mark = self.call("logs", since=0, limit=1)["last"]
+            self.call("connect", ident=pid)
+            rc = self.wait_connected(a.timeout, mark)
+        return rc
 
     def wait_connected(self, timeout=90, seen=None):
         end = time.time() + timeout
@@ -425,6 +446,18 @@ class Cli:
         print("Saved.")
         return 0
 
+    def cmd_leaktest(self, a):
+        res = self.call("leaktest")
+        if a.json:
+            print(json.dumps(res, indent=2))
+        else:
+            mark = {"ok": green("✔"), "warn": yellow("!"), "fail": red("✘"), "info": dim("·")}
+            for c in res["checks"]:
+                print("%s %-16s %s" % (mark.get(c["status"], "?"), c["name"], c["detail"]))
+            print("\n" + {"ok": green("All checks passed."), "warn": yellow("Passed with warnings."),
+                          "fail": red("Problems found - see the lines marked ✘.")}[res["summary"]])
+        return 1 if res["summary"] == "fail" else 0
+
     def cmd_cleanup(self, a):
         from . import netlock, split
         if self.client.alive() and not a.force:
@@ -749,6 +782,7 @@ def build_parser():
 
     s = add("status", "show connection status"); s.add_argument("--json", action="store_true")
     s = add("list", "list profiles", aliases=["ls"]); s.add_argument("--latency", "-l", action="store_true")
+    s.add_argument("--names", action="store_true", help="one profile name per line (used by shell completion)")
     s.add_argument("--json", action="store_true")
     s = add("connect", "connect to a profile", aliases=["up"])
     s.add_argument("profile", nargs="?"); s.add_argument("--fastest", action="store_true")
@@ -785,6 +819,8 @@ def build_parser():
     s.add_argument("--name"); s.add_argument("--days", help="all | weekdays | weekends | mon,wed | mon-fri")
     s.add_argument("--start", metavar="HH:MM"); s.add_argument("--end", metavar="HH:MM", help="disconnect again at this time")
     s.add_argument("--profile", help="profile name/id, 'fastest' or 'last' (default: last used)")
+    s = add("leaktest", "check the live connection: tunnel, public IP, kill switch, DNS and IPv6 leaks")
+    s.add_argument("--json", action="store_true")
     s = add("cleanup", "remove firewall rules, routes and cgroups VPNMan left behind (root)")
     s.add_argument("--force", action="store_true", help="even if the service is running")
     s = add("get", "show settings"); s.add_argument("key", nargs="?")

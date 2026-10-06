@@ -100,6 +100,7 @@ METHODS = {
                                         m.settings.get())[2],
     "split.status": lambda m: m.split_status(),
     "split.set": lambda m, apps=None, enabled=None: m.split_set(apps, enabled),
+    "leaktest": lambda m: m.leak_test(),
     "schedule.status": lambda m: m.schedule_status(),
     "schedule.set": lambda m, entries=None, enabled=None: m.schedule_set(entries, enabled),
     "logs": lambda m, since=0, limit=1000: dict(zip(("entries", "last"), m.log.since(since, limit))),

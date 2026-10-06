@@ -575,6 +575,120 @@ class IfnameTests(unittest.TestCase):
         self.assertEqual(self.mgr._ifname_for(backends.get("wireguard"), self.make("wireguard")), "wg1")
 
 
+class LeakTestTests(unittest.TestCase):
+    def test_dns_decisions(self):
+        from vpnman import leaktest as lt
+        via = lambda m: (lambda a: m.get(a))                                    # noqa: E731
+        ok = lt.dns_check("nameserver 10.8.0.1\n", "tun0", via({"10.8.0.1": "tun0"}))
+        self.assertEqual(ok["status"], "ok")
+        leak = lt.dns_check("nameserver 192.168.1.1\nnameserver 10.8.0.1\n", "tun0",
+                            via({"192.168.1.1": "eth0", "10.8.0.1": "tun0"}))
+        self.assertEqual(leak["status"], "fail")
+        self.assertIn("192.168.1.1", leak["detail"])
+        stub = lt.dns_check("nameserver 127.0.0.53\n", "tun0", via({}), resolved_dns={"tun0": ["10.8.0.1"]})
+        self.assertEqual(stub["status"], "ok")
+        self.assertEqual(lt.dns_check("nameserver 127.0.0.53\n", "tun0", via({}), resolved_dns={})["status"], "warn")
+        self.assertEqual(lt.dns_check("nameserver 1.1.1.1\n", "tun0", via({}), forced=False)["status"], "info")
+
+    def test_ipv6_decisions(self):
+        from vpnman import leaktest as lt
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: None, lambda: False, False, False)["status"], "ok")
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: "tun0", lambda: False, False, False)["status"], "ok")
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: "eth0", lambda: True, False, False)["status"], "fail")
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: "eth0", lambda: True, True, True)["status"], "ok")
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: "eth0", lambda: False, False, False)["status"], "warn")
+
+    def test_kill_switch_decisions(self):
+        from vpnman import leaktest as lt
+        self.assertEqual(lt.killswitch_check(False, "eth0", lambda: True)["status"], "info")
+        self.assertEqual(lt.killswitch_check(True, "eth0", lambda: False)["status"], "ok")
+        self.assertEqual(lt.killswitch_check(True, "eth0", lambda: True)["status"], "fail")
+        self.assertEqual(lt.killswitch_check(True, None, lambda: True)["status"], "info")
+
+    def test_run_summary_and_rpc(self):
+        from vpnman import leaktest as lt
+        st = {"state": "disconnected", "iface": None, "netlock": {"engaged": False}}
+        res = lt.run(st, settings.Settings(TMP + "/lt.json"), True, resolv_path=TMP + "/none")
+        self.assertEqual(res["checks"][0]["status"], "warn")                     # not connected
+        self.assertIn(res["summary"], ("ok", "warn"))
+        self.assertIn("leaktest", daemon.METHODS)
+
+
+class PackagingTests(unittest.TestCase):
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def _pkg(self, *args):
+        import subprocess
+        return subprocess.run(["bash", os.path.join(self.ROOT, "package.sh")] + list(args), capture_output=True, text=True,
+                              timeout=300)
+
+    def test_arch_package_builds_on_any_distribution_without_pacman(self):
+        """Regression: makepkg aborted package.sh on Fedora ('failed to initialize alpm library')."""
+        import tarfile
+        r = self._pkg("arch")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        path = [f for f in os.listdir(os.path.join(self.ROOT, "dist")) if f.endswith("-any.pkg.tar.xz")]
+        self.assertEqual(len(path), 1)
+        with tarfile.open(os.path.join(self.ROOT, "dist", path[0])) as tf:
+            names = tf.getnames()
+            self.assertEqual(names[:2], [".PKGINFO", ".INSTALL"])
+            for want in ("usr/bin/vpnman", "usr/lib/systemd/system/vpnmand.service",
+                         "usr/share/bash-completion/completions/vpnman"):
+                self.assertIn(want, names)
+            self.assertTrue(all(m.uid == 0 and m.gid == 0 for m in tf.getmembers()))
+            info = tf.extractfile(".PKGINFO").read().decode()
+            self.assertIn("pkgver = %s-1" % __import__("vpnman").__version__, info)
+            self.assertIn("depend = python-gobject", info)
+            self.assertIn("pre_remove()", tf.extractfile(".INSTALL").read().decode())
+
+    def test_targets_that_need_foreign_tools_are_skipped_not_fatal(self):
+        r = self._pkg("alpine")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)             # 3 = skipped
+        self.assertTrue(os.path.isfile(os.path.join(self.ROOT, "dist", "recipes", "alpine", "APKBUILD")))
+        self.assertEqual(self._pkg("no-such-target").returncode, 2)
+
+    def test_void_template_has_no_duplicate_lines(self):
+        self._pkg("recipes")
+        text = open(os.path.join(self.ROOT, "dist", "recipes", "void", "template")).read()
+        self.assertEqual(text.count("pkgname="), 1)
+
+
+class CompletionTests(unittest.TestCase):
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def test_checked_in_completions_match_the_parser(self):
+        import subprocess
+        r = subprocess.run([sys.executable, os.path.join(self.ROOT, "tools", "gen_completions.py"), "--check"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_bash_completion_offers_commands_choices_and_profile_option_flags(self):
+        import subprocess
+        bash = shutil_which("bash")
+        if not bash:
+            self.skipTest("no bash")
+        script = os.path.join(self.ROOT, "data", "completions", "vpnman.bash")
+
+        def complete(*words):
+            cmd = 'source %s; COMP_WORDS=(%s); COMP_CWORD=%d; _vpnman; printf "%%s\\n" "${COMPREPLY[@]}"' % (
+                script, " ".join("'%s'" % w for w in words), len(words) - 1)
+            return subprocess.run([bash, "-c", cmd], capture_output=True, text=True).stdout.split()
+        self.assertIn("connect", complete("vpnman", "con"))
+        self.assertEqual(sorted(complete("vpnman", "lock", "")), ["off", "on", "status"])
+        self.assertIn("--stunnel-sni", complete("vpnman", "import", "--stunnel-s"))
+        self.assertEqual(sorted(complete("vpnman", "import", "--stunnel-verify", "")), ["ca", "none", "system"])
+
+    def test_installer_ships_the_completions(self):
+        import subprocess
+        d = tempfile.mkdtemp(dir=TMP)
+        r = subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", "/usr", "--init", "none", "--no-post"],
+                           env=dict(os.environ, DESTDIR=d), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for rel in ("usr/share/bash-completion/completions/vpnman", "usr/share/zsh/site-functions/_vpnman",
+                    "usr/share/fish/vendor_completions.d/vpnman.fish"):
+            self.assertTrue(os.path.isfile(os.path.join(d, rel)), rel)
+
+
 class OpenVpnDnsUpdownTests(unittest.TestCase):
     def test_builtin_dns_handling_is_disabled_only_when_openvpn_accepts_it(self):
         from vpnman import backends as B

@@ -19,8 +19,9 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, dns, netlock, paths, schedule, split, stunnel
+from . import __version__, backends, dns, leaktest, netlock, paths, schedule, split, stunnel
 from . import platform as plat
+from .backends.base import CredentialsRequired
 from .profiles import ProfileError, ProfileStore, public_view
 from .settings import Settings
 
@@ -30,7 +31,11 @@ class ConnectError(Exception):
 
 
 class FatalError(ConnectError):
-    """Configuration problem - retrying cannot help."""
+    """Configuration problem - retrying cannot help.  `kind` lets the UI react ("auth": ask for credentials)."""
+
+    def __init__(self, msg, kind=None):
+        super().__init__(msg)
+        self.kind = kind
 
 
 class LogBuffer:
@@ -115,7 +120,7 @@ class Manager:
     def _blank_status():
         return {"state": "disconnected", "profile_id": None, "profile": None, "protocol": None,
                 "iface": None, "public_ip": None, "since": None, "message": "", "attempt": 0,
-                "rx": 0, "tx": 0, "rx_rate": 0, "tx_rate": 0}
+                "rx": 0, "tx": 0, "rx_rate": 0, "tx_rate": 0, "error_kind": None}
 
     def _set(self, **kw):
         with self._mlock:
@@ -333,7 +338,7 @@ class Manager:
                 was_up = self._session(profile, stop)
             except FatalError as e:
                 self.log.add("error", str(e))
-                self._set(state="error", message=str(e))
+                self._set(state="error", message=str(e), error_kind=e.kind)
                 return
             except ConnectError as e:
                 reason = str(e)
@@ -452,6 +457,8 @@ class Manager:
                     self.log.add("info", note)
                 if not oneshot:
                     cmd = backend.connect_cmd(ctx)
+            except CredentialsRequired as e:
+                raise FatalError("%s: %s" % (profile["name"], e), "auth")
             except ValueError as e:
                 raise FatalError("%s: %s" % (profile["name"], e))
             started = time.time()
@@ -494,7 +501,7 @@ class Manager:
                         if ctx.state.get("fatal"):
                             # retrying with the same bad credentials only hammers the server (and can get the
                             # account locked), so stop and say what is wrong
-                            raise FatalError(ctx.state["fatal"])
+                            raise FatalError(ctx.state["fatal"], ctx.state.get("fatal_kind"))
                         raise ConnectError("%s exited with status %s" % (os.path.basename(cmd[0]), proc.returncode))
                     if time.time() - started > timeout:
                         raise ConnectError("timed out after %ds" % timeout)
@@ -906,6 +913,11 @@ class Manager:
         p = self.store.find(ident)
         self.store.save(p, {name: base64.b64decode(b64)})
         return public_view(p)
+
+    def leak_test(self):
+        """Self-test of the live connection (tunnel, public IP, kill switch, DNS, IPv6)."""
+        st = self.status()
+        return leaktest.run(st, self.settings, bool(self.settings.get("netlock.block_ipv6")))
 
     def remove_profiles(self, idents):
         """Delete several profiles; a live connection to one of them is dropped first.  Never stops half-way:

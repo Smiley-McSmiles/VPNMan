@@ -5,7 +5,7 @@ import shutil
 
 from .. import platform as plat
 from .. import stunnel
-from .base import Backend
+from .base import Backend, CredentialsRequired
 
 # Script hooks that Debian-style configs ship: they either do not exist on this distribution (update-resolv-conf is
 # a Debian/Ubuntu file) or fight with vpnman, which sets the DNS servers itself. A missing hook is fatal for OpenVPN
@@ -172,7 +172,7 @@ class OpenVPN(Backend):
         if p.get("username"):
             cmd += ["--auth-user-pass", ctx.write("auth", "%s\n%s\n" % (p["username"], p.get("password", "")))]
         elif re.search(r"^\s*auth-user-pass\s*$", text, re.M):
-            raise ValueError("this profile needs a username and password")
+            raise CredentialsRequired("this profile needs a username and password")
         if p.get("key_password"):
             cmd += ["--askpass", ctx.write("askpass", p["key_password"] + "\n")]
         cmd += [str(a) for a in ctx.settings.get("connection.openvpn_args")]
@@ -183,6 +183,7 @@ class OpenVPN(Backend):
         m = re.search(r"AUTH_FAILED(?:,(.*?))?'?$", line) if "AUTH_FAILED" in line else None
         if m:
             reason = (m.group(1) or "").strip(" '")
+            ctx.state["fatal_kind"] = "auth"
             ctx.state["fatal"] = ("Authentication failed - the server rejected the username or password%s. "
                                   "Edit the profile and re-enter them (some providers use a separate VPN username "
                                   "or password, not your website login)." % (" (%s)" % reason if reason else ""))
