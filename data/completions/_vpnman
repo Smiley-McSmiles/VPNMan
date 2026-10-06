@@ -14,7 +14,7 @@ _vpnman() {
         'add:create a profile without a config file'
         'autostart:connect the VPN automatically when the system starts'
         'block:blacklist'
-        'bypass:apps that skip the VPN (split tunnel) - list|add|remove|available|on|off'
+        'bypass:apps that skip the VPN (split tunnel) - list|add|remove|available|on|off|mode'
         'cleanup:remove firewall rules, routes and cgroups VPNMan left behind (root)'
         'connect:connect to a profile'
         'daemon:run the daemon in the foreground (root)'
@@ -27,20 +27,23 @@ _vpnman() {
         'get:show settings'
         'gui:open the GTK4/libadwaita app'
         'import:import config files or a directory of them'
+        'leaktest:check the live connection - tunnel, public IP, kill switch, DNS and IPv6 leaks'
         'list:list profiles'
         'lock:network lock (kill switch)'
         'logs:show daemon log'
         'ls:list profiles'
         'menu:interactive menu'
+        'networks:show the current network; trust/untrust it (auto-connect on untrusted networks)'
         'ping:measure latency to profiles'
         'protocols:list supported protocols and whether their tools are installed'
         'remove:delete profiles'
         'rm:delete profiles'
+        'routes:addresses, networks or domains that skip the VPN - list|add|remove'
         'schedule:connect the VPN at set times - list|add|remove|enable|disable|on|off'
         'service:install/control the background service'
         'set:change a setting'
         'shell:interactive menu'
-        'split:apps that skip the VPN (split tunnel) - list|add|remove|available|on|off'
+        'split:apps that skip the VPN (split tunnel) - list|add|remove|available|on|off|mode'
         'status:show connection status'
         'unblock:remove from blacklist'
         'unfav:unmark favourite'
@@ -68,15 +71,18 @@ _vpnman() {
         get) _arguments '*:: :' ;;
         gui) _arguments '--background[start minimised to the system tray]' ;;
         import) _arguments '--name[]' '--protocol[]:value:(openvpn wireguard amneziawg openconnect openfortivpn ikev2 sstp pptp vpnc tailscale netbird zerotier nebula networkmanager custom)' '--user[]' '--password[]' '--ask-password[]' '--stunnel[carry OpenVPN over TLS via stunnel (default port 443)]' '--stunnel-sni[]' '--stunnel-ca[]' '--stunnel-verify[]:value:(none system ca)' ;;
+        leaktest) _arguments '--json[]' ;;
         list) _arguments '(--latency -l)'{--latency,-l}'[]' '--names[one profile name per line (used by shell completion)]' '--json[]' ;;
         lock) _arguments '1:action:(on off status)' ;;
         logs) _arguments '(-f --follow)'{-f,--follow}'[]' '(-n --lines)'{-n,--lines}'[]' ;;
         ls) _arguments '(--latency -l)'{--latency,-l}'[]' '--names[one profile name per line (used by shell completion)]' '--json[]' ;;
         menu) _arguments '*:: :' ;;
+        networks) _arguments '1:action:(show trust untrust)' ;;
         ping) _arguments '*:profile:_vpnman_profiles' ;;
         protocols) _arguments '*:: :' ;;
         remove) _arguments '*:profile:_vpnman_profiles' ;;
         rm) _arguments '*:profile:_vpnman_profiles' ;;
+        routes) _arguments '*:: :' ;;
         schedule) _arguments '--name[]' '--days[all | weekdays | weekends | mon,wed | mon-fri]' '--start[]' '--end[disconnect again at this time]' '--profile[profile name/id, '\''fastest'\'' or '\''last'\'' (default: last used)]' ;;
         service) _arguments '--init[force the init system instead of auto-detecting it]:value:(systemd runit openrc sysv openbsd-rc bsd-rc)' '1:action:(install uninstall enable disable start stop restart status)' ;;
         set) _arguments '*:: :' ;;

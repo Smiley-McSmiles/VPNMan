@@ -1261,7 +1261,7 @@ class PreferencesWindow(Adw.PreferencesWindow):
         page.add(g)
         self.add(page)
 
-        page = Adw.PreferencesPage(title="DNS & Routes", icon_name="network-wired-symbolic")
+        page = Adw.PreferencesPage(title="DNS & Checks", icon_name="network-wired-symbolic")
         g = Adw.PreferencesGroup(title="DNS")
         g.add(self._switch("dns.force", "Change DNS while connected", "Prevents DNS leaks; pick servers on the Connection page"))
         g.add(self._entry("dns.servers", "Custom DNS servers", "comma separated, overrides pushed servers"))
@@ -1270,14 +1270,30 @@ class PreferencesWindow(Adw.PreferencesWindow):
         g.add(self._switch("checks.tunnel", "Look up public IP after connecting"))
         g.add(self._entry("checks.url", "Lookup URL"))
         page.add(g)
-        g = Adw.PreferencesGroup(title="Routes", description="Networks that bypass the VPN (IPv4, comma separated)")
-        row = Adw.EntryRow(title="Bypass networks", show_apply_button=True)
-        row.set_text(", ".join(r["ip"] for r in settings["routes"] if r.get("action") == "out"))
-        row.connect("apply", lambda r: self._set("routes", [{"ip": x.strip(), "action": "out"}
-                                                           for x in r.get_text().split(",") if x.strip()]))
-        g.add(row)
+        self.add(page)
+
+        page = Adw.PreferencesPage(title="Networks", icon_name="network-wireless-symbolic")
+        g = Adw.PreferencesGroup(title="This Network",
+                                 description="Trusted networks (home, office) are ones where you do not need the VPN. "
+                                             "Anything else counts as untrusted.")
+        self.net_row = Adw.ActionRow(title="Currently on", subtitle="Detecting…")
+        self.net_btn = Gtk.Button(label="Trust", valign=Gtk.Align.CENTER, sensitive=False)
+        self.net_btn.connect("clicked", self._toggle_trust)
+        self.net_row.add_suffix(self.net_btn)
+        g.add(self.net_row)
+        g.add(self._entry("network.trusted", "Trusted networks", "Wi-Fi names, comma separated"))
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Automation")
+        self.net_combo(g, "network.untrusted_action", "On an untrusted network",
+                       [("off", "Do nothing"), ("connect", "Connect the VPN")])
+        self.net_combo(g, "network.trusted_action", "On a trusted network",
+                       [("off", "Do nothing"), ("disconnect", "Disconnect the VPN (only if it was connected automatically)")])
+        self.net_combo(g, "network.profile", "Connect to",
+                       [("last", "Last used server"), ("fastest", "Fastest server")]
+                       + [(p["id"], p["name"]) for p in parent.profiles])
         page.add(g)
         self.add(page)
+        rpc("network.status", self._on_network, None)
 
         page = Adw.PreferencesPage(title="Tray & Login", icon_name="preferences-desktop-symbolic")
         app = parent.get_application()
@@ -1324,6 +1340,29 @@ class PreferencesWindow(Adw.PreferencesWindow):
         g.add(self._switch("ui.notifications", "Desktop notifications"))
         page.add(g)
         self.add(page)
+
+    def net_combo(self, group, key, title, choices):
+        row = Adw.ComboRow(title=title, model=Gtk.StringList.new([c[1] for c in choices]))
+        ids = [c[0] for c in choices]
+        cur = self._val(key)
+        row.set_selected(ids.index(cur) if cur in ids else 0)
+        row.connect("notify::selected", lambda r, _p: self._set(key, ids[r.get_selected()]))
+        group.add(row)
+        return row
+
+    def _on_network(self, st):
+        self._net = st
+        if st.get("id"):
+            self.net_row.set_subtitle(GLib.markup_escape_text("%s%s" % (st["name"], " - trusted" if st["trusted"] else "")))
+            self.net_btn.set_label("Stop Trusting" if st["trusted"] else "Trust This Network")
+            self.net_btn.set_sensitive(True)
+        else:
+            self.net_row.set_subtitle("No network detected")
+
+    def _toggle_trust(self, *_):
+        st = getattr(self, "_net", {})
+        rpc("network.trust", self._on_network, lambda m, *_: self.add_toast(Adw.Toast(title=m)),
+            name=st.get("id"), trusted=not st.get("trusted"))
 
     def _val(self, key):
         node = self.s

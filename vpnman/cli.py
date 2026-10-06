@@ -361,7 +361,8 @@ class Cli:
         st = self.call("split.status")
         cur = st["apps"]
         if act == "list":
-            print("App bypass: %s%s" % ("on" if st["enabled"] else "off", " (active)" if st["active"] else ""))
+            print("App bypass: %s%s%s" % ("on" if st["enabled"] else "off", " (active)" if st["active"] else "",
+                                    "  [only the listed apps use the VPN]" if st["mode"] == "include" else ""))
             if not st["supported"]:
                 print(yellow("  not available here: %s" % st["reason"]))
             for ap in cur:
@@ -372,6 +373,13 @@ class Cli:
         if act in ("on", "off"):
             self.call("split.set", enabled=(act == "on"))
             print("App bypass %s." % ("enabled" if act == "on" else "disabled"))
+            return 0
+        if act == "mode":
+            if not rest or rest[0] not in ("exclude", "include"):
+                print("Mode: %s  (exclude = listed apps skip the VPN, include = ONLY listed apps use it)" % st["mode"])
+                return 0
+            self.call("split.set", mode=rest[0])
+            print("Mode set to %s." % rest[0])
             return 0
         if act == "available":
             flt = " ".join(rest).lower()
@@ -444,6 +452,47 @@ class Cli:
             raise RpcError("unknown action %r (list, add, remove, enable, disable, on, off)" % act)
         self.call("schedule.set", entries=[{k: e[k] for k in keys if k in e} for e in entries])
         print("Saved.")
+        return 0
+
+    def cmd_networks(self, a):
+        act = a.action or "show"
+        if act in ("trust", "untrust"):
+            st = self.call("network.trust", name=a.name, trusted=(act == "trust"))
+            print("%s %s" % ("Trusted:" if act == "trust" else "No longer trusted:", a.name or st["id"]))
+            return 0
+        if act != "show":
+            raise RpcError("unknown action %r (show, trust, untrust)" % act)
+        st = self.call("network.status")
+        cfg = self.call("settings.get", key="network")
+        if st["id"]:
+            print("Current network: %s  (%s via %s)  %s" % (st["id"], st["kind"], st["device"],
+                  green("trusted") if st["trusted"] else yellow("not trusted")))
+        else:
+            print("Current network: none detected")
+        print("Trusted:   %s" % (", ".join(cfg["trusted"]) or "-"))
+        print("On an untrusted network: %s    On a trusted network: %s    Server: %s"
+              % (cfg["untrusted_action"], cfg["trusted_action"], cfg["profile"]))
+        print(dim("Change with: vpnman set network.untrusted_action connect | vpnman set network.trusted_action disconnect"))
+        return 0
+
+    def cmd_routes(self, a):
+        cur = [r.get("ip") or r.get("host") for r in self.call("settings.get", key="routes") if r.get("action") == "out"]
+        act = a.action or "list"
+        if act == "list":
+            print("Addresses that skip the VPN (and are never blocked by the kill switch):")
+            for x in cur:
+                print("  " + x)
+            if not cur:
+                print("  none - e.g.: vpnman routes add 10.0.0.0/8 intranet.example.com")
+            return 0
+        if act == "add":
+            new = cur + [x for x in a.items if x not in cur]
+        elif act in ("remove", "rm"):
+            new = [x for x in cur if x not in a.items]
+        else:
+            raise RpcError("unknown action %r (list, add, remove)" % act)
+        res = self.call("routes.set", entries=new)
+        print("Saved: %s" % (", ".join(r.get("ip") or r.get("host") for r in res) or "nothing"))
         return 0
 
     def cmd_leaktest(self, a):
@@ -812,13 +861,17 @@ def build_parser():
     s.add_argument("target", nargs="?", help="off | last | fastest | profile name")
     s.add_argument("--login-app", choices=["on", "off"], help="start the tray app at login (this user)")
     s = add("dns", "choose the DNS servers used while connected"); s.add_argument("choice", nargs="*")
-    s = add("bypass", "apps that skip the VPN (split tunnel): list|add|remove|available|on|off", aliases=["split"])
+    s = add("bypass", "apps that skip the VPN (split tunnel): list|add|remove|available|on|off|mode", aliases=["split"])
     s.add_argument("action", nargs="?"); s.add_argument("items", nargs="*")
     s = add("schedule", "connect the VPN at set times: list|add|remove|enable|disable|on|off")
     s.add_argument("action", nargs="?"); s.add_argument("target", nargs="?")
     s.add_argument("--name"); s.add_argument("--days", help="all | weekdays | weekends | mon,wed | mon-fri")
     s.add_argument("--start", metavar="HH:MM"); s.add_argument("--end", metavar="HH:MM", help="disconnect again at this time")
     s.add_argument("--profile", help="profile name/id, 'fastest' or 'last' (default: last used)")
+    s = add("networks", "show the current network; trust/untrust it (auto-connect on untrusted networks)")
+    s.add_argument("action", nargs="?", choices=["show", "trust", "untrust"]); s.add_argument("name", nargs="?")
+    s = add("routes", "addresses, networks or domains that skip the VPN: list|add|remove")
+    s.add_argument("action", nargs="?"); s.add_argument("items", nargs="*")
     s = add("leaktest", "check the live connection: tunnel, public IP, kill switch, DNS and IPv6 leaks")
     s.add_argument("--json", action="store_true")
     s = add("cleanup", "remove firewall rules, routes and cgroups VPNMan left behind (root)")

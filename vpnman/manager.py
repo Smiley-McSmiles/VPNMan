@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, dns, leaktest, netlock, paths, schedule, split, stunnel
+from . import __version__, backends, dns, leaktest, netlock, network, paths, schedule, split, stunnel
 from . import platform as plat
 from .backends.base import CredentialsRequired
 from .profiles import ProfileError, ProfileStore, public_view
@@ -114,6 +114,13 @@ class Manager:
         self._split_ctx = None    # (gateway, device, dns) of the live session, while the tunnel is up
         self._split_cur = None    # (gateway, device) the running bypass was built for
         self.scheduler = schedule.Scheduler(self)
+        self._net = None          # last seen network (network.current())
+        self._net_key = None
+        self._net_owned = False   # the current connection was started by the trusted-network rules
+        self._net_stop = threading.Event()
+        self._routes_added = []   # networks routed around the tunnel right now (mutated in place on network change)
+        self._host_ips = {}       # domain -> IPv4 list, for "addresses that skip the VPN" given as names
+        self._host_checked = 0.0
 
     # ------------------------------------------------------------------ status
     @staticmethod
@@ -166,7 +173,7 @@ class Manager:
 
     def _lock_apply(self):
         spec = netlock.Spec.from_settings(self.settings, self._lock_endpoints, self._lock_ifaces,
-                                          split.MARK if self._split.active else 0)
+                                          split.MARK if self._split.active else 0, extra_out=self._route_nets())
         self._firewall().apply(spec)
         if not self.lock_engaged:
             self.log.add("info", "Network lock engaged (%s)" % self._fw.name)
@@ -220,6 +227,7 @@ class Manager:
         if plat.os_family() == "linux":
             split.cleanup()
         self.scheduler.start()
+        self._start_network_monitor()
         st = self._load_state()
         self.lock_manual = bool(st.get("lock_manual"))
         if self.lock_manual or self.settings.get("netlock.persist"):
@@ -253,6 +261,7 @@ class Manager:
 
     def shutdown(self):
         self.scheduler.stop()
+        self._net_stop.set()
         self.disconnect()
         self._split_stop()
 
@@ -434,6 +443,7 @@ class Manager:
                     ctx.state["resolved"][host] = got[0]
                 ips.update(got)
             self._lock_endpoints = ips
+            self._refresh_route_hosts(apply=False)       # names given as "skip the VPN" addresses, before the lock
             if self._lock_wanted():
                 try:
                     self._lock_apply()
@@ -536,6 +546,7 @@ class Manager:
             self._apply_dns(ctx, primary)
             self._current = (ctx, primary)
             routes_added = self._apply_routes(gw)
+            self._routes_added = routes_added
             self._split_ctx = (gw, gwif, orig_dns)
             self._split_sync()
             up = True
@@ -706,18 +717,20 @@ class Manager:
         with self._mlock:
             was = (self._split.active, self._split_cur)
             ctx = self._split_context()
+            mode = self.settings.get("split.mode")
             if not ctx:
                 if self._split.active:
                     self._split.stop()
                     self._split_cur = None
                     self.log.add("info", "App bypass stopped")
-            elif not (self._split.active and self._split_cur == ctx[:2]):
+            elif not (self._split.active and self._split_cur == ctx[:2] + (mode,)):
                 try:
-                    self._split.start(*ctx)
-                    self._split_cur = ctx[:2]
+                    self._split.start(*ctx, mode=mode)
+                    self._split_cur = ctx[:2] + (mode,)
                     apps = ", ".join(a["name"] for a in self.settings.get("split.apps"))
-                    self.log.add("info", "App bypass active for: %s%s" % (
-                        apps, "" if self._split_ctx else " (VPN down, network lock keeps them online)"))
+                    self.log.add("info", "%s: %s%s" % (
+                        "Only these apps use the VPN" if mode == "include" else "App bypass active for", apps,
+                        "" if self._split_ctx else " (VPN down, network lock keeps them online)"))
                 except Exception as e:  # noqa: BLE001
                     self._split_cur = None
                     self.log.add("warn", "App bypass unavailable: %s" % e)
@@ -744,10 +757,15 @@ class Manager:
         ok, why = split.supported()
         sp = self.settings.get("split")
         return {"supported": ok, "reason": why, "active": self._split.active, "enabled": sp["enabled"],
-                "apps": sp["apps"], "moved": len(self._split.moved)}
+                "apps": sp["apps"], "moved": len(self._split.moved), "mode": sp.get("mode", "exclude"),
+                "routes": [r.get("ip") or r.get("host") for r in self.settings.get("routes") if r.get("action") == "out"]}
 
-    def split_set(self, apps=None, enabled=None):
+    def split_set(self, apps=None, enabled=None, mode=None):
         tree = {}
+        if mode is not None:
+            if mode not in ("exclude", "include"):
+                raise ProfileError("mode must be 'exclude' (listed apps skip the VPN) or 'include' (only listed apps use it)")
+            tree["mode"] = mode
         if enabled is not None:
             tree["enabled"] = bool(enabled)
         if apps is not None:
@@ -785,17 +803,50 @@ class Manager:
         self.settings.update({"schedule": tree})
         return self.schedule_status()
 
+    def _route_nets(self):
+        """IPv4 networks that must skip the VPN: the CIDRs/IPs the user listed plus the addresses of listed names
+        (from the cache - never resolved here, because this runs while the kill switch may be up)."""
+        nets = []
+        for r in self.settings.get("routes"):
+            if r.get("action") != "out":
+                continue
+            cands = []
+            if r.get("ip"):
+                cands = [r["ip"]]
+            elif r.get("host"):
+                cands = self._host_ips.get(r["host"], [])
+            for c in cands:
+                try:
+                    net = ipaddress.ip_network(str(c), strict=False)
+                except ValueError:
+                    continue
+                if net.version == 4 and str(net) not in nets:
+                    nets.append(str(net))
+        return nets
+
+    def _refresh_route_hosts(self, apply=True):
+        """Resolve the names in the bypass list; when an address changed, re-route (apply=True)."""
+        hosts = [r["host"] for r in self.settings.get("routes") if r.get("action") == "out" and r.get("host")]
+        self._host_checked = time.time()
+        changed = False
+        for h in hosts:
+            ips = [i for i in resolve_host(h, {}) if ":" not in i]
+            if ips and sorted(ips) != sorted(self._host_ips.get(h, [])):
+                self._host_ips[h] = ips
+                changed = True
+        for h in list(self._host_ips):
+            if h not in hosts:
+                del self._host_ips[h]
+                changed = True
+        if changed and apply:
+            self._reapply_routes()
+        return changed
+
     def _apply_routes(self, gw):
         added = []
-        for r in self.settings.get("routes"):
-            if r.get("action") != "out" or not gw:
-                continue
-            try:
-                net = str(ipaddress.ip_network(r["ip"], strict=False))
-            except (ValueError, KeyError):
-                continue
-            if ":" in net:
-                continue
+        for net in self._route_nets():
+            if not gw:
+                break
             if plat.os_family() == "linux":
                 cmd = ["ip", "route", "replace", net, "via", gw]
             else:
@@ -806,6 +857,118 @@ class Manager:
             else:
                 self.log.add("warn", "route %s failed: %s" % (net, out.strip()))
         return added
+
+    def _reapply_routes(self, gw=None):
+        """Re-create the bypass routes (list changed, or the gateway changed) and let the kill switch know."""
+        with self._mlock:
+            live = self._status.get("state") == "connected"
+            if live:
+                gw = gw or plat.default_gateway()[0]
+                self._remove_routes(self._routes_added)
+                self._routes_added[:] = self._apply_routes(gw)
+            if self.lock_engaged:
+                try:
+                    self._lock_apply()
+                except Exception as e:  # noqa: BLE001
+                    self.log.add("error", "Network lock update failed: %s" % e)
+
+    def routes_set(self, entries):
+        clean = []
+        for e in entries:
+            text = str(e.get("ip") or e.get("host") or e).strip() if isinstance(e, dict) else str(e).strip()
+            if not text:
+                continue
+            try:
+                net = ipaddress.ip_network(text, strict=False)
+                if net.version != 4:
+                    raise ProfileError("only IPv4 networks can skip the VPN: %s" % text)
+                clean.append({"ip": str(net), "action": "out"})
+            except ValueError:
+                if not re.match(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$", text) or "." not in text:
+                    raise ProfileError("not an IP address, network (10.0.0.0/8) or domain name: %s" % text)
+                clean.append({"host": text.lower(), "action": "out"})
+        self.settings.update({"routes": clean})
+        self._refresh_route_hosts(apply=False)
+        self._reapply_routes()
+        return self.settings.get("routes")
+
+    # ------------------------------------------------------------- networks
+    def _start_network_monitor(self):
+        self._net_stop = threading.Event()
+        threading.Thread(target=self._net_loop, args=(self._net_stop,), daemon=True, name="net-monitor").start()
+
+    def _net_loop(self, stop):
+        while not stop.is_set():
+            try:
+                self.network_tick()
+            except Exception as e:  # noqa: BLE001
+                self.log.add("debug", "network monitor: %s" % e)
+            stop.wait(3)
+
+    def network_status(self):
+        cur = self._net or network.current()
+        return dict(cur, trusted=network.is_trusted(cur["id"], self.settings.get("network.trusted")))
+
+    def network_tick(self, cur=None):
+        """One look at the network.  Acts only when something changed (gateway, device or network name)."""
+        cur = cur or network.current()
+        key = (cur["gateway"], cur["device"], cur["id"])
+        first = self._net_key is None
+        changed = key != self._net_key
+        self._net_key, self._net = key, cur
+        if self._net_owned and self._status.get("state") == "disconnected":
+            self._net_owned = False
+        if time.time() - self._host_checked > 300:
+            self._refresh_route_hosts()
+        if not changed or not cur["device"]:
+            return
+        if cur["device"] == self._status.get("iface"):
+            return                              # the tunnel became the default route: not a new network
+        if not first:
+            self.log.add("info", "Network changed: %s via %s" % (cur["name"] or "unknown", cur["device"]))
+        self._follow_network(cur)
+        self._network_rules(cur, first)
+
+    def _follow_network(self, cur):
+        """Rebuild what was built against the old gateway: the app bypass and the bypass routes."""
+        ctx = self._split_ctx
+        if ctx and (cur["gateway"], cur["device"]) != ctx[:2] and self._status.get("state") == "connected":
+            self._split_ctx = (cur["gateway"], cur["device"], [cur["gateway"]] if cur["gateway"] else [])
+            self._split_sync()
+        if self._status.get("state") == "connected" and cur["gateway"]:
+            self._reapply_routes(cur["gateway"])
+        elif self.lock_engaged and not ctx:
+            self._split_sync()
+
+    def _network_rules(self, cur, first):
+        cfg = self.settings.get("network")
+        if not cur["id"] or (first and self.settings.get("connection.autoconnect") != "off"):
+            return
+        trusted = network.is_trusted(cur["id"], cfg["trusted"])
+        active = self._status.get("state") in ("connecting", "connected", "reconnecting")
+        prof = cfg.get("profile") or "last"
+        if not trusted and cfg["untrusted_action"] == "connect" and not active:
+            self.log.add("info", "Untrusted network '%s' - connecting the VPN" % cur["name"])
+            try:
+                self.connect(None if prof in ("", "last", "fastest") else prof, fastest=(prof == "fastest"),
+                             last=(prof in ("", "last")), persistent=True)
+                self._net_owned = True
+            except Exception as e:  # noqa: BLE001
+                self.log.add("error", "Could not connect on an untrusted network: %s" % e)
+        elif trusted and cfg["trusted_action"] == "disconnect" and self._net_owned and active:
+            self.log.add("info", "Trusted network '%s' - disconnecting the VPN" % cur["name"])
+            self._net_owned = False
+            self.disconnect()
+
+    def network_trust(self, name=None, trusted=True):
+        net = name or (self._net or network.current())["id"]
+        if not net:
+            raise ProfileError("no network detected - connect to one first")
+        cur = [t for t in self.settings.get("network.trusted") if str(t).lower() != net.lower()]
+        if trusted:
+            cur.append(net)
+        self.settings.update({"network": {"trusted": cur}})
+        return self.network_status()
 
     def _remove_routes(self, routes):
         for net in routes:

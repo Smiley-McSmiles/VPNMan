@@ -575,6 +575,121 @@ class IfnameTests(unittest.TestCase):
         self.assertEqual(self.mgr._ifname_for(backends.get("wireguard"), self.make("wireguard")), "wg1")
 
 
+class NetworkTests(unittest.TestCase):
+    def _mgr(self, **net):
+        s = settings.Settings(TMP + "/net-%d.json" % id(net))
+        s.update({"network": net, "connection": {"autoconnect": "off"}})
+        m = Manager(settings=s)
+        m.calls = []
+        m.connect = lambda ident=None, fastest=False, last=False, persistent=False: m.calls.append(
+            ("connect", ident, fastest, last)) or {"profile": "p"}
+        m.disconnect = lambda release_lock=True: m.calls.append(("disconnect",))
+        return m
+
+    @staticmethod
+    def net(nid, dev="wlan0", gw="192.168.1.1"):
+        return {"id": nid, "name": nid, "kind": "wifi", "device": dev, "gateway": gw}
+
+    def test_current_network_ids(self):
+        from vpnman import network, platform as plat
+        real = (plat.default_gateway, network.wifi_ssid, network.gateway_mac, network.is_wireless)
+        try:
+            plat.default_gateway = lambda: ("192.168.1.1", "wlan0")
+            network.is_wireless = lambda d: d.startswith("wl")
+            network.wifi_ssid = lambda d: "HomeNet"
+            self.assertEqual(network.current()["id"], "HomeNet")
+            plat.default_gateway = lambda: ("192.168.1.1", "enp3s0")
+            network.gateway_mac = lambda gw, dev=None: "aa:bb:cc:dd:ee:ff"
+            cur = network.current()
+            self.assertEqual((cur["id"], cur["kind"]), ("wired:aa:bb:cc:dd:ee:ff", "wired"))
+            plat.default_gateway = lambda: (None, None)
+            self.assertIsNone(network.current()["id"])
+        finally:
+            plat.default_gateway, network.wifi_ssid, network.gateway_mac, network.is_wireless = real
+        self.assertTrue(network.is_trusted("homenet", ["HomeNet"]))
+        self.assertFalse(network.is_trusted("Cafe", ["HomeNet"]))
+        self.assertFalse(network.is_trusted(None, ["HomeNet"]))
+
+    def test_connects_on_untrusted_and_disconnects_on_trusted_only_if_it_connected(self):
+        m = self._mgr(trusted=["Home"], untrusted_action="connect", trusted_action="disconnect", profile="fastest")
+        m.network_tick(self.net("Cafe"))
+        self.assertEqual(m.calls, [("connect", None, True, False)])
+        self.assertTrue(m._net_owned)
+        m._status["state"] = "connected"
+        m.network_tick(self.net("Cafe"))                      # nothing changed: nothing happens
+        self.assertEqual(len(m.calls), 1)
+        m.network_tick(self.net("Home"))
+        self.assertEqual(m.calls[-1], ("disconnect",))
+        # a connection the user made by hand is never dropped by the trusted rule
+        m.calls.clear()
+        m._net_owned = False
+        m._status["state"] = "connected"
+        m.network_tick(self.net("Cafe"))
+        m.network_tick(self.net("Home"))
+        self.assertEqual(m.calls, [])
+
+    def test_rules_are_off_by_default_and_skip_the_first_look_when_autoconnect_is_set(self):
+        m = self._mgr()
+        m.network_tick(self.net("Cafe"))
+        self.assertEqual(m.calls, [])
+        m = self._mgr(untrusted_action="connect")
+        m.settings.update({"connection": {"autoconnect": "last"}})
+        m.network_tick(self.net("Cafe"))                       # boot: the boot-time auto-connect owns this
+        self.assertEqual(m.calls, [])
+        m.network_tick(self.net("Other", gw="10.0.0.1"))       # a later change is ours
+        self.assertEqual(len(m.calls), 1)
+
+    def test_gateway_change_rebuilds_the_bypass_and_routes_but_the_tunnel_does_not_count(self):
+        m = self._mgr()
+        seen = []
+        m._split_sync = lambda: seen.append(("split", m._split_ctx[:2]))
+        m._reapply_routes = lambda gw=None: seen.append(("routes", gw))
+        m._status.update(state="connected", iface="tun0")
+        m._split_ctx = ("192.168.1.1", "eno1", ["192.168.1.1"])
+        m.network_tick(self.net("A", dev="eno1"))                        # first look: same gateway as the session
+        m.network_tick(self.net("B", dev="wlan0", gw="10.1.1.1"))
+        self.assertIn(("split", ("10.1.1.1", "wlan0")), seen)
+        self.assertIn(("routes", "10.1.1.1"), seen)
+        n = len(seen)
+        m.network_tick(self.net("tunnel", dev="tun0", gw="10.8.0.1"))      # def1-less redirect: default is the tunnel
+        self.assertEqual(len(seen), n)
+
+    def test_trust_toggle_and_listing(self):
+        m = self._mgr()
+        m._net = self.net("Home")
+        self.assertTrue(m.network_trust(None, True)["trusted"])
+        self.assertEqual(m.settings.get("network.trusted"), ["Home"])
+        self.assertFalse(m.network_trust("home", False)["trusted"])
+        self.assertEqual(m.settings.get("network.trusted"), [])
+
+
+class BypassAddressTests(unittest.TestCase):
+    def test_validation_and_normalisation(self):
+        from vpnman.profiles import ProfileError
+        s = settings.Settings(TMP + "/routes.json")
+        m = Manager(settings=s)
+        m._reapply_routes = lambda gw=None: None
+        m._refresh_route_hosts = lambda apply=True: False
+        out = m.routes_set(["10.0.0.5", "192.168.0.0/16", "Example.COM", {"host": "intranet.example.org"}])
+        self.assertEqual([r.get("ip") or r.get("host") for r in out],
+                         ["10.0.0.5/32", "192.168.0.0/16", "example.com", "intranet.example.org"])
+        for bad in ("not a host", "fe80::/10", "localhost", "-bad-.com"):
+            with self.assertRaises(ProfileError):
+                m.routes_set([bad])
+
+    def test_nets_include_cached_domain_addresses_and_reach_the_kill_switch(self):
+        s = settings.Settings(TMP + "/routes2.json")
+        m = Manager(settings=s)
+        m._reapply_routes = lambda gw=None: None
+        s.update({"routes": [{"ip": "10.0.0.0/8", "action": "out"}, {"host": "files.example.net", "action": "out"},
+                             {"ip": "172.16.0.0/12", "action": "in"}]})
+        self.assertEqual(m._route_nets(), ["10.0.0.0/8"])                 # a name is only used once it is resolved
+        m._host_ips["files.example.net"] = ["203.0.113.7"]
+        self.assertEqual(m._route_nets(), ["10.0.0.0/8", "203.0.113.7/32"])
+        spec = netlock.Spec.from_settings(s, extra_out=m._route_nets())
+        self.assertIn("203.0.113.7/32", netlock.nft_ruleset(spec))        # never blocked by the kill switch
+
+
 class LeakTestTests(unittest.TestCase):
     def test_dns_decisions(self):
         from vpnman import leaktest as lt
@@ -856,7 +971,7 @@ while :; do sleep 0.1; done
         calls = []
         real_start, real_stop = self.mgr._split.start, self.mgr._split.stop
 
-        def fake_start(gw, dev, dns=()):
+        def fake_start(gw, dev, dns=(), mode="exclude"):
             calls.append(("start", dev))
             self.mgr._split.active = True
 
@@ -887,7 +1002,7 @@ while :; do sleep 0.1; done
         calls, locks = [], []
         real = (m._split.start, m._split.stop, m._lock_apply, plat.default_gateway, m.lock_engaged)
 
-        def fake_start(gw, dev, dns=()):
+        def fake_start(gw, dev, dns=(), mode="exclude"):
             calls.append(("start", gw, dev))
             m._split.active = True
 
@@ -1180,6 +1295,46 @@ class SplitTests(unittest.TestCase):
         cmds = split.route_commands("192.168.1.1", "eth0", ["192.168.1.0/24"])
         self.assertIn(["route", "add", "default", "via", "192.168.1.1", "dev", "eth0", "table", "5652"], cmds)
         self.assertEqual(cmds[-1][:4], ["rule", "add", "fwmark", "0x5652"])
+
+    def test_include_mode_marks_everything_except_the_listed_apps(self):
+        from vpnman import split
+        inc = split.ruleset(["192.168.1.1"], mode="include")
+        lines = [l.strip() for l in inc.splitlines()]
+        mark = lines.index("meta mark 0 meta mark set 0x5652 ct mark set 0x5652")
+        unmark = lines.index('socket cgroupv2 level 1 "vpnman-tunnel" meta mark set 0 ct mark set 0')
+        self.assertLess(mark, unmark)                       # mark all, then take the listed apps back out
+        self.assertIn("meta mark 0x5652 udp dport 53", inc)  # DNS redirect follows the mark, not the cgroup
+        self.assertNotIn('"vpnman-bypass"', inc)
+        self.assertNotIn("vpnman-tunnel", split.ruleset(["192.168.1.1"]))
+        self.assertEqual(split.cgroup_name("include"), "vpnman-tunnel")
+        # packets that already carry a mark (WireGuard's own socket) must be left alone: only mark 0 is rewritten
+        self.assertEqual(inc.count("meta mark set 0x5652"), 1)
+
+    def test_split_mode_is_validated_and_restarts_the_bypass(self):
+        from vpnman.profiles import ProfileError
+        m = Manager(settings=settings.Settings(TMP + "/mode.json"))
+        m.split_changed = lambda: None
+        self.assertEqual(m.split_set(mode="include")["mode"], "include")
+        with self.assertRaises(ProfileError):
+            m.split_set(mode="sideways")
+        calls = []
+        from vpnman import platform as plat
+        real = (m._split.start, m._split.stop, plat.default_gateway, m._lock_apply)
+        m._split.start = lambda gw, dev, dns=(), mode="exclude": (calls.append(mode), setattr(m._split, "active", True))
+        m._split.stop = lambda: (calls.append("stop"), setattr(m._split, "active", False))
+        m._lock_apply = lambda: None
+        m.settings.update({"split": {"apps": [{"id": "a", "name": "A", "match": ["a"]}]}})
+        m.lock_engaged, m._split_ctx = True, None
+        plat.default_gateway = lambda: ("192.168.1.1", "eno1")
+        try:
+            m._split_sync()
+            m.settings.update({"split": {"mode": "exclude"}})
+            m._split_sync()                                     # same gateway, new mode: rebuilt, not left as it was
+            m._split_sync()                                     # and now idempotent again
+            self.assertEqual(calls, ["include", "exclude"])
+        finally:
+            m._split.start, m._split.stop, plat.default_gateway, m._lock_apply = real
+            m._split.active = False
 
     def test_kill_switch_lets_bypassed_traffic_through_only_when_asked(self):
         plain = netlock.nft_ruleset(netlock.Spec(endpoints=["1.2.3.4"], ifaces=["tun0"]))

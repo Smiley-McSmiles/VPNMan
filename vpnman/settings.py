@@ -37,12 +37,19 @@ DEFAULTS = {
         "mode": "session",         # session: root + groups + active local users | group: root + groups only
         "groups": ["vpnman", "wheel", "sudo"],
     },
+    "network": {
+        "trusted": [],             # SSIDs / "wired:<gateway mac>" you trust (see network.py)
+        "untrusted_action": "off", # off | connect  (when joining a network that is not trusted)
+        "trusted_action": "off",   # off | disconnect  (when joining a trusted one - only if we connected automatically)
+        "profile": "last",         # what to connect to: last | fastest | <profile id or name>
+    },
     "schedule": {
         "enabled": True,
         "entries": [],             # see schedule.py: {id, name, enabled, days, start, end, profile}
     },
     "split": {
         "enabled": True,           # apps below keep using the normal connection while the VPN is up
+        "mode": "exclude",         # exclude: listed apps skip the VPN | include: ONLY listed apps use the VPN
         "apps": [],                # [{id, name, match: [process names], icon}]
     },
     "routes": [],                  # [{"ip": "10.0.0.0/8", "action": "out"}]  out = bypass the VPN

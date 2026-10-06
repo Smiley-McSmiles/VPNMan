@@ -18,16 +18,28 @@ from . import platform as plat
 MARK = 0x5652
 TABLE = 5652
 PRIORITY = 80
-CGROUP = "vpnman-bypass"
+CGROUP = "vpnman-bypass"            # exclude mode: the apps in this cgroup skip the VPN
+CGROUP_VPN = "vpnman-tunnel"        # include mode: only the apps in this cgroup use the VPN
 NFT_TABLE = "vpnman_split"
 SCAN_INTERVAL = 2.0
 
 
 # ----------------------------------------------------------------- rules (pure)
 
-def ruleset(dns=(), mark=MARK, cgroup=CGROUP):
-    """nftables text.  `dns`: resolvers the bypassed programs should use instead of the tunnel's."""
+def cgroup_name(mode):
+    return CGROUP_VPN if mode == "include" else CGROUP
+
+
+def ruleset(dns=(), mark=MARK, mode="exclude"):
+    """nftables text.  `dns`: resolvers the bypassed programs should use instead of the tunnel's.
+
+    exclude (default): packets of programs in the cgroup get the bypass mark.
+    include: every locally generated packet that carries no mark yet gets it, except the packets of programs in the
+    cgroup - so ONLY those use the tunnel.  Packets that already have a mark (WireGuard's own socket, Tailscale ...)
+    are left alone, otherwise the tunnel's own traffic would be routed into the tunnel."""
+    cgroup = cgroup_name(mode)
     sock = 'socket cgroupv2 level 1 "%s"' % cgroup
+    sel = ("meta mark 0x%x" % mark) if mode == "include" else sock       # who the DNS redirect applies to
     v4 = []
     for d in dns:
         try:
@@ -37,13 +49,17 @@ def ruleset(dns=(), mark=MARK, cgroup=CGROUP):
             continue
     lines = ["table inet %s" % NFT_TABLE, "delete table inet %s" % NFT_TABLE, "table inet %s {" % NFT_TABLE,
              "  chain bypass_mark {", "    type route hook output priority -150; policy accept;",
-             "    %s meta mark set 0x%x ct mark set 0x%x" % (sock, mark, mark), "  }"]
+             ("    meta mark 0 meta mark set 0x%x ct mark set 0x%x" % (mark, mark)) if mode == "include" else
+             ("    %s meta mark set 0x%x ct mark set 0x%x" % (sock, mark, mark))]
+    if mode == "include":
+        lines.append("    %s meta mark set 0 ct mark set 0" % sock)       # the listed programs go through the tunnel
+    lines.append("  }")
     if v4:
         target = v4[0]
         lines += ["  chain bypass_dns {", "    type nat hook output priority -100; policy accept;"]
         for proto in ("udp", "tcp"):
             lines.append("    %s %s dport 53 ip daddr != 127.0.0.0/8 ip daddr != %s dnat ip to %s"
-                         % (sock, proto, target, target))
+                         % (sel, proto, target, target))
         lines.append("  }")
     lines += ["  chain bypass_post {", "    type nat hook postrouting priority 100; policy accept;",
               '    meta mark 0x%x oifname != "lo" masquerade' % mark, "  }", "}"]
@@ -191,16 +207,17 @@ def cleanup():
             pass
         plat.run([ip, "route", "flush", "table", str(TABLE)])
     root = cgroup_root()
-    if root and os.path.isdir(os.path.join(root, CGROUP)):
-        try:
-            with open(os.path.join(root, CGROUP, "cgroup.procs")) as fh:
-                pids = fh.read().split()
-            for pid in pids:
-                with open(os.path.join(root, "cgroup.procs"), "w") as out:
-                    out.write(pid)
-            os.rmdir(os.path.join(root, CGROUP))
-        except OSError:
-            pass
+    for name in (CGROUP, CGROUP_VPN):
+        if root and os.path.isdir(os.path.join(root, name)):
+            try:
+                with open(os.path.join(root, name, "cgroup.procs")) as fh:
+                    pids = fh.read().split()
+                for pid in pids:
+                    with open(os.path.join(root, "cgroup.procs"), "w") as out:
+                        out.write(pid)
+                os.rmdir(os.path.join(root, name))
+            except OSError:
+                pass
 
 
 def supported():
@@ -223,6 +240,7 @@ class SplitTunnel:
         self.proc = proc
         self.root = root                    # cgroup mount override (tests)
         self.active = False
+        self.mode = "exclude"
         self.moved = {}                     # pid -> original cgroup path
         self._stop = threading.Event()
         self._thread = None
@@ -232,9 +250,9 @@ class SplitTunnel:
     @property
     def path(self):
         root = self.root or cgroup_root()
-        return os.path.join(root, CGROUP) if root else None
+        return os.path.join(root, cgroup_name(self.mode)) if root else None
 
-    def start(self, gw, dev, dns=()):
+    def start(self, gw, dev, dns=(), mode="exclude"):
         ok, why = supported()
         if not ok:
             raise RuntimeError(why)
@@ -242,8 +260,9 @@ class SplitTunnel:
             raise RuntimeError("no physical network interface to bypass through")
         with self._lock:
             self.stop_locked()
+            self.mode = mode if mode in ("include", "exclude") else "exclude"
             os.makedirs(self.path, exist_ok=True)
-            rc, out = plat.run([plat.which("nft"), "-f", "-"], input=ruleset(dns))
+            rc, out = plat.run([plat.which("nft"), "-f", "-"], input=ruleset(dns, mode=self.mode))
             if rc:
                 try:
                     os.rmdir(self.path)                  # do not leave the empty cgroup behind
@@ -339,7 +358,7 @@ class SplitTunnel:
         added = []
         for pid in matching_pids(names, self.proc):
             cur = self._cgroup_of(pid)
-            if cur is None or cur.rstrip("/").endswith("/" + CGROUP) or cur == "/" + CGROUP:
+            if cur is None or cur.rstrip("/").endswith("/" + cgroup_name(self.mode)):
                 continue
             if self._move(pid, path):
                 self.moved.setdefault(pid, cur)

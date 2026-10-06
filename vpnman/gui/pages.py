@@ -299,6 +299,7 @@ class BypassPage(Adw.PreferencesPage):
         self.win, self.rpc = win, rpc
         self.state = {"apps": [], "enabled": True, "supported": True, "reason": "", "active": False}
         self._rows = []
+        self.routes = []
         self._quiet = False
         self.banner = Adw.Banner(revealed=False)
         g = Adw.PreferencesGroup(
@@ -308,10 +309,15 @@ class BypassPage(Adw.PreferencesPage):
         self.enabled = Adw.SwitchRow(title="Exclude these apps from the VPN")
         self.enabled.connect("notify::active", self._on_enabled)
         g.add(self.enabled)
+        self.mode = Adw.ComboRow(title="How the list works", model=Gtk.StringList.new(
+            ["Listed apps skip the VPN", "Only listed apps use the VPN (experimental)"]))
+        self.mode.connect("notify::selected", self._on_mode)
+        g.add(self.mode)
         self.status = Adw.ActionRow(title="Status")
         self.status.add_css_class("property")
         g.add(self.status)
         self.add(g)
+        self.top_group = g
         self.group = Adw.PreferencesGroup(title="Apps")
         add = Gtk.Button(label="Add Apps…", valign=Gtk.Align.CENTER)
         add.add_css_class("suggested-action")
@@ -319,18 +325,37 @@ class BypassPage(Adw.PreferencesPage):
         self.group.set_header_suffix(add)
         self.add(self.group)
 
+        self.addr_group = Adw.PreferencesGroup(
+            title="Addresses That Skip the VPN",
+            description="IP addresses, networks (10.0.0.0/8) or domain names that always use your normal connection - "
+                        "for example a printer, a NAS or a work intranet. The kill switch never blocks them.")
+        self.addr_entry = Adw.EntryRow(title="Add an address, network or domain", show_apply_button=True)
+        self.addr_entry.connect("apply", self._add_address)
+        self.addr_group.add(self.addr_entry)
+        self.add(self.addr_group)
+        self._addr_rows = []
+
     def update(self, st):
         self.state = st
         self._quiet = True
         self.enabled.set_active(st["enabled"])
         self.enabled.set_sensitive(st["supported"])
+        self.mode.set_selected(1 if st.get("mode") == "include" else 0)
+        self.mode.set_sensitive(st["supported"])
         self._quiet = False
+        self.top_group.set_title("Apps That Use the VPN" if st.get("mode") == "include" else "Apps That Skip the VPN")
+        self.top_group.set_description(
+            "Only these programs - and anything they start - go through the VPN. Everything else on this computer "
+            "uses your normal connection and is NOT protected." if st.get("mode") == "include" else
+            "While the VPN is connected, these programs - and anything they start - keep using your normal "
+            "internet connection. Everything else stays inside the tunnel.")
         if not st["supported"]:
             self.status.set_subtitle(GLib.markup_escape_text("Unavailable: " + st["reason"]))
         elif st["active"]:
             self.status.set_subtitle("Active - %d process(es) bypassing the VPN" % st.get("moved", 0))
         else:
             self.status.set_subtitle("Applies as soon as the VPN is connected")
+        self._update_addresses(st.get("routes", []))
         _clear(self.group, self._rows)
         if not st["apps"]:
             row = Adw.ActionRow(title="No apps yet", subtitle="Add Steam, Firefox or any other program.")
@@ -348,9 +373,35 @@ class BypassPage(Adw.PreferencesPage):
             self.group.add(row)
             self._rows.append(row)
 
+    def _update_addresses(self, routes):
+        self.routes = list(routes)
+        _clear(self.addr_group, self._addr_rows)
+        for r in self.routes:
+            row = Adw.ActionRow(title=GLib.markup_escape_text(r))
+            rm = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Remove")
+            rm.add_css_class("flat")
+            rm.connect("clicked", lambda _b, x=r: self._save_routes([y for y in self.routes if y != x]))
+            row.add_suffix(rm)
+            self.addr_group.add(row)
+            self._addr_rows.append(row)
+
+    def _add_address(self, entry):
+        text = entry.get_text().strip()
+        if text:
+            entry.set_text("")
+            self._save_routes(self.routes + [x.strip() for x in text.replace(";", ",").split(",") if x.strip()])
+
+    def _save_routes(self, routes):
+        self.rpc("routes.set", lambda _res: (self.win.toast("Saved"), self.win.refresh(full=True)), self.win._fail,
+                 entries=routes)
+
     def _on_enabled(self, row, _p):
         if not self._quiet:
             self.rpc("split.set", self.update, self.win._fail, enabled=row.get_active())
+
+    def _on_mode(self, row, _p):
+        if not self._quiet:
+            self.rpc("split.set", self.update, self.win._fail, mode="include" if row.get_selected() == 1 else "exclude")
 
     def _pick(self, *_):
         AppPicker(self.win, [a["id"] for a in self.state["apps"]],
