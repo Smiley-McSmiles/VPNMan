@@ -19,6 +19,9 @@ os.environ["PATH"] = TMP + "/bin" + os.pathsep + os.environ["PATH"]
 
 from vpnman import backends, daemon, dns, ipc, netlock, profiles, settings  # noqa: E402
 from vpnman.manager import Manager  # noqa: E402
+from vpnman.backends.openvpn import OpenVPN  # noqa: E402
+
+OpenVPN.probe_cache["--dns-updown disable"] = False      # the fake openvpn scripts must never be run as a probe
 
 OVPN = "client\ndev tun\nproto udp\nremote vpn.example.net 1194\nremote 192.0.2.7 443 tcp\nca ca.crt\nauth-user-pass\n"
 WG = """[Interface]
@@ -572,6 +575,33 @@ class IfnameTests(unittest.TestCase):
         self.assertEqual(self.mgr._ifname_for(backends.get("wireguard"), self.make("wireguard")), "wg1")
 
 
+class OpenVpnDnsUpdownTests(unittest.TestCase):
+    def test_builtin_dns_handling_is_disabled_only_when_openvpn_accepts_it(self):
+        from vpnman import backends as B
+        from vpnman.backends.openvpn import OpenVPN
+        ov = OpenVPN()
+        saved = dict(OpenVPN.probe_cache)
+        try:
+            for accepts in (True, False):
+                OpenVPN.probe_cache.clear()
+                exe = TMP + "/probe-openvpn-%s" % accepts
+                with open(exe, "w") as fh:     # exits 0 like OpenVPN 2.7 does for a known option, 1 like 2.6 does
+                    fh.write("#!/bin/sh\n%s\n" % ("exit 0" if accepts else 'case "$*" in *dns-updown*) exit 1;; esac; exit 0'))
+                os.chmod(exe, 0o755)
+                ov.binary = lambda exe=exe: exe
+                d = tempfile.mkdtemp(dir=TMP)
+                ctx = B.Context({"id": "x", "name": "x", "config": "c.ovpn", "username": "", "options": {}}, d, d, "tun0",
+                                settings.Settings(TMP + "/dnsud.json"))
+                ctx.state["text"], ctx.state["path"] = "client\nremote 1.2.3.4\n", d + "/runtime.ovpn"
+                cmd = ov.connect_cmd(ctx)
+                self.assertEqual("--dns-updown" in cmd, accepts, cmd)
+                if accepts:
+                    self.assertEqual(cmd[cmd.index("--dns-updown") + 1], "disable")
+        finally:
+            OpenVPN.probe_cache.clear()
+            OpenVPN.probe_cache.update(saved)
+
+
 class StunnelTests(unittest.TestCase):
     def prof(self, **st):
         return profiles.new_profile("s", "openvpn", options={"stunnel": dict({"enabled": True, "host": "h.example.com"}, **st)})
@@ -652,14 +682,18 @@ trap 'exit 0' TERM
 while :; do sleep 0.1; done
 """ % TMP)
         os.chmod(TMP + "/bin/stunnel", 0o755)
+        from vpnman.backends.openvpn import OpenVPN
+        OpenVPN.probe_cache["--dns-updown disable"] = False        # never run the fake as a capability probe
         open(fake, "w").write("""#!/bin/sh
+echo run >> "%s/invocations"
+if grep -q "# FAIL-AUTH" "$2"; then echo "AUTH: Received control message: AUTH_FAILED"; exit 0; fi
 cp "$2" "%s/last.ovpn"
 echo "TUN/TAP device lo opened"
 echo "PUSH: dhcp-option DNS 10.8.0.1"
 echo "Initialization Sequence Completed"
 trap 'exit 0' TERM
 while :; do sleep 0.1; done
-""" % TMP)
+""" % (TMP, TMP))
         os.chmod(fake, 0o755)
         s = settings.Settings(TMP + "/etc/settings.json")
         s.set("checks.tunnel", False)
@@ -872,6 +906,47 @@ AAAA
         finally:
             self.c.call("disconnect")
             self.c.call("profiles.remove", ident=p["id"])
+
+    def test_auth_failure_stops_instead_of_retrying(self):
+        """AUTH_FAILED is not transient: retrying hammers the server with the same wrong credentials."""
+        inv = TMP + "/invocations"
+        p = self.c.call("profiles.import", name="badauth", text="client\nremote 192.0.2.9 1194\n# FAIL-AUTH\n",
+                        filename="b.ovpn", files={})
+        self.c.call("settings.update", tree={"connection": {"reconnect": True, "retry_delay": 1}})
+        try:
+            before = open(inv).read().count("run") if os.path.exists(inv) else 0
+            self.c.call("connect", ident=p["id"])
+            st = self.wait("error")
+            self.assertIn("Authentication failed", st["message"])
+            time.sleep(2.5)                                       # long enough for a retry to have happened
+            self.assertEqual(self.c.call("status")["state"], "error")
+            self.assertEqual(open(inv).read().count("run") - before, 1)
+            logs = " ".join(e["msg"] for e in self.c.call("logs")["entries"])
+            self.assertNotIn("Reconnecting in", logs.split("Authentication failed")[-1])
+        finally:
+            self.c.call("settings.update", tree={"connection": {"reconnect": False, "retry_delay": 5}})
+            self.c.call("disconnect")
+            self.c.call("profiles.remove", ident=p["id"])
+
+    def test_concurrent_imports_get_distinct_names(self):
+        names, errs = [], []
+
+        def imp():
+            try:
+                names.append(ipc.Client(timeout=20).call("profiles.import", name="twin", text="client\nremote 192.0.2.5 1194\n",
+                                                          filename="t.ovpn", files={})["name"])
+            except Exception as e:  # noqa: BLE001
+                errs.append(e)
+        ts = [threading.Thread(target=imp) for _ in range(6)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        try:
+            self.assertEqual(errs, [])
+            self.assertEqual(len(set(names)), 6, names)
+        finally:
+            for p in self.c.call("profiles.list"):
+                if p["name"].startswith("twin"):
+                    self.c.call("profiles.remove", ident=p["id"])
 
     def test_openvpn_over_stunnel(self):
         opts = {"stunnel": {"enabled": True, "host": "127.0.0.1", "port": 8443, "sni": "cdn.example.com"}}

@@ -3,6 +3,7 @@ import re
 import shlex
 import shutil
 
+from .. import platform as plat
 from .. import stunnel
 from .base import Backend
 
@@ -25,6 +26,7 @@ class OpenVPN(Backend):
     ready_re = re.compile(r"Initialization Sequence Completed")
     named_iface = True
     fields = ("username", "password", "key_password")
+    probe_cache = {}               # "option value" -> does this openvpn binary accept it?
 
     @classmethod
     def sniff(cls, filename, text):
@@ -144,6 +146,18 @@ class OpenVPN(Backend):
         ctx.state["text"] = text
         ctx.state["path"] = ctx.write("runtime.ovpn", text)
 
+    def _accepts(self, *opt):
+        """Does the installed openvpn understand this option?  Probed once (an option error makes it exit non-zero
+        before it does anything), so one code path works with OpenVPN 2.4 up to 2.7."""
+        key = " ".join(opt)
+        if key not in self.probe_cache:
+            try:
+                rc, _out = plat.run([self.binary()] + list(opt) + ["--verb", "3", "--show-digests"], timeout=10)
+            except Exception:  # noqa: BLE001
+                rc = 1
+            self.probe_cache[key] = rc == 0
+        return self.probe_cache[key]
+
     def connect_cmd(self, ctx):
         p = ctx.profile
         text = ctx.state["text"]
@@ -151,6 +165,10 @@ class OpenVPN(Backend):
                "--auth-nocache"]
         if ctx.ifname:
             cmd += ["--dev", ctx.ifname, "--dev-type", self._dev(text)]
+        if self._accepts("--dns-updown", "disable"):
+            # OpenVPN 2.7 applies pushed DNS itself (resolvconf/systemd-resolved) on top of vpnman's own handling;
+            # the two fight on teardown ("resolvconf: signature mismatch"). vpnman owns DNS.
+            cmd += ["--dns-updown", "disable"]
         if p.get("username"):
             cmd += ["--auth-user-pass", ctx.write("auth", "%s\n%s\n" % (p["username"], p.get("password", "")))]
         elif re.search(r"^\s*auth-user-pass\s*$", text, re.M):
@@ -162,6 +180,12 @@ class OpenVPN(Backend):
         return cmd
 
     def parse_line(self, line, ctx):
+        m = re.search(r"AUTH_FAILED(?:,(.*?))?'?$", line) if "AUTH_FAILED" in line else None
+        if m:
+            reason = (m.group(1) or "").strip(" '")
+            ctx.state["fatal"] = ("Authentication failed - the server rejected the username or password%s. "
+                                  "Edit the profile and re-enter them (some providers use a separate VPN username "
+                                  "or password, not your website login)." % (" (%s)" % reason if reason else ""))
         m = re.search(r"TUN/TAP device (\S+) opened", line)
         if m:
             ctx.iface = m.group(1)

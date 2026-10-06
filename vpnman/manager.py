@@ -89,6 +89,7 @@ class Manager:
         self.settings = settings or Settings()
         self.log = LogBuffer()
         self._mlock = threading.RLock()
+        self._import_lock = threading.Lock()
         self._oplock = threading.RLock()    # serialises connect()/disconnect(): two clicks must not start two tunnels
         self._stop = threading.Event()
         self._thread = None
@@ -490,6 +491,10 @@ class Manager:
                         return False
                     if proc.poll() is not None:
                         reader.join(2)
+                        if ctx.state.get("fatal"):
+                            # retrying with the same bad credentials only hammers the server (and can get the
+                            # account locked), so stop and say what is wrong
+                            raise FatalError(ctx.state["fatal"])
                         raise ConnectError("%s exited with status %s" % (os.path.basename(cmd[0]), proc.returncode))
                     if time.time() - started > timeout:
                         raise ConnectError("timed out after %ds" % timeout)
@@ -877,8 +882,9 @@ class Manager:
         for fn, b64 in (files or {}).items():
             import base64
             allfiles[fn] = base64.b64decode(b64)
-        self._unique_name(p)
-        self.store.save(p, allfiles)
+        with self._import_lock:             # two imports of the same name racing must not both pick the same name
+            self._unique_name(p)
+            self.store.save(p, allfiles)
         self.log.add("info", "Imported profile %s (%s)" % (p["name"], backend.label))
         return public_view(p)
 
