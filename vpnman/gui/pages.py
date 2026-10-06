@@ -1,11 +1,20 @@
 """Schedule and App-bypass pages (plus their dialogs) for the main window."""
 
+import collections
+import time
+
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, GObject, Gtk  # noqa: E402
 
 from .. import apps as appmod, schedule as sched  # noqa: E402
+
+try:                                    # drawing needs pycairo (Debian/Ubuntu: python3-gi-cairo); without it the graph
+    gi.require_foreign("cairo")         # degrades to the text line instead of failing
+    HAVE_CAIRO = True
+except Exception:                       # noqa: BLE001
+    HAVE_CAIRO = False
 
 FALLBACK_ICON = "application-x-executable-symbolic"
 
@@ -309,8 +318,8 @@ class BypassPage(Adw.PreferencesPage):
         self.enabled = Adw.SwitchRow(title="Exclude these apps from the VPN")
         self.enabled.connect("notify::active", self._on_enabled)
         g.add(self.enabled)
-        self.mode = Adw.ComboRow(title="How the list works", model=Gtk.StringList.new(
-            ["Listed apps skip the VPN", "Only listed apps use the VPN (experimental)"]))
+        self.mode = Adw.ComboRow(title="Listed apps", model=Gtk.StringList.new(
+            ["Skip the VPN", "Are the only ones using the VPN (experimental)"]))
         self.mode.connect("notify::selected", self._on_mode)
         g.add(self.mode)
         self.status = Adw.ActionRow(title="Status")
@@ -409,3 +418,117 @@ class BypassPage(Adw.PreferencesPage):
 
     def _save(self, apps):
         self.rpc("split.set", lambda st: (self.update(st), self.win.toast("App list saved")), self.win._fail, apps=apps)
+
+
+# ----------------------------------------------------------------- traffic graph & history
+
+def human(n):
+    n = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return ("%d %s" % (n, unit)) if unit == "B" else "%.1f %s" % (n, unit)
+        n /= 1024
+
+
+def graph_points(values, width, height, peak, pad=4):
+    """Pixel points for a series (oldest first, right-aligned so new data scrolls in from the right)."""
+    n = len(values)
+    if n == 0:
+        return []
+    step = width / max(n - 1, 1) if n > 1 else 0
+    peak = max(peak, 1.0)
+    return [(width - (n - 1 - i) * step if n > 1 else width, height - pad - (v / peak) * (height - 2 * pad))
+            for i, v in enumerate(values)]
+
+
+class TrafficGraph(Gtk.Box):
+    """Download / upload rate over the last two minutes."""
+    RX = (0.21, 0.52, 0.89)
+    TX = (0.15, 0.64, 0.41)
+
+    def __init__(self, seconds=120):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.rx, self.tx = collections.deque(maxlen=seconds), collections.deque(maxlen=seconds)
+        self.area = Gtk.DrawingArea(content_height=96, hexpand=True)
+        if HAVE_CAIRO:
+            self.area.set_draw_func(self._draw)
+        else:
+            self.area.set_visible(False)
+        self.legend = Gtk.Label(label="", xalign=0, css_classes=["dim-label", "caption"])
+        self.append(self.area)
+        self.append(self.legend)
+        self._last = 0.0
+
+    def push(self, rx_rate, tx_rate):
+        now = time.monotonic()
+        if now - self._last < 0.8:                       # status is refreshed more often than once a second
+            return
+        self._last = now
+        self.rx.append(float(rx_rate))
+        self.tx.append(float(tx_rate))
+        self.legend.set_label("↓ %s/s    ↑ %s/s    peak %s/s (last 2 min)"
+                              % (human(rx_rate), human(tx_rate), human(self.peak())))
+        self.area.queue_draw()
+
+    def reset(self):
+        self.rx.clear()
+        self.tx.clear()
+        self.legend.set_label("")
+        self.area.queue_draw()
+
+    def peak(self):
+        return max(list(self.rx) + list(self.tx) + [0.0])
+
+    def _draw(self, area, cr, w, h):
+        fg = area.get_color()
+        cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.12)
+        for i in range(1, 4):                            # faint grid
+            y = h * i / 4
+            cr.move_to(0, y)
+            cr.line_to(w, y)
+        cr.set_line_width(1)
+        cr.stroke()
+        peak = self.peak()
+        for series, (r, g, b) in ((self.rx, self.RX), (self.tx, self.TX)):
+            pts = graph_points(list(series), w, h, peak)
+            if len(pts) < 2:
+                continue
+            cr.move_to(pts[0][0], h)
+            for x, y in pts:
+                cr.line_to(x, y)
+            cr.line_to(pts[-1][0], h)
+            cr.close_path()
+            cr.set_source_rgba(r, g, b, 0.18)
+            cr.fill_preserve()
+            cr.new_path()
+            cr.move_to(*pts[0])
+            for x, y in pts[1:]:
+                cr.line_to(x, y)
+            cr.set_source_rgba(r, g, b, 1)
+            cr.set_line_width(2)
+            cr.stroke()
+
+
+class HistoryGroup(Adw.PreferencesGroup):
+    def __init__(self, rpc, on_error):
+        super().__init__(title="Recent Connections")
+        self.rpc, self.on_error = rpc, on_error
+        self._rows = []
+        clear = Gtk.Button(label="Clear", valign=Gtk.Align.CENTER)
+        clear.add_css_class("flat")
+        clear.connect("clicked", lambda *_: self.rpc("history.clear", lambda *_: self.update([]), self.on_error))
+        self.set_header_suffix(clear)
+        self.set_visible(False)
+
+    def update(self, rows):
+        _clear(self, self._rows)
+        self.set_visible(bool(rows))
+        for r in rows[:8]:
+            when = time.strftime("%b %d, %H:%M", time.localtime(r["start"]))
+            d = r["duration"]
+            dur = "%d:%02d:%02d" % (d // 3600, d % 3600 // 60, d % 60)
+            row = Adw.ActionRow(title=GLib.markup_escape_text(r["profile"]),
+                                subtitle=GLib.markup_escape_text("%s · %s · ↓ %s ↑ %s · %s" % (
+                                    when, dur, human(r["rx"]), human(r["tx"]), r.get("reason", ""))))
+            self.add(row)
+            self._rows.append(row)

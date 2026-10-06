@@ -24,6 +24,24 @@ Connect (and optionally disconnect) at set times; see vpnman schedule --help.
 bypass [list|add|remove|available|on|off]
 Applications that keep using the normal connection while the VPN is up (split tunnel, Linux).
 .TP
+routes [list|add|remove]
+Addresses, networks or domains that always skip the VPN and are never blocked by the kill switch.
+.TP
+networks [show|trust|untrust]
+The current network and trusted networks (automatic connect on untrusted ones).
+.TP
+leaktest
+Check the live connection: tunnel, public IP, kill switch, DNS and IPv6 leaks.
+.TP
+history
+Recent connections with duration and traffic.
+.TP
+backup export|import FILE
+Back up or restore all profiles (including credentials) and settings.
+.TP
+cleanup
+Remove firewall rules, routes and cgroups VPNMan left behind (root).
+.TP
 get, set
 Read or change settings (dotted keys such as netlock.allow_lan).
 .TP

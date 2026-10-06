@@ -1,0 +1,43 @@
+name: Release
+
+# Push a tag such as v1.0.6 (after bumping the version everywhere) and this builds every package and attaches
+# them to a GitHub release, with the notes taken from data/*.metainfo.xml.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches the version in the code
+        run: python3 tools/check_version.py "${GITHUB_REF_NAME}"
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 rpm xz-utils
+
+      - name: Build packages
+        run: ./package.sh
+
+      - name: Checksums and notes
+        run: |
+          cd dist
+          sha256sum *.tar.gz *.deb *.rpm *.pkg.tar.xz > SHA256SUMS
+          cd ..
+          python3 tools/release_notes.py "${GITHUB_REF_NAME}" > release-notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/*.tar.gz dist/*.deb dist/*.rpm dist/*.pkg.tar.xz dist/SHA256SUMS \
+            --title "VPNMan ${GITHUB_REF_NAME#v}" \
+            --notes-file release-notes.md

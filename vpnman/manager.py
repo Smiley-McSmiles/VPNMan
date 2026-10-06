@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, dns, leaktest, netlock, network, paths, schedule, split, stunnel
+from . import __version__, backends, backup, dns, history, leaktest, netlock, network, paths, schedule, split, stunnel
 from . import platform as plat
 from .backends.base import CredentialsRequired
 from .profiles import ProfileError, ProfileStore, public_view
@@ -114,6 +114,8 @@ class Manager:
         self._split_ctx = None    # (gateway, device, dns) of the live session, while the tunnel is up
         self._split_cur = None    # (gateway, device) the running bypass was built for
         self.scheduler = schedule.Scheduler(self)
+        self.history = history.History()
+        self._hist_cur = None     # the tunnel that is up right now: {profile, protocol, start, rx, tx}
         self._net = None          # last seen network (network.current())
         self._net_key = None
         self._net_owned = False   # the current connection was started by the trusted-network rules
@@ -551,6 +553,8 @@ class Manager:
             self._split_sync()
             up = True
             self._set(state="connected", iface=primary, since=time.time(), message="", attempt=0)
+            self._hist_cur = {"profile": profile["name"], "protocol": profile["protocol"], "start": time.time(),
+                              "rx": 0, "tx": 0}
             self.log.add("info", "Connected to %s via %s" % (profile["name"], primary or "(no interface)"))
             self._hook("connected", ctx)
             threading.Thread(target=self._check_ip, args=(stop,), daemon=True).start()
@@ -577,6 +581,8 @@ class Manager:
                         rate = (max(st[0] - last[1], 0) / dt, max(st[1] - last[2], 0) / dt)
                     last = (now, st[0], st[1])
                     self._set(rx=st[0], tx=st[1], rx_rate=rate[0], tx_rate=rate[1])
+                    if self._hist_cur:
+                        self._hist_cur.update(rx=st[0], tx=st[1])
             return up
         finally:
             self._proc = None
@@ -604,6 +610,13 @@ class Manager:
                 except Exception as e:  # noqa: BLE001
                     self.log.add("warn", "cleanup failed: %s" % e)
             self._remove_routes(routes_added)
+            cur, self._hist_cur = self._hist_cur, None
+            if cur and up:
+                try:
+                    self.history.add(cur["profile"], cur["protocol"], cur["start"], rx=cur["rx"], tx=cur["tx"],
+                                     reason="Disconnected" if stop.is_set() else "Connection lost")
+                except OSError as e:
+                    self.log.add("warn", "Could not save connection history: %s" % e)
             self._split_ctx = None
             self._split_sync()              # stays up for the whitelisted apps if the kill switch is still engaged
             self._dns.restore()
@@ -1076,6 +1089,49 @@ class Manager:
         p = self.store.find(ident)
         self.store.save(p, {name: base64.b64decode(b64)})
         return public_view(p)
+
+    # ------------------------------------------------------------ backup
+    def backup_export(self):
+        import base64
+        data = backup.export_archive(os.path.dirname(self.store.root), self.settings.path)
+        return {"data": base64.b64encode(data).decode(), "size": len(data)}
+
+    def backup_import(self, data, replace=False, restore_settings=None):
+        """Restore profiles from a backup.  merge (default): add what is missing, never touch existing profiles or
+        settings.  replace: make this machine match the backup (settings included unless restore_settings=False)."""
+        import base64
+        import binascii
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            raise ProfileError("the backup data is not valid")
+        try:
+            manifest, profiles, new_settings = backup.read_archive(raw)
+        except backup.BackupError as e:
+            raise ProfileError(str(e))
+        existing = {p["id"] for p in self.store.list()}
+        removed = 0
+        if replace:
+            removed = len(self.remove_profiles(sorted(existing))["removed"])
+            existing = set()
+        added = skipped = 0
+        for pid, files in sorted(profiles.items()):
+            if pid in existing:
+                skipped += 1
+                continue
+            backup.write_profile(self.store.root, pid, files)
+            added += 1
+        do_settings = new_settings is not None and (restore_settings if restore_settings is not None else replace)
+        if do_settings:
+            from .settings import DEFAULTS, _merge
+            with self.settings._lock:
+                self.settings.data = _merge(DEFAULTS, new_settings)
+                self.settings.save()
+            self.split_changed()
+        self.log.add("info", "Backup restored: %d profile(s) added, %d already present%s%s" % (
+            added, skipped, ", %d replaced" % removed if replace else "", ", settings restored" if do_settings else ""))
+        return {"added": added, "skipped": skipped, "removed": removed, "settings": bool(do_settings),
+                "created": manifest.get("created"), "version": manifest.get("vpnman")}
 
     def leak_test(self):
         """Self-test of the live connection (tunnel, public IP, kill switch, DNS, IPv6)."""

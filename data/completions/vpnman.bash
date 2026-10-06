@@ -5,7 +5,7 @@ _vpnman() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     cmd="${COMP_WORDS[1]}"
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=( $(compgen -W "about add autostart block bypass cleanup connect daemon disconnect dns doctor down edit fav get gui import leaktest list lock logs ls menu networks ping protocols remove rm routes schedule service set shell split status unblock unfav up --version --help" -- "$cur") )
+        COMPREPLY=( $(compgen -W "about add autostart backup block bypass cleanup connect daemon disconnect dns doctor down edit fav get gui history import leaktest list lock logs ls menu networks ping protocols remove rm routes schedule service set shell split status unblock unfav up --version --help" -- "$cur") )
         return
     fi
     case "$cmd" in
@@ -20,6 +20,10 @@ _vpnman() {
         autostart)
             opts="--login-app"
             choices=""
+            names=0 ;;
+        backup)
+            opts="--replace --settings --force"
+            choices="export import"
             names=0 ;;
         block)
             opts=""
@@ -73,6 +77,10 @@ _vpnman() {
             opts="--background"
             choices=""
             names=0 ;;
+        history)
+            opts="-n --lines --json --clear"
+            choices=""
+            names=0 ;;
         import)
             opts="--name --protocol --user --password --ask-password --stunnel --stunnel-sni --stunnel-ca --stunnel-verify"
             choices=""
@@ -82,7 +90,7 @@ _vpnman() {
             choices=""
             names=0 ;;
         list)
-            opts="--latency -l --names --json"
+            opts="--latency -l --names --sort --json"
             choices=""
             names=0 ;;
         lock)
@@ -94,7 +102,7 @@ _vpnman() {
             choices=""
             names=0 ;;
         ls)
-            opts="--latency -l --names --json"
+            opts="--latency -l --names --sort --json"
             choices=""
             names=0 ;;
         menu)
@@ -167,6 +175,7 @@ _vpnman() {
         --protocol) COMPREPLY=( $(compgen -W "openvpn wireguard amneziawg openconnect openfortivpn ikev2 sstp pptp vpnc tailscale netbird zerotier nebula networkmanager custom" -- "$cur") ); return ;;
         --login-app) COMPREPLY=( $(compgen -W "on off" -- "$cur") ); return ;;
         --stunnel-verify) COMPREPLY=( $(compgen -W "none system ca" -- "$cur") ); return ;;
+        --sort) COMPREPLY=( $(compgen -W "name latency group" -- "$cur") ); return ;;
         --init) COMPREPLY=( $(compgen -W "systemd runit openrc sysv openbsd-rc bsd-rc" -- "$cur") ); return ;;
     esac
     if [[ "$cur" == -* ]]; then

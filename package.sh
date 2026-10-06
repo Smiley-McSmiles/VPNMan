@@ -72,7 +72,7 @@ Section: net
 Priority: optional
 Architecture: all
 Installed-Size: $size
-Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), iproute2
+Depends: python3 (>= 3.9), python3-gi, python3-gi-cairo, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), iproute2
 Recommends: openvpn, wireguard-tools, nftables | iptables, openresolv | resolvconf
 Suggests: stunnel4, gnome-shell-extension-appindicator, openconnect, openfortivpn, sstp-client, pptp-linux, strongswan-swanctl, vpnc, network-manager
 Maintainer: VPNMan contributors <noreply@example.invalid>
@@ -162,7 +162,7 @@ License:        MIT
 URL:            $URL
 Source0:        $SRCNAME.tar.gz
 BuildArch:      noarch
-Requires:       python3 >= 3.9, python3-gobject, gtk4, libadwaita >= 1.4, iproute
+Requires:       python3 >= 3.9, python3-gobject, python3-cairo, gtk4, libadwaita >= 1.4, iproute
 Recommends:     openvpn, wireguard-tools, nftables
 Suggests:       stunnel, gnome-shell-extension-appindicator, openconnect, openfortivpn, strongswan, NetworkManager
 
@@ -274,7 +274,7 @@ pkgdesc="$DESC"
 arch=('any')
 url="$URL"
 license=('MIT')
-depends=('python' 'python-gobject' 'gtk4' 'libadwaita' 'iproute2')
+depends=('python' 'python-gobject' 'python-cairo' 'gtk4' 'libadwaita' 'iproute2')
 optdepends=('openvpn: OpenVPN' 'wireguard-tools: WireGuard' 'nftables: kill switch (preferred)'
             'iptables: kill switch fallback' 'openconnect: AnyConnect/GlobalProtect' 'openfortivpn: Fortinet'
             'strongswan: IKEv2' 'networkmanager: L2TP and others')
@@ -329,7 +329,7 @@ post_remove() {
 INST
     python3 "$ROOT/packaging/mkarch.py" "$root" "$DIST/$NAME-$VERSION-1-any.pkg.tar.xz" \
         --name "$NAME" --version "$VERSION" --desc "$DESC" --url "$URL" \
-        --depend python --depend python-gobject --depend gtk4 --depend libadwaita --depend iproute2 \
+        --depend python --depend python-gobject --depend python-cairo --depend gtk4 --depend libadwaita --depend iproute2 \
         --optdepend 'openvpn: OpenVPN' --optdepend 'wireguard-tools: WireGuard' \
         --optdepend 'nftables: kill switch and app bypass (preferred)' --optdepend 'iptables: kill switch fallback' \
         --optdepend 'stunnel: OpenVPN over TLS' --optdepend 'openconnect: AnyConnect/GlobalProtect' \
@@ -345,7 +345,7 @@ recipe_void() {
 pkgname=$NAME
 version=$VERSION
 revision=1
-depends="python3 python3-gobject gtk4 libadwaita iproute2 nftables openvpn wireguard-tools"
+depends="python3 python3-gobject python3-cairo gtk4 libadwaita iproute2 nftables openvpn wireguard-tools"
 short_desc="$DESC"
 maintainer="VPNMan contributors <noreply@example.invalid>"
 license="MIT"
@@ -373,7 +373,7 @@ build_void() {
     stage "$root" runit
     mkdir -p "$DIST"
     (cd "$DIST" && xbps-create -A noarch -n "${NAME}-${VERSION}_1" -s "$DESC" \
-        -D "python3>=3.9 python3-gobject gtk4 libadwaita iproute2" -H "$URL" -l MIT \
+        -D "python3>=3.9 python3-gobject python3-cairo gtk4 libadwaita iproute2" -H "$URL" -l MIT \
         -m "VPNMan contributors <noreply@example.invalid>" -t "net security" "$root" >/dev/null)
     log "  -> dist/${NAME}-${VERSION}_1.noarch.xbps   (install: sudo xbps-install -R dist $NAME; enable: sudo ln -s /etc/sv/vpnmand /var/service/)"
 }
@@ -399,7 +399,7 @@ pkgdesc="$DESC"
 url="$URL"
 arch="noarch"
 license="MIT"
-depends="python3 py3-gobject3 gtk4.0 libadwaita iproute2 nftables openvpn wireguard-tools"
+depends="python3 py3-gobject3 py3-cairo gtk4.0 libadwaita iproute2 nftables openvpn wireguard-tools"
 source="\$pkgname-\$pkgver.tar.gz"
 builddir="\$srcdir/\$pkgname-\$pkgver"
 options="!check"

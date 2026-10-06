@@ -30,7 +30,7 @@ class Handler(socketserver.StreamRequestHandler):
                     pass
                 return
         try:
-            line = self.rfile.readline(8 * 1024 * 1024)
+            line = self.rfile.readline(40 * 1024 * 1024)
             if not line:
                 return
             req = json.loads(line.decode())
@@ -103,6 +103,10 @@ METHODS = {
     "routes.set": lambda m, entries: m.routes_set(entries),
     "network.status": lambda m: m.network_status(),
     "network.trust": lambda m, name=None, trusted=True: m.network_trust(name, trusted),
+    "backup.export": lambda m: m.backup_export(),
+    "backup.import": lambda m, data, replace=False, restore_settings=None: m.backup_import(data, replace, restore_settings),
+    "history": lambda m, limit=50: m.history.list(limit),
+    "history.clear": lambda m: m.history.clear() or True,
     "leaktest": lambda m: m.leak_test(),
     "schedule.status": lambda m: m.schedule_status(),
     "schedule.set": lambda m, entries=None, enabled=None: m.schedule_set(entries, enabled),

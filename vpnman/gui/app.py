@@ -1,5 +1,6 @@
 """GTK4 / libadwaita front-end for vpnman (requires libadwaita >= 1.4)."""
 
+import base64
 import os
 import sys
 import threading
@@ -17,7 +18,7 @@ except (ImportError, ValueError) as exc:  # pragma: no cover
 import json
 
 from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof
-from .pages import BypassPage, SchedulePage
+from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .tray import HelperTray, Tray, wants_helper
 from ..settings import DNS_PRESETS, DEFAULTS
 from ..ipc import Client, DaemonUnavailable, RpcError
@@ -73,9 +74,27 @@ def choose_files(parent, title, callback, multiple=True):
         parent._native = dlg
 
 
+def save_file(parent, title, name, callback):
+    if hasattr(Gtk, "FileDialog"):
+        dlg = Gtk.FileDialog(title=title, initial_name=name)
+
+        def done(d, res):
+            try:
+                callback(d.save_finish(res).get_path())
+            except GLib.Error:
+                return
+        dlg.save(parent, None, done)
+    else:  # pragma: no cover - GTK < 4.10
+        dlg = Gtk.FileChooserNative(title=title, transient_for=parent, action=Gtk.FileChooserAction.SAVE)
+        dlg.set_current_name(name)
+        dlg.connect("response", lambda d, r: callback(d.get_file().get_path()) if r == Gtk.ResponseType.ACCEPT else None)
+        dlg.show()
+        parent._native = dlg
+
+
 class UserConfig:
     """Per-user GUI preferences (~/.config/vpnman/gui.json); the daemon's settings are system-wide."""
-    DEFAULTS = {"run_in_background": True}
+    DEFAULTS = {"run_in_background": True, "server_sort": "favourites", "auto_latency": 0}
 
     def __init__(self):
         base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
@@ -201,12 +220,13 @@ class ProfileDialog(Adw.Window):
         self.opts = Adw.EntryRow(title="Options (key=value, comma separated)")
         self.dns = Adw.EntryRow(title="DNS servers (comma separated)")
         self.notes = Adw.EntryRow(title="Notes")
+        self.group_row = Adw.EntryRow(title="Group (optional, e.g. a country or a provider)")
         g2 = Adw.PreferencesGroup(title="Details")
         page.add(g2)
         if mode != "import":
             for r in (self.server, self.port):
                 g2.add(r)
-        for r in (self.user, self.password):
+        for r in (self.user, self.password, self.group_row):
             g2.add(r)
         if mode != "import":
             for r in (self.opts, self.dns, self.notes):
@@ -218,6 +238,7 @@ class ProfileDialog(Adw.Window):
             self.user.set_text(profile.get("username") or "")
             self.dns.set_text(", ".join(profile.get("dns") or []))
             self.notes.set_text(profile.get("notes") or "")
+            self.group_row.set_text(profile.get("group") or "")
             self.opts.set_text(", ".join("%s=%s" % kv for kv in profile.get("options", {}).items()
                                          if isinstance(kv[1], (str, int))))
         # ---- stunnel (TLS wrapper for OpenVPN)
@@ -320,6 +341,8 @@ class ProfileDialog(Adw.Window):
             fields = {}
             if self.user.get_text():
                 fields = {"username": self.user.get_text(), "password": self.password.get_text()}
+            if self.group_row.get_text().strip():
+                fields["group"] = self.group_row.get_text().strip()
             files, proto, name = list(self.files), self._selected_protocol(), self.name.get_text()
             try:
                 st_opts, st_files = self._stunnel()
@@ -362,12 +385,14 @@ class ProfileDialog(Adw.Window):
         opts.update(st_opts)
         if self.mode == "add":
             fields = {"server": self.server.get_text().strip(), "port": port, "username": self.user.get_text(),
-                      "password": self.password.get_text(), "dns": dns, "notes": self.notes.get_text()}
+                      "password": self.password.get_text(), "dns": dns, "notes": self.notes.get_text(),
+                      "group": self.group_row.get_text().strip()}
             rpc("profiles.add", self._finish, self._error, name=name, protocol=self._selected_protocol(),
                 fields=fields, options=opts, files=st_files)
         else:
             ch = {"name": name, "server": self.server.get_text().strip(), "port": port,
                   "username": self.user.get_text(), "dns": dns, "notes": self.notes.get_text(),
+                  "group": self.group_row.get_text().strip(),
                   "options": dict(self.profile.get("options", {}), **opts)}
             if self.password.get_text():
                 ch["password"] = self.password.get_text()
@@ -504,6 +529,10 @@ class MainWindow(Adw.ApplicationWindow):
         header.pack_start(add_btn)
         main_menu = Gio.Menu()
         main_menu.append("Preferences", "app.preferences")
+        backup_menu = Gio.Menu()
+        backup_menu.append("Export Backup…", "win.backup-export")
+        backup_menu.append("Restore Backup…", "win.backup-import")
+        main_menu.append_section(None, backup_menu)
         main_menu.append("About VPNMan", "app.about")
         main_menu.append("Quit", "app.quit")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=main_menu,
@@ -530,7 +559,8 @@ class MainWindow(Adw.ApplicationWindow):
         view.set_content(self.toasts)
         view.add_bottom_bar(bar)
 
-        for name, cb in (("import", self.on_import), ("add", self.on_add)):
+        for name, cb in (("import", self.on_import), ("add", self.on_add),
+                         ("backup-export", self.on_backup_export), ("backup-import", self.on_backup_import)):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", cb)
             self.add_action(act)
@@ -623,6 +653,11 @@ class MainWindow(Adw.ApplicationWindow):
             self.stat_rows[key] = row
         self.stats.set_visible(False)
         groups.append(self.stats)
+        self.graph_group = Adw.PreferencesGroup(title="Traffic")
+        self.graph = TrafficGraph()
+        self.graph_group.add(self.graph)
+        self.graph_group.set_visible(False)
+        groups.append(self.graph_group)
 
         dns = Adw.PreferencesGroup(title="DNS", description="Name servers used while the VPN is active. "
                                    "Changes apply immediately, even when connected.")
@@ -662,6 +697,8 @@ class MainWindow(Adw.ApplicationWindow):
         test.connect("activated", lambda *_: LeakTestDialog(self).present())
         quick.add(test)
         groups.append(quick)
+        self.history_group = HistoryGroup(rpc, self._fail)
+        groups.append(self.history_group)
         scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
         scroll.set_child(page)
         return scroll
@@ -747,6 +784,13 @@ class MainWindow(Adw.ApplicationWindow):
         top = Gtk.Box(spacing=6)
         self.search.set_hexpand(True)
         top.append(self.search)
+        self.sort_modes = [("favourites", "Favourites first"), ("name", "Name"), ("latency", "Fastest first")]
+        self.sort_drop = Gtk.DropDown(model=Gtk.StringList.new([m[1] for m in self.sort_modes]),
+                                      tooltip_text="Sort servers")
+        cur = self.get_application().userconfig.get("server_sort") if self.get_application() else "favourites"
+        self.sort_drop.set_selected(next((i for i, m in enumerate(self.sort_modes) if m[0] == cur), 0))
+        self.sort_drop.connect("notify::selected", self._on_sort_changed)
+        top.append(self.sort_drop)
         self.ping_btn = Gtk.Button(label="Test Latency")
         self.ping_btn.connect("clicked", self.on_ping)
         top.append(self.ping_btn)
@@ -755,6 +799,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.listbox.add_css_class("boxed-list")
         self.listbox.set_filter_func(self._filter)
         self.listbox.set_sort_func(self._sort)
+        self.listbox.set_header_func(self._header)
         self.listbox.connect("selected-rows-changed", self._on_selection_changed)
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self._on_list_key)
@@ -804,10 +849,41 @@ class MainWindow(Adw.ApplicationWindow):
         return not q or q in row.profile["name"].lower() or q in row.profile["protocol"] or \
             q in (row.profile.get("server") or "").lower()
 
+    def sort_mode(self):
+        return self.sort_modes[self.sort_drop.get_selected()][0]
+
+    def _sort_key(self, row):
+        p = row.profile
+        group = (p.get("group") or "").lower()          # ungrouped servers first, then each group together
+        name = p["name"].lower()
+        mode = self.sort_mode()
+        if mode == "name":
+            return (group, name)
+        if mode == "latency":
+            ms = self.latency.get(p["id"])
+            return (group, ms is None, ms or 0, name)
+        return (group, not p["favorite"], name)
+
     def _sort(self, a, b):
-        ka = (not a.profile["favorite"], a.profile["name"].lower())
-        kb = (not b.profile["favorite"], b.profile["name"].lower())
+        ka, kb = self._sort_key(a), self._sort_key(b)
         return (ka > kb) - (ka < kb)
+
+    def _header(self, row, before):
+        """A heading above the first server of each group."""
+        group = row.profile.get("group") or ""
+        prev = (before.profile.get("group") or "") if before else None
+        if group and group != prev:
+            lbl = Gtk.Label(label=group, xalign=0, margin_start=12, margin_top=10, margin_bottom=4)
+            lbl.add_css_class("heading")
+            row.set_header(lbl)
+        else:
+            row.set_header(None)
+
+    def _on_sort_changed(self, *_):
+        app = self.get_application()
+        if app:
+            app.userconfig.set("server_sort", self.sort_mode())
+        self.listbox.invalidate_sort()
 
     def _make_row(self, p):
         row = Adw.ActionRow(title=GLib.markup_escape_text(p["name"]),
@@ -1042,7 +1118,58 @@ class MainWindow(Adw.ApplicationWindow):
     def on_add(self, *_):
         ProfileDialog(self, "add", self.protocols, on_done=lambda: self.refresh(full=True)).present()
 
+    def on_backup_export(self, *_):
+        d = Adw.MessageDialog(transient_for=self, heading="Export a backup?",
+                              body="The backup contains your VPN passwords and private keys. Anyone who gets the file "
+                                   "can use your VPN accounts, so keep it somewhere safe.")
+        d.add_response("cancel", "Cancel")
+        d.add_response("export", "Choose Where to Save…")
+        d.set_response_appearance("export", Adw.ResponseAppearance.SUGGESTED)
+
+        def chosen(path):
+            def write(res):
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(base64.b64decode(res["data"]))
+                    self.toast("Backup saved")
+                except OSError as e:
+                    self.toast("Could not save the backup: %s" % e)
+            rpc("backup.export", write, self._fail)
+        d.connect("response", lambda d, r: r == "export" and save_file(
+            self, "Save backup", "vpnman-backup-%s.tar.gz" % time.strftime("%Y%m%d"), chosen))
+        d.present()
+
+    def on_backup_import(self, *_):
+        def picked(files):
+            try:
+                with open(files[0], "rb") as fh:
+                    raw = fh.read(32 * 1024 * 1024 + 1)
+            except OSError as e:
+                return self.toast("Could not read the file: %s" % e)
+            if len(raw) > 32 * 1024 * 1024:
+                return self.toast("That file is too large to be a VPNMan backup")
+            data = base64.b64encode(raw).decode()
+            d = Adw.MessageDialog(transient_for=self, heading="Restore this backup?",
+                                  body="Add Missing Profiles keeps everything you have and only adds profiles that are not "
+                                       "here yet. Replace Everything deletes your current profiles and settings first.")
+            d.add_response("cancel", "Cancel")
+            d.add_response("merge", "Add Missing Profiles")
+            d.add_response("replace", "Replace Everything")
+            d.set_response_appearance("merge", Adw.ResponseAppearance.SUGGESTED)
+            d.set_response_appearance("replace", Adw.ResponseAppearance.DESTRUCTIVE)
+
+            def done(res):
+                self.toast("Restored: %d added, %d already present" % (res["added"], res["skipped"]))
+                self.refresh(full=True)
+            d.connect("response", lambda d, r: r in ("merge", "replace") and rpc(
+                "backup.import", done, self._fail, data=data, replace=(r == "replace")))
+            d.present()
+        choose_files(self, "Choose a VPNMan backup", picked, multiple=False)
+
     def on_ping(self, *_):
+        if not self.ping_btn.get_sensitive():
+            return
         self.ping_btn.set_sensitive(False)
         self.ping_btn.set_label("Testing…")
 
@@ -1051,6 +1178,8 @@ class MainWindow(Adw.ApplicationWindow):
             self.ping_btn.set_sensitive(True)
             self.ping_btn.set_label("Test Latency")
             self._update_latency()
+            self.listbox.invalidate_sort()
+            self._last_ping = time.monotonic()
         rpc("latency", done, self._fail)
 
     def _update_latency(self):
@@ -1102,12 +1231,24 @@ class MainWindow(Adw.ApplicationWindow):
     def _tick(self):
         self._ticks = getattr(self, "_ticks", 0) + 1
         self.refresh(slow=self._ticks % 20 == 0)
+        self._auto_latency()
         return True
+
+    def _auto_latency(self):
+        """Optional: re-test server latency every N minutes while the Servers tab is on screen."""
+        app = self.get_application()
+        minutes = app.userconfig.get("auto_latency") if app else 0
+        if not minutes or not self.profiles or not self.is_visible() or self.stack.get_visible_child_name() != "servers":
+            return
+        if time.monotonic() - getattr(self, "_last_ping", 0) >= minutes * 60:
+            self._last_ping = time.monotonic()
+            self.on_ping()
 
     def refresh(self, full=False, slow=False):
         rpc("status", self._on_status, self._fail)
         rpc("logs", self._on_logs, None, since=self._log_seq)
         if full or slow:
+            rpc("history", self.history_group.update, None, limit=8)
             rpc("schedule.status", self.sched_page.update, None)
             rpc("split.status", self.bypass_page.update, None)
         if full:
@@ -1203,6 +1344,11 @@ class MainWindow(Adw.ApplicationWindow):
         for cls, on in (("suggested-action", not active), ("destructive-action", active)):
             (self.main_btn.add_css_class if on else self.main_btn.remove_css_class)(cls)
         self.stats.set_visible(state == "connected")
+        self.graph_group.set_visible(state == "connected")
+        if state == "connected":
+            self.graph.push(st.get("rx_rate", 0), st.get("tx_rate", 0))
+        else:
+            self.graph.reset()
         if state == "connected":
             r = self.stat_rows
             r["ip"].set_subtitle(st.get("public_ip") or "checking…")
@@ -1215,6 +1361,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._ask_credentials(st)
         if state != self._last_state:
             if self._last_state is not None:
+                rpc("history", self.history_group.update, None, limit=8)       # a session just started or ended
                 self._notify(state, st)
             self._last_state = state
 
@@ -1338,6 +1485,13 @@ class PreferencesWindow(Adw.PreferencesWindow):
         page.add(g)
         g = Adw.PreferencesGroup(title="Interface")
         g.add(self._switch("ui.notifications", "Desktop notifications"))
+        app = parent.get_application()
+        opts = [(0, "Off"), (5, "Every 5 minutes"), (15, "Every 15 minutes"), (30, "Every 30 minutes")]
+        lat = Adw.ComboRow(title="Test server latency automatically", subtitle="While the Servers tab is open",
+                           model=Gtk.StringList.new([o[1] for o in opts]))
+        lat.set_selected(next((i for i, o in enumerate(opts) if o[0] == app.userconfig.get("auto_latency")), 0))
+        lat.connect("notify::selected", lambda r, _p: app.userconfig.set("auto_latency", opts[r.get_selected()][0]))
+        g.add(lat)
         page.add(g)
         self.add(page)
 

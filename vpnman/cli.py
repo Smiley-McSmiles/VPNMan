@@ -81,7 +81,13 @@ class Cli:
             for p in ps:
                 print(p["name"])
             return 0
+        if getattr(a, "sort", None) == "latency":
+            a.latency = True
         lat = self.call("latency") if a.latency else {}
+        if getattr(a, "sort", None):
+            key = {"name": lambda p: p["name"].lower(), "group": lambda p: ((p.get("group") or "~").lower(), p["name"].lower()),
+                   "latency": lambda p: (lat.get(p["id"]) is None, lat.get(p["id"]) or 0, p["name"].lower())}[a.sort]
+            ps = sorted(ps, key=key)
         if a.json:
             print(json.dumps(ps, indent=2))
             return 0
@@ -93,8 +99,10 @@ class Cli:
             flags = ("★" if p["favorite"] else " ") + ("⊘" if p["blacklisted"] else " ")
             ms = lat.get(p["id"])
             extra = ("  %6.1f ms" % ms) if ms else ("  %9s" % "-" if a.latency else "")
-            print("%s %-*s  %-12s %s%s" % (flags, w, p["name"], p["protocol"],
-                                            dim("%s:%s" % (p["server"], p["port"]) if p["server"] else ""), extra))
+            grp = ("  [%s]" % p["group"]) if p.get("group") else ""
+            print("%s %-*s  %-12s %s%s%s" % (flags, w, p["name"], p["protocol"],
+                                              dim("%s:%s" % (p["server"], p["port"]) if p["server"] else ""), extra,
+                                              dim(grp)))
         return 0
 
     def cmd_connect(self, a):
@@ -153,13 +161,18 @@ class Cli:
         return 0
 
     def cmd_import(self, a):
-        targets = []
+        targets, groups = [], {}
         for path in a.paths:
             if os.path.isdir(path):
+                top = os.path.abspath(path)
                 for root, _d, files in os.walk(path):
                     for f in sorted(files):
                         if f.lower().endswith((".ovpn", ".conf", ".swanctl", ".vpnc", ".fortivpn", ".yml", ".yaml")):
-                            targets.append(os.path.join(root, f))
+                            full = os.path.join(root, f)
+                            targets.append(full)
+                            rel = os.path.relpath(os.path.abspath(root), top)
+                            if rel != ".":                    # files in sub-folders: the folder name becomes the group
+                                groups[full] = rel.replace(os.sep, " / ")
             else:
                 targets.append(path)
         if not targets:
@@ -178,7 +191,9 @@ class Cli:
                 text, files = prof.collect_files(path)
                 name = a.name if (a.name and len(targets) == 1) else os.path.splitext(os.path.basename(path))[0]
                 p = self.call("profiles.import", name=name, text=text, files=files, protocol=a.protocol,
-                              filename=os.path.basename(path), fields=fields, options=options)
+                              filename=os.path.basename(path), fields=dict(fields, **({"group": groups[path]}
+                                                                              if path in groups and "group" not in fields else {})),
+                              options=options)
                 if a.stunnel_ca and a.stunnel:
                     self.upload_ca(p["id"], a.stunnel_ca)
                 print("%s %s  (%s)" % (green("imported"), p["name"], p["protocol"]))
@@ -454,6 +469,50 @@ class Cli:
         print("Saved.")
         return 0
 
+    def cmd_backup(self, a):
+        import base64
+        if a.action == "export":
+            if os.path.exists(a.file) and not a.force:
+                raise RpcError("%s exists - use --force to overwrite it" % a.file)
+            res = self.call("backup.export")
+            fd = os.open(a.file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(base64.b64decode(res["data"]))
+            print("Backup written to %s (%s)." % (a.file, human_bytes(res["size"])))
+            print(yellow("It contains your passwords and private keys - keep it somewhere safe."))
+            return 0
+        if not os.path.isfile(a.file):
+            raise RpcError("no such file: %s" % a.file)
+        with open(a.file, "rb") as fh:
+            raw = fh.read()
+        if a.replace and sys.stdin.isatty() and ask("This REPLACES every profile on this computer. Continue? (y/N)").lower() != "y":
+            return 1
+        res = self.call("backup.import", data=base64.b64encode(raw).decode(), replace=a.replace,
+                        restore_settings=True if a.settings else None)
+        print("Restored: %d profile(s) added, %d already present%s%s." % (
+            res["added"], res["skipped"], ", %d removed first" % res["removed"] if a.replace else "",
+            ", settings restored" if res["settings"] else ""))
+        return 0
+
+    def cmd_history(self, a):
+        if a.clear:
+            self.call("history.clear")
+            print("History cleared.")
+            return 0
+        rows = self.call("history", limit=a.lines)
+        if a.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            print("No connections recorded yet.")
+            return 0
+        for r in rows:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["start"]))
+            d = r["duration"]
+            print("%s  %-28s %8s  down %-10s up %-10s %s" % (when, r["profile"][:28], "%d:%02d:%02d" % (d // 3600, d % 3600 // 60, d % 60),
+                                                           human_bytes(r["rx"]), human_bytes(r["tx"]), dim(r["reason"])))
+        return 0
+
     def cmd_networks(self, a):
         act = a.action or "show"
         if act in ("trust", "untrust"):
@@ -657,6 +716,14 @@ def pick(items, label, render):
     return None
 
 
+def human_bytes(n):
+    n = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return ("%d %s" % (n, unit)) if unit == "B" else "%.1f %s" % (n, unit)
+        n /= 1024
+
+
 def _parse_days(text):
     from . import schedule as sch
     t = (text or "all").lower().replace(" ", "")
@@ -832,6 +899,7 @@ def build_parser():
     s = add("status", "show connection status"); s.add_argument("--json", action="store_true")
     s = add("list", "list profiles", aliases=["ls"]); s.add_argument("--latency", "-l", action="store_true")
     s.add_argument("--names", action="store_true", help="one profile name per line (used by shell completion)")
+    s.add_argument("--sort", choices=["name", "latency", "group"], help="sort order (latency implies --latency)")
     s.add_argument("--json", action="store_true")
     s = add("connect", "connect to a profile", aliases=["up"])
     s.add_argument("profile", nargs="?"); s.add_argument("--fastest", action="store_true")
@@ -868,6 +936,14 @@ def build_parser():
     s.add_argument("--name"); s.add_argument("--days", help="all | weekdays | weekends | mon,wed | mon-fri")
     s.add_argument("--start", metavar="HH:MM"); s.add_argument("--end", metavar="HH:MM", help="disconnect again at this time")
     s.add_argument("--profile", help="profile name/id, 'fastest' or 'last' (default: last used)")
+    s = add("backup", "export or restore all profiles (with credentials) and settings")
+    s.add_argument("action", choices=["export", "import"]); s.add_argument("file")
+    s.add_argument("--replace", action="store_true", help="import: make this computer match the backup")
+    s.add_argument("--settings", action="store_true", help="import: also restore the settings (always with --replace)")
+    s.add_argument("--force", action="store_true", help="export: overwrite an existing file")
+    s = add("history", "recent connections: when, how long, how much traffic")
+    s.add_argument("-n", "--lines", type=int, default=20); s.add_argument("--json", action="store_true")
+    s.add_argument("--clear", action="store_true")
     s = add("networks", "show the current network; trust/untrust it (auto-connect on untrusted networks)")
     s.add_argument("action", nargs="?", choices=["show", "trust", "untrust"]); s.add_argument("name", nargs="?")
     s = add("routes", "addresses, networks or domains that skip the VPN: list|add|remove")
