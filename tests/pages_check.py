@@ -38,9 +38,9 @@ class App(A.Application):
         # picker lists installed apps and returns the typed custom program
         got = []
         pick = P.AppPicker(w, [], got.extend)
-        pick.custom.set_text("qbittorrent")
+        pick.custom.set_text("firefox")
         pick._submit()
-        assert got and got[-1]["match"] == ["qbittorrent"], got
+        assert got and got[-1]["match"] == ["firefox"], got
         w.bypass_page.update({"enabled": False, "supported": False, "reason": "needs nftables", "active": False, "apps": []})
         assert not w.bypass_page.enabled.get_sensitive()
         print("PAGES-OK")
