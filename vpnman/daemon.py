@@ -62,6 +62,14 @@ def _changed(m, key, result):
     return result
 
 
+def _remove_one(m, ident):
+    p = m.store.find(ident)
+    res = m.remove_profiles([p["id"]])
+    if res["failed"]:
+        raise ProfileError(res["failed"][0]["error"])
+    return public_view(p)
+
+
 def _import(m, **kw):
     return m.import_profile(**kw)
 
@@ -78,7 +86,8 @@ METHODS = {
         name, protocol, fields, options, files),
     "profiles.setfile": lambda m, ident, name, data: m.set_profile_file(ident, name, data),
     "profiles.update": lambda m, ident, changes: public_view(m.store.update(ident, changes)),
-    "profiles.remove": lambda m, ident: public_view(m.store.remove(ident)),
+    "profiles.remove": lambda m, ident: _remove_one(m, ident),
+    "profiles.remove_many": lambda m, ids: m.remove_profiles(ids),
     "latency": lambda m, ids=None: m.latency(ids),
     "connect": lambda m, ident=None, fastest=False, last=False: m.connect(ident, fastest, last),
     "disconnect": lambda m: m.disconnect(),

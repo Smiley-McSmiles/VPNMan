@@ -773,6 +773,105 @@ while :; do sleep 0.1; done
             m._split.active, m._split_cur = False, None
             m.settings.update({"split": {"apps": []}})
 
+    DEBIAN_OVPN = """verb 4
+client
+tls-client
+script-security 2
+remote-cert-tls server
+dev tun
+nobind
+remote test.example 1196 udp
+pull-filter ignore "dhcp-option DNS"
+dhcp-option DNS 203.0.113.53
+dhcp-option DNS 203.0.113.54
+persist-key
+persist-tun
+redirect-gateway def1 ipv6
+up /etc/openvpn/update-resolv-conf
+down /etc/openvpn/update-resolv-conf
+<ca>
+-----BEGIN CERTIFICATE-----
+AAAA
+-----END CERTIFICATE-----
+</ca>
+"""
+
+    def _openvpn_procs(self):
+        n = 0
+        for pid in os.listdir("/proc"):
+            if pid.isdigit():
+                try:
+                    cmd = open("/proc/%s/cmdline" % pid, "rb").read().replace(b"\0", b" ")
+                except OSError:
+                    continue
+                if b"bin/openvpn --config" in cmd and b"sleep" not in cmd:
+                    n += 1
+        return n
+
+    def test_switching_servers_never_leaves_two_tunnels(self):
+        a = self.c.call("profiles.import", name="swA", text="client\nremote 192.0.2.1 1194\n", filename="a.ovpn", files={})
+        b = self.c.call("profiles.import", name="swB", text="client\nremote 192.0.2.2 1194\n", filename="b.ovpn", files={})
+        try:
+            self.c.call("connect", ident=a["id"])
+            self.wait("connected")
+            errs = []
+
+            def go(ident):
+                try:
+                    ipc.Client(timeout=40).call("connect", ident=ident)      # two clicks racing each other
+                except Exception as e:  # noqa: BLE001
+                    errs.append(e)
+            ts = [threading.Thread(target=go, args=(b["id"],)) for _ in range(2)]
+            for t in ts:
+                t.start()
+            time.sleep(0.05)
+            self.assertEqual(self.c.call("status")["profile"], "swB")         # the UI sees the new server at once
+            for t in ts:
+                t.join()
+            self.assertEqual(errs, [])
+            st = self.wait("connected")
+            self.assertEqual(st["profile"], "swB")
+            time.sleep(0.5)
+            self.assertEqual(self._openvpn_procs(), 1)
+            self.c.call("connect", ident=a["id"])                              # and straight back again
+            st = self.wait("connected")
+            self.assertEqual((st["profile"], self._openvpn_procs()), ("swA", 1))
+        finally:
+            self.c.call("disconnect")
+            for ident in (a["id"], b["id"]):
+                self.c.call("profiles.remove", ident=ident)
+        self.assertEqual(self._openvpn_procs(), 0)
+
+    def test_remove_many_drops_a_live_connection_and_reports_failures(self):
+        a = self.c.call("profiles.import", name="rmA", text="client\nremote 192.0.2.1 1194\n", filename="a.ovpn", files={})
+        b = self.c.call("profiles.import", name="rmB", text="client\nremote 192.0.2.2 1194\n", filename="b.ovpn", files={})
+        self.c.call("connect", ident=a["id"])
+        self.wait("connected")
+        res = self.c.call("profiles.remove_many", ids=[a["id"], "nope-nothing", b["id"]])
+        self.assertEqual(sorted(res["removed"]), ["rmA", "rmB"])
+        self.assertEqual([f["id"] for f in res["failed"]], ["nope-nothing"])
+        self.assertEqual(self.c.call("status")["state"], "disconnected")       # the removed profile's tunnel is gone
+        self.assertEqual(self.c.call("profiles.list"), [])
+
+    def test_debian_style_config_runs_without_its_missing_scripts(self):
+        """up/down update-resolv-conf exist only on Debian/Ubuntu; a missing 'up' script aborts OpenVPN."""
+        p = self.c.call("profiles.import", name="deb", text=self.DEBIAN_OVPN, filename="deb.ovpn", files={})
+        try:
+            self.c.call("connect", ident=p["id"])
+            self.wait("connected")
+            runtime = open(TMP + "/last.ovpn").read()
+            self.assertNotIn("update-resolv-conf", runtime)
+            self.assertIn("pull-filter ignore", runtime)                      # everything else is kept
+            logs = " ".join(e["msg"] for e in self.c.call("logs")["entries"])
+            self.assertIn("Ignoring 'up /etc/openvpn/update-resolv-conf'", logs)
+            # the config's own DNS servers are used, not the ones the server pushes (which the config filters out)
+            resolv = open(os.environ["VPNMAN_RESOLV_CONF"]).read()
+            self.assertIn("203.0.113.53", resolv)
+            self.assertNotIn("10.8.0.1", resolv)
+        finally:
+            self.c.call("disconnect")
+            self.c.call("profiles.remove", ident=p["id"])
+
     def test_openvpn_over_stunnel(self):
         opts = {"stunnel": {"enabled": True, "host": "127.0.0.1", "port": 8443, "sni": "cdn.example.com"}}
         self.c.call("profiles.import", name="tls", text=OVPN.replace("auth-user-pass\n", ""),
@@ -1087,6 +1186,33 @@ class AppsTests(unittest.TestCase):
         self.assertEqual(cli._parse_days("mon-wed,sat"), [0, 1, 2, 5])
         self.assertEqual(cli._parse_days("fri-mon"), [0, 4, 5, 6])
         self.assertEqual(cli._parse_days(None), list(range(7)))
+
+
+class ServersGuiTests(unittest.TestCase):
+    @staticmethod
+    def _py():
+        import subprocess
+        return next((p for p in ("python3", "python3.12", "python3.11", "python3.13", "python3.10")
+                     if shutil_which(p) and subprocess.run([shutil_which(p), "-c", "import gi;gi.require_version('Gtk','4.0');gi.require_version('Adw','1');from gi.repository import Adw"],
+                                                           capture_output=True).returncode == 0), None)
+
+    def _run(self, script, need=()):
+        import subprocess
+        xvfb, runner, py = shutil_which("xvfb-run"), shutil_which("dbus-run-session"), self._py()
+        if not xvfb or not py or not runner or any(not shutil_which(n) for n in need):
+            self.skipTest("needs xvfb-run, dbus-run-session, PyGObject (GTK 4 + libadwaita) %s" % " ".join(need))
+        env = dict(os.environ, GSK_RENDERER="cairo", GTK_A11Y="none", VPNMAN_SOCKET=TMP + "/none.sock")
+        return subprocess.run([xvfb, "-a", "-s", "-screen 0 1000x800x24", runner, "--", shutil_which(py),
+                               os.path.join(os.path.dirname(__file__), script)],
+                              capture_output=True, text=True, timeout=120, env=env)
+
+    def test_multiselect_bulk_remove_and_server_switching(self):
+        r = self._run("servers_check.py")
+        self.assertIn("SERVERS-OK", r.stdout, r.stdout + r.stderr[-1500:])
+
+    def test_ctrl_and_shift_click_selection(self):
+        r = self._run("select_check.py", need=("xdotool",))
+        self.assertIn("SELECT-OK", r.stdout, r.stdout + r.stderr[-1500:])
 
 
 class PagesGuiTests(unittest.TestCase):

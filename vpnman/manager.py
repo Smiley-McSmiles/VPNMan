@@ -89,6 +89,7 @@ class Manager:
         self.settings = settings or Settings()
         self.log = LogBuffer()
         self._mlock = threading.RLock()
+        self._oplock = threading.RLock()    # serialises connect()/disconnect(): two clicks must not start two tunnels
         self._stop = threading.Event()
         self._thread = None
         self._proc = None
@@ -117,6 +118,11 @@ class Manager:
 
     def _set(self, **kw):
         with self._mlock:
+            # A connection thread that has been replaced (switching servers) must not overwrite the status of the
+            # connection that replaced it while it is still shutting down.
+            mine = getattr(threading.current_thread(), "vpn_stop", None)
+            if mine is not None and mine is not self._stop:
+                return
             self._status.update(kw)
 
     def status(self):
@@ -260,16 +266,21 @@ class Manager:
             p = self._fastest(profiles)
         else:
             p = self.store.find(ident)
-        self._cancel()
-        with self._mlock:
-            self._stop = threading.Event()
-            self._status = self._blank_status()
-            self._set(state="connecting", profile_id=p["id"], profile=p["name"], protocol=p["protocol"],
-                      message="Starting")
-            self._thread = threading.Thread(target=self._run, args=(p, self._stop, persistent), daemon=True,
-                                            name="vpn-conn")
-            self._thread.start()
-        self._save_state(last_profile=p["id"])
+        with self._oplock:
+            with self._mlock:
+                # New generation first: the old connection thread's late status updates are ignored from here on,
+                # and the UI shows "connecting" at once instead of the old server until the old tunnel is gone.
+                old_stop = self._stop
+                self._stop = stop = threading.Event()
+                self._status = self._blank_status()
+                self._set(state="connecting", profile_id=p["id"], profile=p["name"], protocol=p["protocol"],
+                          message="Switching server" if self._thread and self._thread.is_alive() else "Starting")
+            self._cancel(old_stop)
+            with self._mlock:
+                self._thread = threading.Thread(target=self._run, args=(p, stop, persistent), daemon=True,
+                                                name="vpn-conn")
+                self._thread.start()
+            self._save_state(last_profile=p["id"])
         return {"profile": p["name"], "id": p["id"]}
 
     def _fastest(self, profiles):
@@ -280,9 +291,9 @@ class Manager:
         scored = sorted(cands, key=lambda p: (lat.get(p["id"]) is None, lat.get(p["id"]) or 0))
         return scored[0]
 
-    def _cancel(self):
+    def _cancel(self, stop=None):
         t = self._thread
-        self._stop.set()
+        (stop or self._stop).set()
         proc = self._proc
         if proc and proc.poll() is None:
             _terminate(proc)
@@ -291,22 +302,24 @@ class Manager:
         self._thread = None
 
     def disconnect(self, release_lock=True):
-        self._cancel()
-        with self._mlock:
-            was = self._status["state"]
-            self._status = self._blank_status()
-        if release_lock:
-            try:
-                self._after_disconnect_lock()
-            except Exception as e:  # noqa: BLE001
-                self.log.add("error", "Network lock update failed: %s" % e)
-        if was != "disconnected":
-            self.log.add("info", "Disconnected")
+        with self._oplock:
+            self._cancel()
+            with self._mlock:
+                was = self._status["state"]
+                self._status = self._blank_status()
+            if release_lock:
+                try:
+                    self._after_disconnect_lock()
+                except Exception as e:  # noqa: BLE001
+                    self.log.add("error", "Network lock update failed: %s" % e)
+            if was != "disconnected":
+                self.log.add("info", "Disconnected")
         return True
 
     # -------------------------------------------------------------- run loop
     def _run(self, profile, stop, persistent=False):
         """persistent: never give up (used for boot-time auto-connect on slow/late networks)."""
+        threading.current_thread().vpn_stop = stop      # lets _set() tell a replaced connection from the current one
         s = self.settings
         attempt = 0
         tried = {profile["id"]}
@@ -434,6 +447,8 @@ class Manager:
             self._set(message="Connecting")
             try:
                 backend.prepare(ctx)
+                for note in ctx.state.get("notes", []):
+                    self.log.add("info", note)
                 if not oneshot:
                     cmd = backend.connect_cmd(ctx)
             except ValueError as e:
@@ -811,7 +826,7 @@ class Manager:
             with urllib.request.urlopen(req, timeout=10, context=ssl.create_default_context()) as r:
                 body = r.read(2048).decode("utf-8", "replace")
             m = re.search(r'"ip"\s*:\s*"([^"]+)"', body) or re.search(r"(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]{6,})", body)
-            if m and not stop.is_set():
+            if m and not stop.is_set() and stop is self._stop:
                 self._set(public_ip=m.group(1))
                 self.log.add("info", "Public IP is now %s" % m.group(1))
         except Exception as e:  # noqa: BLE001
@@ -885,6 +900,25 @@ class Manager:
         p = self.store.find(ident)
         self.store.save(p, {name: base64.b64decode(b64)})
         return public_view(p)
+
+    def remove_profiles(self, idents):
+        """Delete several profiles; a live connection to one of them is dropped first.  Never stops half-way:
+        returns {"removed": [names], "failed": [{"id", "error"}]}."""
+        removed, failed = [], []
+        for ident in idents:
+            try:
+                p = self.store.find(ident)
+                with self._mlock:
+                    live = self._status.get("profile_id") == p["id"] and self._status.get("state") != "disconnected"
+                if live:
+                    self.disconnect()
+                self.store.remove(p["id"])
+                removed.append(p["name"])
+            except (ProfileError, KeyError, OSError) as e:
+                failed.append({"id": ident, "error": str(e.args[0] if isinstance(e, KeyError) and e.args else e)})
+        if removed:
+            self.log.add("info", "Removed %d profile(s): %s" % (len(removed), ", ".join(removed)))
+        return {"removed": removed, "failed": failed}
 
     def _unique_name(self, p):
         names = {q["name"] for q in self.store.list()}

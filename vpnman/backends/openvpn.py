@@ -1,8 +1,18 @@
+import os
 import re
+import shlex
+import shutil
 
 from .. import stunnel
 from .base import Backend
 
+# Script hooks that Debian-style configs ship: they either do not exist on this distribution (update-resolv-conf is
+# a Debian/Ubuntu file) or fight with vpnman, which sets the DNS servers itself. A missing hook is fatal for OpenVPN
+# ("up" failing aborts the connection), so such lines are dropped from the runtime copy.
+_HOOKS = ("up", "down", "route-up", "route-pre-down", "ipchange", "up-restart", "client-connect", "client-disconnect")
+_DNS_HELPERS = re.compile(r"update-resolv-conf|update-systemd-resolved|resolvconf|openresolv|systemd-resolve|"
+                          r"resolved-up|dns-up|dns-down", re.I)
+_HOOK_LINE = re.compile(r"^\s*(%s)\s+(.+?)\s*$" % "|".join(re.escape(h) for h in _HOOKS), re.I)
 _REMOTE = re.compile(r"^\s*remote\s+(\S+)(?:\s+(\d+))?(?:\s+(udp6?|tcp6?(?:-client)?))?", re.M | re.I)
 
 
@@ -67,6 +77,41 @@ class OpenVPN(Backend):
         m = re.search(r"^\s*dev\s+(tun|tap)", text, re.M)
         return m.group(1) if m else "tun"
 
+    @staticmethod
+    def sanitize_hooks(text, profile_dir):
+        """Drop up/down-style script hooks that cannot work here.  Returns (new text, [explanations])."""
+        out, notes, inline = [], [], None
+        for line in text.splitlines():
+            st = line.strip()
+            if inline:
+                if st.startswith("</" + inline):
+                    inline = None
+                out.append(line)
+                continue
+            m = re.match(r"^<([a-z0-9-]+)>$", st)
+            if m:
+                inline = m.group(1)
+                out.append(line)
+                continue
+            hook = _HOOK_LINE.match(line) if not st.startswith(("#", ";")) else None
+            if hook:
+                try:
+                    cmd = shlex.split(hook.group(2))
+                except ValueError:
+                    cmd = hook.group(2).split()
+                exe = cmd[0] if cmd else ""
+                why = None
+                if _DNS_HELPERS.search(exe):
+                    why = "vpnman sets the DNS servers itself"
+                elif exe and not (os.path.isfile(exe) if os.path.isabs(exe) else
+                                  (os.path.isfile(os.path.join(profile_dir, exe)) or shutil.which(exe))):
+                    why = "the script does not exist on this system"
+                if why:
+                    notes.append("Ignoring '%s %s' from the config: %s" % (hook.group(1), exe, why))
+                    continue
+            out.append(line)
+        return "\n".join(out) + ("\n" if text.endswith("\n") else ""), notes
+
     def prepare(self, ctx):
         """Write a runtime copy whose ``remote`` hosts are already resolved, so
         OpenVPN never needs DNS while the kill switch is up."""
@@ -79,6 +124,14 @@ class OpenVPN(Backend):
             return m.group(1) + ip + m.group(3) if ip else m.group(0)
 
         text = re.sub(r"^(\s*remote\s+)(\S+)(.*)$", sub, text, flags=re.M)
+        text, notes = self.sanitize_hooks(text, ctx.profile_dir)
+        ctx.state["notes"] = notes
+        # DNS servers written into the config itself ("dhcp-option DNS x") and a filter that ignores the pushed ones
+        for m in re.finditer(r"^\s*dhcp-option\s+DNS6?\s+([0-9a-fA-F.:]+)\s*$", text, re.M | re.I):
+            if m.group(1) not in ctx.dns:
+                ctx.dns.append(m.group(1))
+        ctx.state["ignore_pushed_dns"] = bool(
+            re.search(r"^\s*pull-filter\s+ignore\s+[\"']?dhcp-option\s+DNS", text, re.M | re.I))
         tun = ctx.state.get("stunnel")
         if tun:
             # OpenVPN talks TCP to the local stunnel; stunnel carries it over TLS to the server.
@@ -113,5 +166,7 @@ class OpenVPN(Backend):
         if m:
             ctx.iface = m.group(1)
         m = re.search(r"dhcp-option DNS6?\s+([0-9a-fA-F.:]+)", line)
+        if m and ctx.state.get("ignore_pushed_dns"):
+            m = None                    # the config told OpenVPN to ignore the server's DNS; keep the config's own
         if m and m.group(1) not in ctx.dns:
             ctx.dns.append(m.group(1))

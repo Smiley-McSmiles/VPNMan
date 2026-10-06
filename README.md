@@ -90,7 +90,7 @@ session inside is still authenticated); a warning is logged.
 
 | Feature | Status |
 |---------|--------|
-| Server/profile list, favourites, blacklist, search, latency test, "fastest" | ✔ |
+| Server/profile list, favourites, blacklist, search, latency test, "fastest"; multi-select (Ctrl+click, Shift+click, Ctrl+A) for bulk remove | ✔ |
 | Connect / disconnect / auto-reconnect / fail-over to next favourite | ✔ |
 | Auto-connect on start (`off`, `last`, `fastest`, or a profile) | ✔ |
 | Network lock: nftables, iptables(+ip6tables), pf; LAN/DHCP/ping/IPv6 toggles; in/out whitelists; persist across reboots | ✔ |

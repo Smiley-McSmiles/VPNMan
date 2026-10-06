@@ -299,6 +299,19 @@ class ProfileDialog(Adw.Window):
             self.on_done()
         self.close()
 
+    def _import_done(self, done, errors):
+        """Report a whole batch: what was imported, and every file that was not (with its reason)."""
+        if done and self.on_done:
+            self.on_done()                        # the list shows what was imported even if some files failed
+        if not errors:
+            return self._finish()
+        if done:
+            self.files = []                        # never re-submit the files that already went in (duplicates)
+            self.file_row.set_subtitle("None selected")
+            self.on_done = None
+            self.parent_win.toast("Imported %d of %d - see the dialog for the rest" % (done, done + len(errors)))
+        self._error("; ".join(errors))
+
     def _submit(self, *_):
         self.save.set_sensitive(False)
         if self.mode == "import":
@@ -314,16 +327,19 @@ class ProfileDialog(Adw.Window):
                 return self._error(e)
 
             def work():
-                err = None
+                done, errors = 0, []
                 for f in files:
                     try:
                         text, extra = prof.collect_files(f)
-                        extra.update(st_files)
-                        Client().call("profiles.import", name=(name if len(files) == 1 and name else os.path.splitext(os.path.basename(f))[0]),
-                                      text=text, files=extra, protocol=proto, filename=os.path.basename(f), fields=fields, options=st_opts)
+                        extra = dict(extra, **st_files)
+                        Client().call("profiles.import",
+                                      name=(name if len(files) == 1 and name else os.path.splitext(os.path.basename(f))[0]),
+                                      text=text, files=extra, protocol=proto, filename=os.path.basename(f),
+                                      fields=fields, options=st_opts)
+                        done += 1
                     except (RpcError, DaemonUnavailable, OSError) as e:
-                        err = "%s: %s" % (os.path.basename(f), e)
-                GLib.idle_add(self._error if err else self._finish, err)
+                        errors.append("%s: %s" % (os.path.basename(f), e))
+                GLib.idle_add(self._import_done, done, errors)
             threading.Thread(target=work, daemon=True).start()
             return
         name = self.name.get_text().strip()
@@ -639,10 +655,15 @@ class MainWindow(Adw.ApplicationWindow):
         self.ping_btn = Gtk.Button(label="Test Latency")
         self.ping_btn.connect("clicked", self.on_ping)
         top.append(self.ping_btn)
-        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        # MULTIPLE gives Ctrl+click (toggle one), Shift+click (range) and Ctrl+A for free
+        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.MULTIPLE, activate_on_single_click=False)
         self.listbox.add_css_class("boxed-list")
         self.listbox.set_filter_func(self._filter)
         self.listbox.set_sort_func(self._sort)
+        self.listbox.connect("selected-rows-changed", self._on_selection_changed)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_list_key)
+        self.listbox.add_controller(keys)
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         inner.append(top)
         inner.append(self.listbox)
@@ -659,8 +680,26 @@ class MainWindow(Adw.ApplicationWindow):
         b.add_css_class("suggested-action")
         b.connect("clicked", self.on_import)
         self.empty.set_child(b)
+        # selection bar: appears as soon as something is selected
+        self.sel_label = Gtk.Label(label="", hexpand=True, xalign=0, margin_start=6)
+        sel_all = Gtk.Button(label="Select All")
+        sel_all.connect("clicked", lambda *_: self.listbox.select_all())
+        sel_none = Gtk.Button(label="Clear")
+        sel_none.connect("clicked", lambda *_: self.listbox.unselect_all())
+        self.sel_remove = Gtk.Button(label="Remove…")
+        self.sel_remove.add_css_class("destructive-action")
+        self.sel_remove.connect("clicked", lambda *_: self._remove_selected())
+        bar = Gtk.ActionBar()
+        bar.pack_start(self.sel_label)
+        bar.pack_end(self.sel_remove)
+        bar.pack_end(sel_none)
+        bar.pack_end(sel_all)
+        self.sel_bar = Gtk.Revealer(child=bar, reveal_child=False, transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
+        listpage = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        listpage.append(scroll)
+        listpage.append(self.sel_bar)
         self.srv_stack = Gtk.Stack()
-        self.srv_stack.add_named(scroll, "list")
+        self.srv_stack.add_named(listpage, "list")
         self.srv_stack.add_named(self.empty, "empty")
         box.append(self.srv_stack)
         return box
@@ -697,7 +736,7 @@ class MainWindow(Adw.ApplicationWindow):
         pb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         for label, cb in (("Edit…", lambda *_: self._edit(p)),
                           ("Unblock" if p["blacklisted"] else "Blacklist", lambda *_: self._toggle_block(p)),
-                          ("Remove…", lambda *_: self._remove(p))):
+                          ("Remove…", lambda *_, row=row: self._remove_for_row(row))):
             b = Gtk.Button(label=label)
             b.add_css_class("flat")
             b.connect("clicked", lambda w, cb=cb: (pop.popdown(), cb()))
@@ -718,13 +757,64 @@ class MainWindow(Adw.ApplicationWindow):
         rpc("profiles.update", lambda *_: self.refresh(full=True), ident=p["id"],
             changes={"blacklisted": not p["blacklisted"]})
 
+    def selected_profiles(self):
+        return [r.profile for r in self.listbox.get_selected_rows()]
+
+    def _on_selection_changed(self, *_):
+        n = len(self.listbox.get_selected_rows())
+        self.sel_label.set_label("%d selected" % n)
+        self.sel_bar.set_reveal_child(n > 0)
+
+    def _on_list_key(self, _ctl, keyval, _code, _state):
+        if keyval in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete) and self.listbox.get_selected_rows():
+            self._remove_selected()
+            return True
+        if keyval == Gdk.KEY_Escape and self.listbox.get_selected_rows():
+            self.listbox.unselect_all()
+            return True
+        return False
+
+    def _remove_for_row(self, row):
+        """The row's own menu: removes the whole selection when the row is part of a multi-selection."""
+        sel = self.selected_profiles()
+        self._remove_many(sel if row.is_selected() and len(sel) > 1 else [row.profile])
+
+    def _remove_selected(self):
+        sel = self.selected_profiles()
+        if sel:
+            self._remove_many(sel)
+
     def _remove(self, p):
-        d = Adw.MessageDialog(transient_for=self, heading="Remove %s?" % p["name"],
-                              body="The profile and its stored credentials will be deleted.")
+        self._remove_many([p])
+
+    def _remove_many(self, profiles):
+        if not profiles:
+            return
+        if len(profiles) == 1:
+            heading, body = "Remove %s?" % profiles[0]["name"], "The profile and its stored credentials will be deleted."
+        else:
+            names = [p["name"] for p in profiles]
+            shown = ", ".join(names[:6]) + (" and %d more" % (len(names) - 6) if len(names) > 6 else "")
+            heading = "Remove %d profiles?" % len(profiles)
+            body = "%s\n\nThe profiles and their stored credentials will be deleted." % shown
+        active = (self.status or {}).get("profile_id")
+        if active and active in [p["id"] for p in profiles] and (self.status or {}).get("state") in ACTIVE:
+            body += " The VPN will be disconnected."
+        d = Adw.MessageDialog(transient_for=self, heading=heading, body=body)
         d.add_response("cancel", "Cancel")
         d.add_response("remove", "Remove")
         d.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
-        d.connect("response", lambda d, r: r == "remove" and rpc("profiles.remove", lambda *_: self.refresh(full=True), ident=p["id"]))
+        ids = [p["id"] for p in profiles]
+
+        def done(res):
+            gone = len(res.get("removed", []))
+            if res.get("failed"):
+                self.toast("Removed %d, %d failed: %s" % (gone, len(res["failed"]), res["failed"][0]["error"]))
+            else:
+                self.toast("Removed %d profile%s" % (gone, "" if gone == 1 else "s"))
+            self.refresh(full=True)
+
+        d.connect("response", lambda d, r: r == "remove" and rpc("profiles.remove_many", done, self._fail, ids=ids))
         d.present()
 
     # ---- network lock page -------------------------------------------
@@ -874,9 +964,24 @@ class MainWindow(Adw.ApplicationWindow):
             row.lat.set_label("%.0f ms" % ms if ms else ("timeout" if pid in self.latency else ""))
 
     def connect_to(self, pid):
+        """Connect (or switch) to a server.  The daemon replaces a live tunnel itself; here we only make sure that a
+        second click while the first request is in flight does not start a second one, and that the polling
+        refresh does not snap the selection back to the old server in the meantime."""
+        pend = getattr(self, "_pending", None)
+        if pend and pend[0] == pid and time.monotonic() < pend[1]:
+            return
         self.sel_id = pid
+        self._pending = (pid, time.monotonic() + 90)
         self.stack.set_visible_child_name("overview")
-        rpc("connect", lambda *_: self.refresh(), self._fail, ident=pid)
+
+        def settled(*_):
+            self._pending = None
+            self.refresh()
+
+        def failed(msg, down=False):
+            self._pending = None
+            self._fail(msg, down)
+        rpc("connect", settled, failed, ident=pid)
 
     def on_main_button(self, *_):
         st = self.status or {}
@@ -931,6 +1036,7 @@ class MainWindow(Adw.ApplicationWindow):
         if self.sel_id:
             self.server_row.set_selected(ids.index(self.sel_id))
         self._quiet = False
+        keep = {r.profile["id"] for r in self.listbox.get_selected_rows()}
         child = self.listbox.get_first_child()
         while child:
             nxt = child.get_next_sibling()
@@ -941,6 +1047,8 @@ class MainWindow(Adw.ApplicationWindow):
             row = self._make_row(p)
             self._rows[p["id"]] = row
             self.listbox.append(row)
+            if p["id"] in keep:
+                self.listbox.select_row(row)
         self._update_latency()
         self.srv_stack.set_visible_child_name("list" if profiles else "empty")
         self._sync_auto()
@@ -971,7 +1079,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._quiet = False
         self.server_row.set_sensitive(not active)
         pid = st.get("profile_id")
-        if active and pid and pid != self.sel_id:
+        pend = getattr(self, "_pending", None)
+        if active and pid and pid != self.sel_id and not (pend and time.monotonic() < pend[1]):
             self.sel_id = pid             # opened mid-connection: show the server actually in use
             ids = [p["id"] for p in self.profiles]
             if pid in ids:
