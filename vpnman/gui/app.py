@@ -10,7 +10,8 @@ try:
     import gi
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
-    from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
+    gi.require_version("Graphene", "1.0")
+    from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk, Pango
 except (ImportError, ValueError) as exc:  # pragma: no cover
     print("The GUI needs PyGObject, GTK 4 and libadwaita >= 1.4: %s" % exc, file=sys.stderr)
     raise SystemExit(1)
@@ -708,13 +709,15 @@ class MainWindow(Adw.ApplicationWindow):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24, margin_bottom=24)
         self.hero = Hero("network-vpn-disabled-symbolic", "Not Connected", "Choose a server and connect.")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER)
-        self.server_row = Adw.ComboRow(title="Server", model=Gtk.StringList.new([]))
+        self.server_names = Gtk.StringList.new([])
+        self.server_row = Adw.ComboRow(title="Server", model=self.server_names)
         self.server_row.connect("notify::selected", self._on_server_selected)
         # a ComboRow only reacts to clicks inside a GtkListBox (the list delivers the activation)
         pick = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         pick.add_css_class("boxed-list")
-        pick.set_size_request(340, -1)
+        pick.set_size_request(420, -1)
         pick.append(self.server_row)
+        self.server_row.connect("realize", self._style_server_popup)
         box.append(pick)
         self.main_btn = Gtk.Button(label="Connect", halign=Gtk.Align.CENTER)
         self.main_btn.add_css_class("pill")
@@ -1362,6 +1365,39 @@ class MainWindow(Adw.ApplicationWindow):
         else:
             self.connect_to(self.sel_id or self.profiles[0]["id"])
 
+    def _style_server_popup(self, row):
+        """Make the server drop-down as wide as its row and centre it under the row (it points at the arrow by default)."""
+        pop = next((w for w in self._iter_widgets(row) if isinstance(w, Gtk.Popover)), None)
+        if pop is None:
+            return
+
+        def place(*_):
+            parent = pop.get_parent()
+            w, h = row.get_width(), row.get_height()
+            ok, pt = row.compute_point(parent, Graphene.Point().init(0, 0)) if parent else (False, None)
+            if ok and w:
+                rect = Gdk.Rectangle()
+                rect.x, rect.y, rect.width, rect.height = int(pt.x), int(pt.y), w, h
+                pop.set_pointing_to(rect)
+                pop.set_size_request(w, -1)
+        # the stock rows cut names at ~20 characters; give them the whole width
+        fac = Gtk.SignalListItemFactory()
+        fac.connect("setup", lambda _f, li: li.set_child(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END,
+                                                                   margin_top=8, margin_bottom=8)))
+        fac.connect("bind", lambda _f, li: li.get_child().set_label(li.get_item().get_string()))
+        row.set_list_factory(fac)
+        pop.set_has_arrow(False)
+        pop.set_position(Gtk.PositionType.BOTTOM)
+        pop.connect("map", place)
+
+    @staticmethod
+    def _iter_widgets(widget):
+        child = widget.get_first_child()
+        while child is not None:
+            yield child
+            yield from MainWindow._iter_widgets(child)
+            child = child.get_next_sibling()
+
     def _on_server_selected(self, row, _p):
         i = row.get_selected()
         if not self._quiet and 0 <= i < len(self.profiles):
@@ -1410,7 +1446,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.profiles = profiles
         self._quiet = True
         names = [p["name"] for p in profiles]
-        self.server_row.set_model(Gtk.StringList.new(names))
+        # edit the one list in place: replacing the model left removed servers in the open drop-down
+        self.server_names.splice(0, self.server_names.get_n_items(), names)
         ids = [p["id"] for p in profiles]
         if self.sel_id not in ids:
             self.sel_id = ids[0] if ids else None
