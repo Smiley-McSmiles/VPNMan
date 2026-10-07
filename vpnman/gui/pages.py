@@ -6,7 +6,7 @@ import time
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, GLib, GObject, Gtk  # noqa: E402
 
 from .. import apps as appmod, schedule as sched  # noqa: E402
 
@@ -532,105 +532,3 @@ class HistoryGroup(Adw.PreferencesGroup):
                                     when, dur, human(r["rx"]), human(r["tx"]), r.get("reason", ""))))
             self.add(row)
             self._rows.append(row)
-
-
-class ConnRow(GObject.Object):
-    """One row of the connection table."""
-
-    def __init__(self, data):
-        super().__init__()
-        self.data = data
-
-
-class ConnectionsGroup(Adw.PreferencesGroup):
-    """Live table of the computer's connections: way, application, protocol, local and remote address, state."""
-    WAY = {"in": "In", "out": "Out", "listen": "Listening"}
-    COLUMNS = (
-        ("Way", 62, lambda r: ConnectionsGroup.WAY.get(r["dir"], r["dir"])),
-        ("Application", 150, lambda r: ("%s (%d)" % (r["app"], r["pid"])) if r["pid"] else (r["app"] or "–")),
-        ("Protocol", 66, lambda r: r["proto"].upper() + ("6" if r["v6"] else "")),
-        ("Local", 150, lambda r: "%s:%d" % (r["local"], r["lport"])),
-        ("Remote", 150, lambda r: ("%s:%d" % (r["remote"], r["rport"])) if r["rport"] else "–"),
-        ("State", 96, lambda r: r["state"] or "–"),
-    )
-
-    def __init__(self):
-        super().__init__(title="Connections", description="Applications using the network right now")
-        self.store = Gio.ListStore(item_type=ConnRow)
-        self._keys = None
-        self.listening = Gtk.CheckButton(label="Listening")
-        self.local = Gtk.CheckButton(label="Local")
-        self.local.set_tooltip_text("Include connections that stay inside this computer")
-        self.search = Gtk.SearchEntry(placeholder_text="Filter", width_chars=14)
-        self.search.connect("search-changed", lambda *_: self.refilter())
-        hdr = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER)
-        for w in (self.search, self.listening, self.local):
-            hdr.append(w)
-        self.set_header_suffix(hdr)
-        self.filter = Gtk.CustomFilter.new(self._match)
-        self.filtered = Gtk.FilterListModel(model=self.store, filter=self.filter)
-        self.view = Gtk.ColumnView(model=Gtk.NoSelection(model=self.filtered), show_row_separators=True,
-                                   reorderable=False)
-        self.view.add_css_class("data-table")
-        for title, width, fn in self.COLUMNS:
-            factory = Gtk.SignalListItemFactory()
-            factory.connect("setup", self._setup)
-            factory.connect("bind", self._bind, fn)
-            col = Gtk.ColumnViewColumn(title=title, factory=factory, resizable=True, fixed_width=width,
-                                       expand=(title == "Application"))
-            self.view.append_column(col)
-        self.scroll = Gtk.ScrolledWindow(min_content_height=240, max_content_height=240, vexpand=False,
-                                         hscrollbar_policy=Gtk.PolicyType.AUTOMATIC)
-        self.scroll.set_child(self.view)
-        frame = Gtk.Frame()
-        frame.set_child(self.scroll)
-        self.add(frame)
-        self.summary = Gtk.Label(xalign=0, margin_top=6)
-        self.summary.add_css_class("dim-label")
-        self.add(self.summary)
-
-    @staticmethod
-    def _setup(_f, item):
-        item.set_child(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, margin_start=6, margin_end=6,
-                                 margin_top=3, margin_bottom=3))
-
-    @staticmethod
-    def _bind(_f, item, fn):
-        item.get_child().set_label(fn(item.get_item().data))
-
-    def _match(self, item):
-        q = self.search.get_text().strip().lower()
-        if not q:
-            return True
-        r = item.data
-        hay = " ".join(str(fn(r)) for _t, _w, fn in self.COLUMNS).lower()
-        return q in hay
-
-    def refilter(self):
-        self.filter.changed(Gtk.FilterChange.DIFFERENT)
-        self._summary()
-
-    def params(self):
-        return {"listening": self.listening.get_active(), "local": self.local.get_active()}
-
-    def update(self, res):
-        rows = res.get("rows", [])
-        keys = [(r["dir"], r["proto"], r["v6"], r["local"], r["lport"], r["remote"], r["rport"], r["state"], r["pid"])
-                for r in rows]
-        if keys != self._keys:                          # leave the table (and its scroll position) alone when nothing changed
-            self._keys = keys
-            adj = self.scroll.get_vadjustment()
-            pos = adj.get_value()
-            self.store.splice(0, self.store.get_n_items(), [ConnRow(r) for r in rows])
-            GLib.idle_add(adj.set_value, pos)
-        self._note = res.get("note", "") or ("(list truncated)" if res.get("truncated") else "")
-        self._summary()
-
-    def _summary(self):
-        n, total = self.filtered.get_n_items(), self.store.get_n_items()
-        text = "%d connection%s" % (n, "" if n == 1 else "s")
-        if n != total:
-            text += " (of %d)" % total
-        if getattr(self, "_note", ""):
-            text += " · " + self._note
-        self.summary.set_label(text)

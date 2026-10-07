@@ -15,6 +15,7 @@ _vpnman() {
         'autostart:connect the VPN automatically when the system starts'
         'backup:export or restore all profiles (with credentials) and settings'
         'block:blacklist'
+        'blocks:addresses, ports and programs that may not use the network'
         'bypass:apps that skip the VPN (split tunnel)'
         'cleanup:remove firewall rules, routes and cgroups VPNMan left behind (root)'
         'connect:connect to a profile'
@@ -66,6 +67,7 @@ _vpnman() {
         autostart) _arguments '--login-app[start the tray app at login (this user)]:value:(on off)' ;;
         backup) _arguments '--replace[import: make this computer match the backup (removes other profiles)]' '--settings[import: also restore the settings (always with --replace)]' '--force[export: overwrite an existing file]' '1:action:(export import)' ;;
         block) _arguments '*:profile:_vpnman_profiles' ;;
+        blocks) _arguments '--proto[add: protocol (endpoint and port entries)]:value:(any tcp udp)' '--note[add: a reminder of why]' '--json[print machine-readable JSON instead of text]' '1:action:(list status add remove rm enable disable on off)' ;;
         bypass) _arguments '1:action:(list add remove rm available on off mode)' ;;
         cleanup) _arguments '--force[even if the service is running]' ;;
         connect) _arguments '--fastest[measure all servers and use the one with the lowest latency]' '--last[use the last connected profile (the default without a profile)]' '--no-wait[return immediately instead of waiting for the tunnel]' '--timeout[how long to wait (default 90)]' '*:profile:_vpnman_profiles' ;;

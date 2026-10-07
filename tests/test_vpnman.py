@@ -30,6 +30,9 @@ from vpnman import split as _split  # noqa: E402
 REAL_NETLOCK_CLEANUP, REAL_SPLIT_CLEANUP = netlock.cleanup_all, _split.cleanup
 netlock.cleanup_all = lambda: []
 _split.cleanup = lambda: None
+from vpnman import blocks as _blocks, xray as _xray  # noqa: E402
+_blocks.cleanup = lambda: False            # these two would delete a live block list / proxy redirect of the developer
+_xray.cleanup = lambda: False
 
 OVPN = "client\ndev tun\nproto udp\nremote vpn.example.net 1194\nremote 192.0.2.7 443 tcp\nca ca.crt\nauth-user-pass\n"
 WG = """[Interface]
@@ -1784,6 +1787,35 @@ AAAA
         self.assertEqual(self.c.call("status")["last_profile"], pid)
         self.c.call("profiles.remove", ident="lastp")
 
+    def test_blocks_rpc_round_trip(self):
+        from vpnman import blocks
+        real = blocks.supported
+        blocks.supported = lambda: (False, "the tests never touch the firewall")
+        try:
+            self.assertEqual(self.c.call("blocks.status")["entries"], [])
+            e = self.c.call("blocks.add", kind="address", value="203.0.113.9", note="n")
+            self.assertEqual((e["value"], e["kind"], e["enabled"]), ("203.0.113.9/32", "address", True))
+            for bad in ({"kind": "address", "value": "bogus"}, {"kind": "address", "value": "203.0.113.9"},
+                        {"kind": "port", "value": "99999"}):
+                with self.assertRaises(ipc.RpcError):
+                    self.c.call("blocks.add", **bad)
+            st = self.c.call("blocks.status")
+            self.assertEqual([x["value"] for x in st["entries"]], ["203.0.113.9/32"])
+            self.assertFalse(st["supported"])
+            self.assertIn("never touch", st["reason"])
+            self.assertFalse(self.c.call("blocks.update", ident=e["id"], enabled=False)["enabled"])
+            self.assertFalse(self.c.call("blocks.set", enabled=False)["enabled"])
+            with self.assertRaises(ipc.RpcError):
+                self.c.call("connections.close", proto="tcp", local="10.0.0.1", lport=1, remote="10.0.0.2", rport=2)
+            with self.assertRaises(ipc.RpcError):
+                self.c.call("blocks.update", ident="nope", enabled=True)
+            self.assertEqual(self.c.call("blocks.remove", ids=[e["id"]])["removed"], [e["id"]])
+            self.c.call("blocks.set", enabled=True)
+            rows = self.c.call("connections", listening=True, local=True)
+            self.assertTrue(rows["supported"] and isinstance(rows["rows"], list))
+        finally:
+            blocks.supported = real
+
     # ------------------------------------------------------------------ proxy (Xray)
     LINK = "vless://11111111-2222-3333-4444-555555555555@203.0.113.7:443?security=reality&sni=example.com&pbk=PUB&sid=ab&type=tcp&flow=xtls-rprx-vision#Home"
     LINK2 = "trojan://secret@203.0.113.8:443?security=tls&sni=example.com#Trojan"
@@ -2239,6 +2271,154 @@ class SplitTests(unittest.TestCase):
         st._release()                                    # everything goes back where it came from (fake fs: no-op moves)
         self.assertEqual(st.moved, {})
         self.assertEqual(split.names_from_settings({"apps": [{"match": ["a", "b"]}, {"match": ["b", "c"]}]}), ["a", "b", "c"])
+
+
+class BlocksTests(unittest.TestCase):
+    ROWS = [
+        {"dir": "out", "proto": "tcp", "v6": False, "local": "10.0.0.2", "lport": 40000, "remote": "203.0.113.9", "rport": 443,
+         "state": "ESTABLISHED", "pid": 7, "app": "firefox"},
+        {"dir": "out", "proto": "udp", "v6": False, "local": "10.0.0.2", "lport": 50000, "remote": "198.51.100.4", "rport": 6881,
+         "state": "", "pid": 8, "app": "qbit"},
+        {"dir": "in", "proto": "tcp", "v6": False, "local": "10.0.0.2", "lport": 22, "remote": "192.0.2.50", "rport": 51234,
+         "state": "ESTABLISHED", "pid": 9, "app": "sshd"},
+    ]
+
+    def service(self):
+        """A BlockService on a temp settings file, with the firewall, ss and the connection list replaced."""
+        import types
+        from vpnman import blocks
+        s = settings.Settings(tempfile.mkdtemp(dir=TMP) + "/s.json")
+        logs, nft, closed = [], [], []
+        mgr = types.SimpleNamespace(settings=s, log=types.SimpleNamespace(add=lambda *a: logs.append(a)))
+        real = (blocks.plat, blocks.conntable.snapshot, blocks.close_connection, blocks.split.cgroup_root)
+
+        def run(cmd, timeout=30, input=None, check=False):
+            nft.append((cmd, input))
+            return 0, ""
+        blocks.plat = types.SimpleNamespace(run=run, which=lambda n: "/usr/sbin/" + n, os_family=lambda: "linux")
+        blocks.conntable.snapshot = lambda listening=False, local=False: {"rows": [dict(r) for r in self.ROWS]}
+        blocks.close_connection = lambda row: (closed.append(row), (True, ""))[1]
+        blocks.split.cgroup_root = lambda: None
+        self.addCleanup(lambda: (setattr(blocks, "plat", real[0]), setattr(blocks.conntable, "snapshot", real[1]),
+                                 setattr(blocks, "close_connection", real[2]), setattr(blocks.split, "cgroup_root", real[3])))
+        return blocks.BlockService(mgr), nft, closed
+
+    def test_entries_are_validated_and_normalised(self):
+        from vpnman import blocks
+        self.assertEqual(blocks.clean("address", "203.0.113.9")["value"], "203.0.113.9/32")
+        self.assertEqual(blocks.clean("address", "203.0.113.77/24")["value"], "203.0.113.0/24")
+        self.assertEqual(blocks.clean("endpoint", "203.0.113.9:443", "TCP")["proto"], "tcp")
+        self.assertEqual(blocks.clean("endpoint", "[2001:DB8::1]:80")["value"], "[2001:db8::1]:80")
+        self.assertEqual(blocks.clean("port", "6881", "udp")["value"], "6881")
+        self.assertEqual(blocks.clean("app", "steam", "tcp")["proto"], "any")
+        for bad in (("address", "not an ip"), ("address", "1.2.3.4; reboot"), ("endpoint", "1.2.3.4"), ("endpoint", "1.2.3.0/24:80"),
+                    ("port", "0"), ("port", "70000"), ("port", "x"), ("app", "a b"), ("app", "../x"), ("app", ""),
+                    ("magic", "x"), ("port", "80", "icmp")):
+            with self.assertRaises(blocks.BlockError, msg=bad):
+                blocks.clean(*bad)
+
+    def test_ruleset_text(self):
+        from vpnman import blocks, platform as plat
+        es = [blocks.new_entry("address", "203.0.113.9"), blocks.new_entry("endpoint", "203.0.113.9:443", "tcp"),
+              blocks.new_entry("port", "6881", "udp"), blocks.new_entry("endpoint", "[2001:db8::1]:80"),
+              dict(blocks.new_entry("address", "198.51.100.0/24"), enabled=False)]
+        text = blocks.ruleset(es)
+        for want in ("ip daddr 203.0.113.9/32 drop", "ip saddr 203.0.113.9/32 drop", "ip daddr 203.0.113.9 tcp dport 443 drop",
+                     "ip saddr 203.0.113.9 tcp sport 443 drop", "udp dport 6881 drop", "ip6 daddr 2001:db8::1 tcp dport 80 drop",
+                     "ip6 daddr 2001:db8::1 udp dport 80 drop", "priority -120"):
+            self.assertIn(want, text)
+        self.assertNotIn("198.51.100.0", text)                                  # a switched-off entry is not enforced
+        self.assertNotIn("cgroupv2", text)
+        self.assertIn('socket cgroupv2 level 1 "vpnman-blocked" drop', blocks.ruleset([blocks.new_entry("app", "steam")]))
+        if plat.which("nft"):
+            rc, out = plat.run(["nft", "-c", "-f", "-"], input=text)
+            if "Operation not permitted" not in out:
+                self.assertEqual(rc, 0, out)
+
+    def test_matching(self):
+        from vpnman import blocks
+        r = self.ROWS
+        m = lambda kind, value, proto="any", row=0: blocks.matches(blocks.clean(kind, value, proto), r[row])      # noqa: E731
+        self.assertTrue(m("address", "203.0.113.0/24") and not m("address", "203.0.114.0/24"))
+        self.assertTrue(m("endpoint", "203.0.113.9:443", "tcp") and not m("endpoint", "203.0.113.9:443", "udp"))
+        self.assertFalse(m("endpoint", "203.0.113.9:80"))
+        self.assertTrue(m("port", "443", "tcp") and m("port", "6881", "udp", 1) and not m("port", "6881", "tcp", 1))
+        self.assertTrue(m("port", "22", "tcp", 2), "a local service port matches too")
+        self.assertTrue(m("app", "firefox") and not m("app", "firefo"))
+
+    def test_service_applies_the_list_and_closes_open_connections(self):
+        svc, nft, closed = self.service()
+        e = svc.add("endpoint", "203.0.113.9:443", "tcp", "ads")
+        self.assertEqual(e["closed"], 1)                                          # the open firefox connection was closed
+        self.assertEqual([c["rport"] for c in closed], [443])
+        cmd, text = nft[-1]
+        self.assertEqual(cmd[1:], ["-f", "-"])
+        self.assertIn("ip daddr 203.0.113.9 tcp dport 443 drop", text)
+        self.assertTrue(svc.active and svc.status()["active"])
+        with self.assertRaises(ValueError):
+            svc.add("endpoint", "203.0.113.9:443", "tcp")                       # no duplicates
+        svc.add("port", "6881", "udp")
+        svc.update(e["id"], enabled=False)
+        self.assertNotIn("203.0.113.9", nft[-1][1])
+        self.assertIn("udp dport 6881 drop", nft[-1][1])
+        svc.set_enabled(False)
+        self.assertEqual(nft[-1][0][-4:], ["delete", "table", "inet", "vpnman_block"])
+        self.assertFalse(svc.active)
+        svc.set_enabled(True)
+        self.assertTrue(svc.active)
+        ids = [x["id"] for x in svc.list()]
+        self.assertEqual(sorted(svc.remove(ids)["removed"]), sorted(ids))
+        self.assertEqual(nft[-1][0][-4:], ["delete", "table", "inet", "vpnman_block"])    # an empty list leaves no firewall table
+        svc.shutdown()
+
+    def test_programs_need_cgroups_but_addresses_still_work(self):
+        svc, nft, _ = self.service()
+        svc.add("app", "steam")
+        self.assertIn("cgroup v2", svc.error)
+        svc.add("address", "203.0.113.9")
+        self.assertIn("ip daddr 203.0.113.9/32 drop", nft[-1][1])
+        self.assertNotIn("cgroupv2", nft[-1][1])                                  # the app rule is left out when it cannot work
+
+    def test_closing_one_connection_checks_that_it_exists(self):
+        from vpnman import blocks
+        svc, _nft, closed = self.service()
+        r = self.ROWS[0]
+        self.assertTrue(svc.close_row("tcp", r["local"], r["lport"], r["remote"], r["rport"])["closed"])
+        self.assertEqual(closed[-1]["remote"], "203.0.113.9")
+        with self.assertRaises(blocks.BlockError):
+            svc.close_row("tcp", "10.0.0.2", 1, "203.0.113.9", 443)               # not a live connection
+        with self.assertRaises(ValueError):
+            svc.close_row("tcp", "x; rm", 1, "203.0.113.9", 443)
+        with self.assertRaises(blocks.BlockError):
+            svc.close_row("icmp", r["local"], r["lport"], r["remote"], r["rport"])
+
+    def test_ss_command_line(self):
+        import types
+        from vpnman import blocks
+        seen = []
+        real = blocks.plat
+        blocks.plat = types.SimpleNamespace(run=lambda cmd, timeout=30: (seen.append(cmd), (0, ""))[1], which=lambda n: "/bin/ss")
+        try:
+            ok, _ = blocks.close_connection(dict(self.ROWS[0]))
+            blocks.close_connection(dict(self.ROWS[1], v6=True, local="fe80::1", remote="2001:db8::2"))
+        finally:
+            blocks.plat = real
+        self.assertTrue(ok)
+        self.assertEqual(seen[0], ["/bin/ss", "-K", "-n", "-t", "src", "10.0.0.2:40000", "dst", "203.0.113.9:443"])
+        self.assertEqual(seen[1][3:], ["-u", "src", "[fe80::1]:50000", "dst", "[2001:db8::2]:6881"])
+
+    def test_the_program_blocker_moves_matching_processes(self):
+        from vpnman import blocks
+        root = SplitTests._fake_proc(self, {100: ("steam", 1, ["steam"]), 101: ("kid", 100, ["kid"]), 5: ("sshd", 1, ["sshd"])})
+        cg = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(cg, "vpnman-blocked"))
+        ab = blocks.AppBlocker(lambda: ["steam"], proc=root, root=cg)
+        self.assertEqual(sorted(ab.scan_once()), [100, 101])
+        self.assertNotIn(5, ab.moved)
+        ab.active = True
+        ab.stop_locked()
+        self.assertEqual(ab.moved, {})
+        self.assertFalse(ab.active)
 
 
 class AppsTests(unittest.TestCase):

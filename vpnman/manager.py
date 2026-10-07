@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, backup, conntable, dns, history, leaktest, netlock, network, paths, proxysvc, schedule, split, stunnel, xray
+from . import __version__, backends, backup, blocks, conntable, dns, history, leaktest, netlock, network, paths, proxysvc, schedule, split, stunnel, xray
 from . import platform as plat
 from .backends.base import CredentialsRequired
 from .profiles import ProfileError, ProfileStore, public_view
@@ -125,6 +125,7 @@ class Manager:
         self._host_ips = {}       # domain -> IPv4 list, for "addresses that skip the VPN" given as names
         self._host_checked = 0.0
         self.proxy = proxysvc.ProxyService(self)
+        self.blocks = blocks.BlockService(self)
 
     def _resolve(self, host):
         return resolve_host(host, self._ep_cache)
@@ -238,6 +239,9 @@ class Manager:
             if xray.cleanup():
                 self.log.add("warn", "Removed the proxy firewall rules left by a previous run")
         self.proxy.runner.kill_stale()
+        if plat.os_family() == "linux":
+            blocks.cleanup()
+        self.blocks.sync()
         self.scheduler.start()
         self._start_network_monitor()
         st = self._load_state()
@@ -278,6 +282,7 @@ class Manager:
         self.disconnect()
         self._split_stop()
         self.proxy.shutdown()
+        self.blocks.shutdown()
 
     def _last_profile_id(self):
         """The profile that was connected (or being connected) most recently - what a front end should show selected."""

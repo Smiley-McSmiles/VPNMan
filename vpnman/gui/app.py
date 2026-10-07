@@ -19,7 +19,8 @@ except (ImportError, ValueError) as exc:  # pragma: no cover
 import json
 
 from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof, updates
-from .pages import BypassPage, ConnectionsGroup, HistoryGroup, SchedulePage, TrafficGraph
+from .connpage import ConnectionsGroup
+from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .proxypage import ProxyPage
 from .tray import HelperTray, Tray, wants_helper
 from ..settings import DNS_PRESETS, DEFAULTS
@@ -858,7 +859,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.graph_group.add(self.graph)
         self.graph_group.set_visible(False)
         groups.append(self.graph_group)
-        self.conn_group = ConnectionsGroup()
+        self.conn_group = ConnectionsGroup(self, rpc)
         groups.append(self.conn_group)
 
         dns = Adw.PreferencesGroup(title="DNS", description="Name servers used while the VPN is active. "
@@ -1594,6 +1595,8 @@ class MainWindow(Adw.ApplicationWindow):
         page = self.stack.get_visible_child_name()
         if page == "overview" and self._ticks % 2 == 0:
             rpc("connections", self.conn_group.update, None, **self.conn_group.params())
+            if self._ticks % 20 == 0:
+                self.conn_group.refresh_blocked()
         elif page == "servers" and self.srv_tabs.get_visible_child_name() == "proxy" and self._ticks % 3 == 0:
             rpc("proxy.status", self.proxy_page.update_status, None)
 
@@ -1616,6 +1619,7 @@ class MainWindow(Adw.ApplicationWindow):
             rpc("split.status", self.bypass_page.update, None)
         if full:
             self.proxy_page.reload()
+            self.conn_group.refresh_blocked()
             rpc("profiles.list", self._on_profiles, None)
             rpc("settings.get", self._on_settings, None)
             if not self.protocols:

@@ -11,6 +11,7 @@ import traceback
 from . import __version__, access, backends, conntable, ipc, paths
 from . import platform as plat
 from .manager import Manager
+from .blocks import BlockError
 from .profiles import ProfileError, public_view
 from .settings import Settings
 
@@ -40,7 +41,7 @@ class Handler(socketserver.StreamRequestHandler):
                 raise ProfileError("unknown method: %s" % method)
             result = fn(mgr, **params)
             resp = {"id": req.get("id"), "ok": True, "result": result}
-        except (ProfileError, KeyError, ValueError, TypeError, RuntimeError, OSError) as e:
+        except (ProfileError, BlockError, KeyError, ValueError, TypeError, RuntimeError, OSError) as e:
             msg = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
             resp = {"id": None, "ok": False, "error": str(msg)}
             if not isinstance(e, (ProfileError, KeyError, ValueError)):
@@ -113,6 +114,12 @@ METHODS = {
     "proxy.select": lambda m, ident: m.proxy.select(ident),
     "proxy.set": lambda m, **kw: m.proxy.configure(**kw),
     "proxy.latency": lambda m, ids=None: m.proxy.latency(ids),
+    "blocks.status": lambda m: m.blocks.status(),
+    "blocks.add": lambda m, kind, value, proto="any", note="": m.blocks.add(kind, value, proto, note),
+    "blocks.update": lambda m, ident, enabled=None, note=None: m.blocks.update(ident, enabled, note),
+    "blocks.remove": lambda m, ids: m.blocks.remove(ids),
+    "blocks.set": lambda m, enabled: m.blocks.set_enabled(enabled),
+    "connections.close": lambda m, proto, local, lport, remote, rport: m.blocks.close_row(proto, local, lport, remote, rport),
     "connections": lambda m, listening=False, local=False: conntable.snapshot(bool(listening), bool(local)),
     "network.status": lambda m: m.network_status(),
     "network.trust": lambda m, name=None, trusted=True: m.network_trust(name, trusted),

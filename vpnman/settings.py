@@ -54,6 +54,10 @@ DEFAULTS = {
         "apps": [],                # [{id, name, match: [process names], icon}]
     },
     "routes": [],                  # [{"ip": "10.0.0.0/8", "action": "out"}]  out = bypass the VPN
+    "blocks": {
+        "enabled": True,           # enforce the list below
+        "entries": [],             # [{id, kind: address|endpoint|port|app, value, proto, note, enabled, created}]
+    },
     "proxy": {
         "enabled": False,          # use the selected proxy (see vpnman proxy)
         "selected": "",            # id of the proxy in use

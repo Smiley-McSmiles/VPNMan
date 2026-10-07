@@ -14,6 +14,10 @@ from vpnman.gui import proxypage as PP
 from vpnman.settings import DEFAULTS
 
 CALLS = []
+BLOCK_STATUS = {"enabled": True, "active": True, "error": "", "supported": True, "reason": "", "apps_supported": True, "apps_reason": "",
+                "entries": [{"id": "aaaa1111", "kind": "address", "value": "203.0.113.9/32", "proto": "any", "note": "bad", "enabled": True, "created": 0},
+                            {"id": "bbbb2222", "kind": "endpoint", "value": "203.0.113.9:443", "proto": "tcp", "note": "", "enabled": False, "created": 0},
+                            {"id": "cccc3333", "kind": "app", "value": "steam", "proto": "any", "note": "", "enabled": True, "created": 0}]}
 PROXY_STATUS = {"enabled": True, "selected": "%012d" % 1, "name": "Home", "order": "vpn_proxy", "mode": "local", "running": True,
                 "carrier": False, "error": "", "socks": 10808, "http": 10809, "installed": True, "system_ok": True,
                 "socks_port": 10808, "http_port": 10809, "dns": "1.1.1.1", "udp": "block"}
@@ -27,6 +31,9 @@ def fake_rpc(method, ok=None, fail=None, **kw):
         "proxy.status": PROXY_STATUS, "proxy.sources": [], "proxy.set": PROXY_STATUS, "proxy.select": {"id": "x"},
         "proxy.latency": {"%012d" % 1: 12.5, "%012d" % 2: None},
         "proxy.remove": {"removed": ["WS", "TR"], "failed": []},
+        "blocks.status": BLOCK_STATUS, "blocks.add": {"id": "abcd1234", "kind": "address", "value": "x", "proto": "any", "closed": 2},
+        "blocks.remove": {"removed": ["aaaa1111"]}, "blocks.set": BLOCK_STATUS, "blocks.update": {"id": "aaaa1111"},
+        "connections.close": {"closed": True}, "connections": {"rows": [], "supported": True},
         "leaktest": {"checks": [{"id": "tunnel", "name": "VPN tunnel", "status": "ok", "detail": "Connected"},
                                 {"id": "dns", "name": "DNS servers", "status": "fail", "detail": "leak <&> test"},
                                 {"id": "ipv6", "name": "IPv6", "status": "warn", "detail": "maybe"}], "summary": "fail"},
@@ -286,18 +293,104 @@ class App(A.Application):
                  "state": "ESTABLISHED", "pid": 7, "app": "firefox"},
                 {"dir": "in", "proto": "udp", "v6": True, "local": "::1", "lport": 53, "remote": "::", "rport": 0, "state": "", "pid": 0, "app": ""}]
         cg.update({"rows": rows})
-        assert cg.store.get_n_items() == 2 and cg.params() == {"listening": False, "local": False}
-        assert "2 connections" in cg.summary.get_label()
-        cg.search.set_text("firefox")
-        cg.refilter()
-        assert cg.filtered.get_n_items() == 1 and "of 2" in cg.summary.get_label()
-        cg.search.set_text("")
-        cg.refilter()
-        first = cg.store.get_item(0)
+        assert cg.table.store.get_n_items() == 2 and cg.params() == {"listening": False, "local": False}
+        assert "2 connections" in cg.table.summary.get_label()
+        cg.table.search.set_text("firefox")
+        cg.table.refilter()
+        assert cg.table.filtered.get_n_items() == 1 and "of 2" in cg.table.summary.get_label()
+        cg.table.search.set_text("")
+        cg.table.refilter()
+        first = cg.table.store.get_item(0)
         cg.update({"rows": rows})
-        assert cg.store.get_item(0) is first, "an unchanged table must not be rebuilt"
+        assert cg.table.store.get_item(0) is first, "an unchanged table must not be rebuilt"
         cg.update({"rows": rows[:1], "note": "n"})
-        assert cg.store.get_n_items() == 1 and "n" in cg.summary.get_label()
+        assert cg.table.store.get_n_items() == 1 and "n" in cg.table.summary.get_label()
+        # ---- right-click menu, actions, pop-out window, blocked connections
+        tb = cg.table
+        r0 = {"dir": "out", "proto": "tcp", "v6": False, "local": "10.0.0.2", "lport": 40000, "remote": "93.184.216.34", "rport": 443,
+              "state": "ESTABLISHED", "pid": 7, "app": "firefox"}
+        rl = {"dir": "listen", "proto": "udp", "v6": False, "local": "0.0.0.0", "lport": 5353, "remote": "0.0.0.0", "rport": 0,
+              "state": "", "pid": 0, "app": ""}
+
+        def labels(menu):
+            out = []
+            for i in range(menu.get_n_items()):
+                sec = menu.get_item_link(i, "section")
+                if sec is not None:
+                    out += labels(sec)
+                else:
+                    out.append(menu.get_item_attribute_value(i, "label", None).get_string())
+            return out
+        got = labels(tb.menu_for(r0))
+        for want in ("Copy remote address (93.184.216.34:443)", "Copy remote IP", "Copy application name", "Force-close this connection",
+                     "Stop application “firefox”…", "Force-kill application “firefox”…", "Block remote address 93.184.216.34",
+                     "Block 93.184.216.34:443 (TCP)", "Block remote port 443 (TCP)", "Block application “firefox”"):
+            assert want in got, (want, got)
+        assert not any("local port" in x for x in got), "an outgoing connection has no local service to block"
+        got = labels(tb.menu_for(rl))
+        assert "Block local port 5353 (UDP)" in got and not any(x.startswith(("Force-close", "Stop", "Copy remote")) for x in got), got
+        assert tb.block_spec(r0, "endpoint") == ("endpoint", "93.184.216.34:443", "tcp")
+        assert tb.block_spec(dict(r0, remote="2001:db8::1", v6=True), "endpoint")[1] == "[2001:db8::1]:443"
+        assert tb.block_spec(r0, "remote_port") == ("port", "443", "tcp") and tb.block_spec(r0, "app") == ("app", "firefox", "any")
+        assert tb.text_for(r0, "remote") == "93.184.216.34:443" and tb.text_for(r0, "row").count("\t") == 5
+        cg.rpc = tb.rpc = fake_rpc
+        CALLS.clear()
+        tb._row = r0
+        tb._act_block(None, A.GLib.Variant("s", "endpoint"))
+        assert ("blocks.add", {"kind": "endpoint", "value": "93.184.216.34:443", "proto": "tcp"}) in CALLS, CALLS
+        CALLS.clear()
+        tb._act_close(None, None)
+        assert CALLS[0][0] == "connections.close" and CALLS[0][1]["rport"] == 443, CALLS
+        import subprocess
+        sp = subprocess.Popen(["sleep", "30"])
+        assert tb.stop_process(sp.pid, "sleep", False) and sp.wait(5) == -15, "SIGTERM reaches the user's own program"
+        assert not tb.stop_process(1, "init", True) and not tb.stop_process(os.getpid(), "me", True)
+        win = cg.popout()
+        win = cg._win
+        assert win is not None and win.table.controls.get_parent() is not None
+        cg.popout()
+        assert cg._win is win, "a second click re-uses the pop-out window"
+        win.table.update({"rows": [r0, rl]})
+        assert win.table.store.get_n_items() == 2
+        win.pause.set_active(True)
+        win.table.update({"rows": [r0]})
+        assert win.table.store.get_n_items() == 2 and "paused" in win.table.summary.get_label(), "paused table must not change"
+        win.pause.set_active(False)
+        win.table.update({"rows": [r0]})
+        assert win.table.store.get_n_items() == 1
+        win._alive = False
+        win.close()
+        cg.refresh_blocked()
+        assert cg.blocked_count == 3 and "(3)" in cg.blocked_btn.get_label()
+        cg.open_blocked()
+        bw = cg._blocked
+        assert bw is not None and len(bw._rows) == 3 and bw.enforce.get_active() and "Enforced" in bw.enforce.get_subtitle()
+        bw.kind.set_selected(0)
+        assert not bw.proto.get_visible()
+        bw.kind.set_selected(2)
+        assert bw.proto.get_visible()
+        CALLS.clear()
+        bw.value.set_text("6881")
+        bw.proto.set_selected(2)
+        bw.note.set_text("torrents")
+        bw._add()
+        assert ("blocks.add", {"kind": "port", "value": "6881", "proto": "udp", "note": "torrents"}) in CALLS, CALLS
+        bw.value.set_text("")
+        CALLS.clear()
+        bw._add()
+        assert not any(c[0] == "blocks.add" for c in CALLS), "an empty value is not sent"
+        bw.listbox.select_row(bw._rows["aaaa1111"])
+        bw.listbox.select_row(bw._rows["cccc3333"])
+        assert bw.selected_ids() == ["aaaa1111", "cccc3333"] and bw.sel_bar.get_reveal_child()
+        CALLS.clear()
+        bw._remove_selected()
+        assert CALLS[0] == ("blocks.remove", {"ids": ["aaaa1111", "cccc3333"]}), CALLS
+        CALLS.clear()
+        bw._on_entry_switch("aaaa1111", False)
+        assert ("blocks.update", {"ident": "aaaa1111", "enabled": False}) in CALLS, CALLS
+        bw.fill(dict(BLOCK_STATUS, supported=False, reason="needs Linux", active=False))
+        assert bw.banner.get_revealed()
+        bw.close()
         # ---- update result dialog / import notes build without errors
         w.show_warnings(["a: Will be ignored: 'register-dns'"])
         w._update_result({"current": "1.0.6", "latest": "9.9.9", "newer": True, "url": "https://github.com/x", "notes": "n"}, False)

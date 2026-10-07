@@ -212,6 +212,14 @@ state. A TCP connection is \fBin\fR when a local listener accepted it. Sockets t
 \fI/proc/PID/fd\fR; FreeBSD uses \fBsockstat\fR; other BSD systems use \fBnetstat\fR and show no application names.
 The same table is on the Connection page of the application.
 .TP
+.B blocks \fR[\fIlist\fR|\fIadd\fR|\fIremove\fR|\fIenable\fR|\fIdisable\fR|\fIon\fR|\fIoff\fR] [\fIARG\fR...] [\fB\-\-proto\fR \fBany\fR|\fBtcp\fR|\fBudp\fR] [\fB\-\-note\fR \fITEXT\fR] [\fB\-\-json\fR]
+Addresses, ports and programs that may not use the network. See
+.BR "BLOCKED CONNECTIONS" .
+\fBlist\fR (the default) shows the entries with their ids; \fBadd\fR \fIKIND\fR \fIVALUE\fR blocks one (\fIKIND\fR is
+\fBaddress\fR, \fBendpoint\fR, \fBport\fR or \fBapp\fR; \fB\-\-proto\fR applies to endpoints and ports; \fB\-\-note\fR is a
+reminder); \fBremove\fR \fIID\fR... unblocks; \fBenable\fR/\fBdisable\fR \fIID\fR... keep an entry but stop or resume
+enforcing it; \fBon\fR/\fBoff\fR switch the whole list.
+.TP
 .B proxy \fR[\fIlist\fR|\fIadd\fR|\fIrefresh\fR|\fIremove\fR|\fIedit\fR|\fIuse\fR|\fIon\fR|\fIoff\fR|\fIorder\fR|\fImode\fR|\fIset\fR|\fIstatus\fR|\fIping\fR] [\fIARG\fR...]
 Proxies served through Xray, alone or together with the VPN. See
 .BR "PROXIES (XRAY)" .
@@ -339,8 +347,12 @@ pycairo (without it a text line is shown instead). Its pages are:
 .B Connection
 Choose a server and connect or disconnect; status, public IP, uptime and a live traffic graph; a live
 \fBConnections\fR table (way, application and pid, protocol, local and remote address and port, state, refreshed every two
-seconds while the page is open, with a filter box and switches for listening sockets and local connections); recent
-connections; DNS servers; start at boot. The server drop\-down follows profile changes immediately.
+seconds while the page is open, with a filter box and switches for listening sockets and local connections; a
+\fBPop out\fR button opens the same table in a window of its own with a \fBPause\fR button for reading it; right\-click a
+row to \fBcopy\fR its remote or local address, the application or the whole row, to \fBforce\-close\fR the connection, to
+\fBstop\fR or \fBforce\-kill\fR the application (only your own programs) and to \fBblock\fR the remote address, the address
+and port, the remote or local port, or the application; \fBBlocked connections\fR below the table opens the window where
+the blocks are added, switched off and removed); recent connections; DNS servers; start at boot. The server drop\-down follows profile changes immediately.
 .TP
 .B Servers
 Two sub\-tabs. \fBVPN Servers\fR: all profiles, with a search box on top, grouped by group name and sorted by favourites, name or latency (\fBTest
@@ -490,6 +502,31 @@ VPNMan runs \fBstunnel\fR in client mode on a local port and points OpenVPN at i
 \fBstunnel_verify\fR selects \fBnone\fR, \fBsystem\fR (the system CA bundle) or \fBca\fR (the certificate given with
 \fBstunnel_ca\fR, stored in the profile); \fBstunnel_sni\fR sets the TLS server name. The \fBstunnel\fR program must be
 installed.
+.SH BLOCKED CONNECTIONS
+The list of blocked things (setting \fBblocks\fR) is enforced by the nftables table \fIinet vpnman_block\fR, whose chains
+run before the kill switch and the proxy rules. It is built when the daemon starts, rebuilt whenever the list changes and
+removed when the daemon stops. An entry is one of:
+.TP
+.B address
+An IP address or network (CIDR): nothing is sent to it and nothing is accepted from it.
+.TP
+.B endpoint
+An address and a port with a protocol, for example \fB203.0.113.9:443\fR or \fB[2001:db8::1]:443\fR.
+.TP
+.B port
+A port with a protocol: outgoing connections to it and incoming connections to a local service on it.
+.TP
+.B app
+A program by name. Its processes (and everything they start) are kept in the cgroup \fIvpnman\-blocked\fR, whose outgoing
+packets are dropped; running programs are found by a scan every two seconds, so nothing has to be started in a special way.
+Needs cgroup v2 (the same layout as the app bypass); without it addresses and ports still work.
+.PP
+Blocking also \fBcloses the matching connections that are open right now\fR (with \fBss \-K\fR, which needs a kernel built
+with CONFIG_INET_DIAG_DESTROY), because dropped packets alone would let an established TCP connection hang on for minutes.
+Every entry can be switched off without deleting it. Blocking needs Linux with nftables; it is not available on the BSDs.
+.PP
+The GUI offers the same from the right\-click menu of the connection table and from the \fBBlocked connections\fR window.
+Blocks apply to everybody on the computer. \fBvpnman cleanup\fR and uninstalling remove the table and the cgroup.
 .SH PROXIES (XRAY)
 VPNMan can use VLESS, VMess, Trojan and Shadowsocks servers (including Reality, WebSocket, gRPC, HTTPUpgrade, XHTTP,
 mKCP and HTTP/2 transports) through \fBXray\fR (https://github.com/XTLS/Xray\-core), a single self\-contained program
@@ -698,6 +735,15 @@ App bypass switch, mode and the applications (managed with \fBvpnman bypass\fR).
 .B routes
 Addresses that skip the VPN (managed with \fBvpnman routes\fR).
 .PP
+.B blocks
+.TP
+.B blocks.enabled \fR(true)
+Enforce the list of blocked connections.
+.TP
+.B blocks.entries \fR(empty)
+The list itself (managed with \fBvpnman blocks\fR and the Blocked connections window): each entry has an id, a kind,
+a value, a protocol, a note, an enabled flag and the time it was added.
+.PP
 .B proxy
 .TP
 .B proxy.enabled \fR(false)
@@ -873,8 +919,8 @@ Per\-user GUI preferences (run in background, server sort, automatic latency tes
 Created by \fBvpnman autostart \-\-login\-app on\fR.
 .PP
 Firewall objects created while running (all removed again by \fBvpnman cleanup\fR): nftables tables \fIinet vpnman\fR,
-\fIinet vpnman_split\fR and \fIinet vpnman_proxy\fR (system\-wide proxy mode); iptables chains \fBVPNMAN_OUT\fR and \fBVPNMAN_IN\fR; cgroups \fI/sys/fs/cgroup/vpnman\-bypass\fR and
-\fI/sys/fs/cgroup/vpnman\-tunnel\fR; an \fBip rule\fR with fwmark 0x5652 and routing table 5652.
+\fIinet vpnman_split\fR, \fIinet vpnman_proxy\fR (system\-wide proxy mode) and \fIinet vpnman_block\fR (blocked connections); iptables chains \fBVPNMAN_OUT\fR and \fBVPNMAN_IN\fR; cgroups \fI/sys/fs/cgroup/vpnman\-bypass\fR,
+\fI/sys/fs/cgroup/vpnman\-tunnel\fR and \fI/sys/fs/cgroup/vpnman\-blocked\fR; an \fBip rule\fR with fwmark 0x5652 and routing table 5652.
 .SH ENVIRONMENT
 .TP
 .B VPNMAN_CONFIG_DIR, VPNMAN_RUN_DIR, VPNMAN_SOCKET, VPNMAN_LOG_FILE

@@ -374,6 +374,7 @@ uninstall() {
     if [ -z "$DESTDIR" ]; then
         have nft && nft delete table inet vpnman 2>/dev/null || true
         have nft && nft delete table inet vpnman_proxy 2>/dev/null || true
+        have nft && nft delete table inet vpnman_block 2>/dev/null || true
     fi
     exit 0
 }

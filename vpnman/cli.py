@@ -670,6 +670,51 @@ class Cli:
             return hits[0]["id"]
         raise RpcError("no such proxy: %s" % text if not hits else "'%s' is ambiguous: %s" % (text, ", ".join(h["name"] for h in hits[:6])))
 
+    def cmd_blocks(self, a):
+        act, items = a.action or "list", a.items
+        if act in ("list", "status"):
+            st = self.call("blocks.status")
+            if a.json:
+                print(json.dumps(st, indent=2))
+                return 0
+            state = green("ENFORCED") if st["active"] else (yellow("not enforced") if st["enabled"] and st["entries"] else dim("off"))
+            print("%s %s%s" % (bold("Blocked connections:"), state, "" if st["enabled"] else dim("  (switched off: vpnman blocks on)")))
+            if st["error"]:
+                print(red("  %s" % st["error"]))
+            if not st["supported"]:
+                print(yellow("  %s" % st["reason"]))
+            for e in st["entries"]:
+                what = {"address": "address", "endpoint": "address:port", "port": "port", "app": "program"}[e["kind"]]
+                proto = "" if e.get("proto", "any") == "any" else e["proto"]
+                print("  %-8s %s %-13s %-28s %-4s %s" % (e["id"], "on " if e.get("enabled", True) else "off", what, e["value"],
+                                                        proto, dim(e.get("note", ""))))
+            if not st["entries"]:
+                print("  nothing blocked - e.g.: vpnman blocks add address 203.0.113.9")
+            return 0
+        if act in ("on", "off"):
+            self.call("blocks.set", enabled=(act == "on"))
+            print("Blocking %s." % ("enabled" if act == "on" else "disabled"))
+            return 0
+        if act == "add":
+            if len(items) != 2:
+                raise RpcError("usage: vpnman blocks add address|endpoint|port|app VALUE [--proto tcp|udp] [--note TEXT]")
+            e = self.call("blocks.add", kind=items[0], value=items[1], proto=a.proto or "any", note=a.note or "")
+            print("%s %s %s%s" % (green("blocked"), items[0], e["value"],
+                                  "  (closed %d open connection%s)" % (e["closed"], "" if e["closed"] == 1 else "s") if e.get("closed") else ""))
+            return 0
+        if act in ("remove", "rm", "enable", "disable"):
+            if not items:
+                raise RpcError("give the ids shown by 'vpnman blocks'")
+            if act in ("remove", "rm"):
+                self.call("blocks.remove", ids=items)
+                print("Removed.")
+            else:
+                for i in items:
+                    self.call("blocks.update", ident=i, enabled=(act == "enable"))
+                print("Done.")
+            return 0
+        raise RpcError("unknown action %r (list, add, remove, enable, disable, on, off)" % act)
+
     def cmd_connections(self, a):
         def show():
             res = self.call("connections", listening=a.listening, local=a.local)
@@ -843,7 +888,7 @@ class Cli:
         return 1 if res["summary"] == "fail" else 0
 
     def cmd_cleanup(self, a):
-        from . import netlock, split, xray
+        from . import blocks, netlock, split, xray
         if self.client.alive() and not a.force:
             raise RpcError("the VPNMan service is running and owns these rules - stop it first "
                            "(vpnman disconnect; vpnman lock off), or use --force")
@@ -854,6 +899,8 @@ class Cli:
             split.cleanup()
             if xray.cleanup():
                 gone = list(gone) + ["proxy redirect"]
+            if blocks.cleanup():
+                gone = list(gone) + ["blocked connections"]
         print("Removed: %s" % (", ".join(gone) if gone else "no kill-switch rules"),
               "+ app-bypass rules, routing rule/table and cgroup" if plat.os_family() == "linux" else "")
         return 0
@@ -1392,6 +1439,22 @@ def build_parser():
     s.add_argument("--group", help="add: group to put the imported proxies in (default: the subscription's host)")
     s.add_argument("--latency", "-l", action="store_true", help="list: measure every server")
     s.add_argument("--json", action="store_true", help=JSON)
+    s = add("blocks", "addresses, ports and programs that may not use the network",
+            "Block connections with the firewall (Linux, nftables). The list is kept across restarts. Blocking also\n"
+            "closes the matching connections that are open right now.\n\n"
+            "  list                    the blocked things, with the ids used below\n"
+            "  add KIND VALUE          KIND is address (IP or network), endpoint (ADDRESS:PORT), port or app\n"
+            "  remove ID...            unblock\n"
+            "  enable|disable ID...    keep an entry in the list but stop (or resume) enforcing it\n"
+            "  on | off                switch the whole list on or off",
+            ["vpnman blocks add address 203.0.113.9", "vpnman blocks add endpoint 203.0.113.9:443 --proto tcp",
+             "vpnman blocks add port 6881 --proto udp --note torrents", "vpnman blocks add app steam", "vpnman blocks remove 3f9a1c2b"])
+    s.add_argument("action", nargs="?", choices=["list", "status", "add", "remove", "rm", "enable", "disable", "on", "off"],
+                   help="default: list")
+    s.add_argument("items", nargs="*", metavar="ARG", help="add: KIND VALUE; remove/enable/disable: ids")
+    s.add_argument("--proto", choices=["any", "tcp", "udp"], help="add: protocol (endpoint and port entries)")
+    s.add_argument("--note", help="add: a reminder of why")
+    s.add_argument("--json", action="store_true", help=JSON)
     s = add("connections", "live list of connections: which application, port and protocol",
             "Show the network connections of this computer as the daemon sees them: the way (in, out, listen), the\n"
             "application and its pid, the protocol, the local and remote address and port, and the TCP state.\n"
@@ -1449,7 +1512,8 @@ def build_parser():
     s = add("cleanup", "remove firewall rules, routes and cgroups VPNMan left behind (root)",
             "Remove what VPNMan created in the system: the kill switch rules (nftables table 'inet vpnman',\n"
             "iptables chains VPNMAN_OUT / VPNMAN_IN, or the pf ruleset), the app-bypass table 'inet vpnman_split',\n"
-            "its routing rule and table, the cgroups, and the proxy's system-wide redirect (table 'inet vpnman_proxy').\n"
+            "its routing rule and table, the cgroups, the proxy's system-wide redirect (table 'inet vpnman_proxy') and\n"
+            "the blocked-connections table ('inet vpnman_block').\n"
             "Uninstalling runs this for you. Use it if a crash left\n"
             "you offline with the kill switch stuck on.",
             ["sudo vpnman cleanup", "sudo vpnman cleanup --force     # even though the service is running"])
