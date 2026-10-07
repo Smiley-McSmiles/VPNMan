@@ -702,6 +702,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.settings = {}
         self.latency = {}
         self.sel_id = None
+        self._user_pick = None    # a server chosen by hand while nothing is connecting (until a connection starts)
         self._log_seq = 0
         self._quiet = False
         self._daemon_ok = True
@@ -1485,6 +1486,7 @@ class MainWindow(Adw.ApplicationWindow):
         if pend and pend[0] == pid and time.monotonic() < pend[1]:
             return
         self.sel_id = pid
+        self._user_pick = None
         self._pending = (pid, time.monotonic() + 90)
         self.stack.set_visible_child_name("overview")
 
@@ -1540,10 +1542,37 @@ class MainWindow(Adw.ApplicationWindow):
             yield from MainWindow._iter_widgets(child)
             child = child.get_next_sibling()
 
+    def wanted_selection(self):
+        """Which server the selector on the Connection page shows.  In this order: the server being connected to
+        right now (a click that is still on its way, or the daemon's live connection); a server the user picked by
+        hand while nothing is connecting; the last server that was connected; the first one."""
+        ids = [p["id"] for p in self.profiles]
+        st = self.status or {}
+        pend = getattr(self, "_pending", None)
+        if pend and time.monotonic() < pend[1] and pend[0] in ids:
+            return pend[0]
+        if st.get("state") in ACTIVE and st.get("profile_id") in ids:
+            self._user_pick = None                # a connection is under way: it decides, the hand pick is over
+            return st["profile_id"]
+        if self._user_pick in ids:
+            return self._user_pick
+        if st.get("last_profile") in ids:
+            return st["last_profile"]
+        return ids[0] if ids else None
+
+    def _sync_selector(self):
+        want = self.wanted_selection()
+        self.sel_id = want
+        ids = [p["id"] for p in self.profiles]
+        if want in ids and self.server_row.get_selected() != ids.index(want):
+            self._quiet = True
+            self.server_row.set_selected(ids.index(want))
+            self._quiet = False
+
     def _on_server_selected(self, row, _p):
         i = row.get_selected()
         if not self._quiet and 0 <= i < len(self.profiles):
-            self.sel_id = self.profiles[i]["id"]
+            self.sel_id = self._user_pick = self.profiles[i]["id"]
 
     def _on_lock_toggled(self, row, _p):
         if self._quiet:
@@ -1602,12 +1631,8 @@ class MainWindow(Adw.ApplicationWindow):
         names = [p["name"] for p in profiles]
         # edit the one list in place: replacing the model left removed servers in the open drop-down
         self.server_names.splice(0, self.server_names.get_n_items(), names)
-        ids = [p["id"] for p in profiles]
-        if self.sel_id not in ids:
-            self.sel_id = ids[0] if ids else None
-        if self.sel_id:
-            self.server_row.set_selected(ids.index(self.sel_id))
         self._quiet = False
+        self._sync_selector()
         keep = {r.profile["id"] for r in self.listbox.get_selected_rows()}
         child = self.listbox.get_first_child()
         while child:
@@ -1650,15 +1675,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.lock_now.set_active(st["netlock"]["engaged"])
         self._quiet = False
         self.server_row.set_sensitive(not active)
-        pid = st.get("profile_id")
-        pend = getattr(self, "_pending", None)
-        if active and pid and pid != self.sel_id and not (pend and time.monotonic() < pend[1]):
-            self.sel_id = pid             # opened mid-connection: show the server actually in use
-            ids = [p["id"] for p in self.profiles]
-            if pid in ids:
-                self._quiet = True
-                self.server_row.set_selected(ids.index(pid))
-                self._quiet = False
+        self._sync_selector()
         if state == "connected":
             self.hero.set_icon_name("network-vpn-symbolic")
             self.hero.set_title("Connected")

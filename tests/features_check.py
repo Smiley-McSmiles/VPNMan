@@ -196,6 +196,37 @@ class App(A.Application):
         bd._apply()
         call = [kw for m, kw in CALLS if m == "profiles.update_many"]
         assert call and call[0]["ids"] == [p["id"] for p in members] and call[0]["changes"]["group"] == "Beta", call
+        # ---- Connection tab selector: current / last connected server, predictable
+        w.profiles = [prof(1), prof(2), prof(3)]
+        ids = [p["id"] for p in w.profiles]
+        w._pending, w._user_pick = None, None
+        w.status = {"state": "disconnected", "last_profile": ids[2]}
+        assert w.wanted_selection() == ids[2], "disconnected: the last connected server"
+        w.status = {"state": "disconnected", "last_profile": "gone"}
+        assert w.wanted_selection() == ids[0], "unknown last server: the first one"
+        w._user_pick = ids[1]
+        w.status = {"state": "disconnected", "last_profile": ids[2]}
+        assert w.wanted_selection() == ids[1], "a hand pick holds while nothing is connecting"
+        w.status = {"state": "connecting", "profile_id": ids[0], "last_profile": ids[0]}
+        assert w.wanted_selection() == ids[0] and w._user_pick is None, "a connection under way decides"
+        w.status = {"state": "disconnected", "last_profile": ids[0]}
+        assert w.wanted_selection() == ids[0], "and the hand pick is gone afterwards"
+        import time as _t
+        w._pending = (ids[1], _t.monotonic() + 60)
+        w.status = {"state": "connected", "profile_id": ids[0], "last_profile": ids[0]}
+        assert w.wanted_selection() == ids[1], "a click still on its way wins over the old connection"
+        w._pending = None
+        w.status = {"state": "error", "profile_id": ids[2], "last_profile": ids[2]}
+        assert w.wanted_selection() == ids[2], "after a failed attempt: the server that failed"
+        w.status = {"state": "connected", "profile_id": ids[1], "last_profile": ids[1]}
+        w._sync_selector()
+        assert w.server_row.get_selected() == 1 and w.sel_id == ids[1]
+        w.status = {"state": "disconnected", "last_profile": ids[1]}
+        w._on_profiles([prof(1), prof(2), prof(3)][::-1])           # a refreshed list keeps the right server selected
+        assert w.profiles[w.server_row.get_selected()]["id"] == ids[1]
+        w._on_profiles([prof(3), prof(1)])                           # the selected server was deleted
+        assert w.profiles[w.server_row.get_selected()]["id"] == ids[2]   # falls back to the first of what is left
+        w._pending = None
         # ---- servers tab: search above the buttons, VPN / Proxy sub-tabs
         assert w.srv_tabs.get_visible_child_name() == "vpn"
         sib = w.search.get_next_sibling()

@@ -108,6 +108,7 @@ class Manager:
         self._lock_ifaces = set()
         self._status = self._blank_status()
         self._state_cache = {}
+        self._last_profile = None
         self._current = None      # (ctx, iface) of the live tunnel
         self._reserved_ifnames = set()
         self._split = split.SplitTunnel(lambda: split.names_from_settings(self.settings.get("split")), self.log.add)
@@ -148,6 +149,7 @@ class Manager:
         with self._mlock:
             s = dict(self._status)
         s["netlock"] = self.netlock_status()
+        s["last_profile"] = self._last_profile_id()
         s["version"] = __version__
         s["uptime"] = int(time.time() - s["since"]) if s.get("since") and s["state"] == "connected" else 0
         return s
@@ -277,12 +279,18 @@ class Manager:
         self._split_stop()
         self.proxy.shutdown()
 
+    def _last_profile_id(self):
+        """The profile that was connected (or being connected) most recently - what a front end should show selected."""
+        if self._last_profile is None:
+            self._last_profile = self._load_state().get("last_profile") or ""
+        return self._last_profile
+
     def connect(self, ident=None, fastest=False, last=False, persistent=False):
         profiles = self.store.list()
         if not profiles:
             raise ProfileError("no profiles - import one first")
         if last or (not ident and not fastest):
-            lid = self._load_state().get("last_profile")
+            lid = self._last_profile_id()
             p = None
             for q in profiles:
                 if q["id"] == lid:
@@ -298,15 +306,18 @@ class Manager:
                 # New generation first: the old connection thread's late status updates are ignored from here on,
                 # and the UI shows "connecting" at once instead of the old server until the old tunnel is gone.
                 old_stop = self._stop
+                old_thread, old_iface = self._thread, self._status.get("iface")
                 self._stop = stop = threading.Event()
                 self._status = self._blank_status()
                 self._set(state="connecting", profile_id=p["id"], profile=p["name"], protocol=p["protocol"],
                           message="Switching server" if self._thread and self._thread.is_alive() else "Starting")
-            self._cancel(old_stop)
+            self._cancel(old_stop, wait=120)
+            self._wait_torn_down(old_thread, old_iface)
             with self._mlock:
                 self._thread = threading.Thread(target=self._run, args=(p, stop, persistent), daemon=True,
                                                 name="vpn-conn")
                 self._thread.start()
+            self._last_profile = p["id"]
             self._save_state(last_profile=p["id"])
         return {"profile": p["name"], "id": p["id"]}
 
@@ -318,15 +329,33 @@ class Manager:
         scored = sorted(cands, key=lambda p: (lat.get(p["id"]) is None, lat.get(p["id"]) or 0))
         return scored[0]
 
-    def _cancel(self, stop=None):
+    def _cancel(self, stop=None, wait=25):
         t = self._thread
         (stop or self._stop).set()
         proc = self._proc
         if proc and proc.poll() is None:
             _terminate(proc)
         if t and t.is_alive() and t is not threading.current_thread():
-            t.join(timeout=25)
+            t.join(timeout=wait)
         self._thread = None
+
+    def _wait_torn_down(self, thread, iface):
+        """Switching servers: the old tunnel must be completely gone (its process stopped, `wg-quick down` finished,
+        its interface removed) before the next one starts, so an OpenVPN and a WireGuard tunnel never overlap."""
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=60)
+            if thread.is_alive():
+                self.log.add("error", "The previous connection is still shutting down - not starting another on top of it")
+                with self._mlock:
+                    self._status = dict(self._blank_status(), state="error",
+                                        message="the previous connection is still shutting down; try again in a moment")
+                raise ProfileError("the previous connection is still shutting down; try again in a moment")
+        if iface:
+            for _ in range(60):
+                if not plat.iface_exists(iface):
+                    return
+                time.sleep(0.25)
+            self.log.add("warn", "Interface %s is still present after the old connection stopped" % iface)
 
     def disconnect(self, release_lock=True):
         with self._oplock:
@@ -514,6 +543,8 @@ class Manager:
             started = time.time()
             if oneshot:
                 for cmd in backend.connect_cmds(ctx):
+                    if stop.is_set():
+                        return False                 # switched away while setting up: the cleanup below undoes it
                     self.log.add("debug", "$ " + _safe_cmd(cmd))
                     rc, out = plat.run(cmd, timeout=s.get("connection.timeout") + 30)
                     for line in out.splitlines():
@@ -601,7 +632,8 @@ class Manager:
             # --- monitor
             last = None
             while not stop.is_set():
-                time.sleep(1)
+                if stop.wait(1):
+                    break
                 if proc is not None and proc.poll() is not None:
                     self.log.add("warn", "%s terminated (status %s)" % (backend.label, proc.returncode))
                     break

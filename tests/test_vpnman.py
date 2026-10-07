@@ -1415,14 +1415,26 @@ while True:
         open(fake, "w").write("""#!/bin/sh
 echo run >> "%s/invocations"
 if grep -q "# FAIL-AUTH" "$2"; then echo "AUTH: Received control message: AUTH_FAILED"; exit 0; fi
+echo "ovpn start" >> "%s/seq"
 cp "$2" "%s/last.ovpn"
 echo "TUN/TAP device lo opened"
 echo "PUSH: dhcp-option DNS 10.8.0.1"
 echo "Initialization Sequence Completed"
-trap 'exit 0' TERM
+trap 'sleep 0.5; echo "ovpn stop" >> "%s/seq"; exit 0' TERM
 while :; do sleep 0.1; done
-""" % (TMP, TMP))
+""" % (TMP, TMP, TMP, TMP))
         os.chmod(fake, 0o755)
+        # fake WireGuard tools: a slow `down`, and a marker file that stands for the interface
+        open(TMP + "/bin/wg", "w").write("#!/bin/sh\nexit 0\n")
+        open(TMP + "/bin/wg-quick", "w").write("""#!/bin/sh
+case "$1" in
+  up) echo "wg up" >> "%s/seq"; touch "%s/wg-iface"; echo "[#] interface: wg0" ;;
+  down) sleep 1; echo "wg down" >> "%s/seq"; rm -f "%s/wg-iface" ;;
+esac
+exit 0
+""" % (TMP, TMP, TMP, TMP))
+        os.chmod(TMP + "/bin/wg", 0o755)
+        os.chmod(TMP + "/bin/wg-quick", 0o755)
         s = settings.Settings(TMP + "/etc/settings.json")
         s.set("checks.tunnel", False)
         s.set("connection.reconnect", False)
@@ -1730,6 +1742,47 @@ AAAA
 
 
 
+
+    def test_switching_between_wireguard_and_openvpn_never_overlaps(self):
+        from vpnman import platform as plat
+        real = plat.iface_exists
+        plat.iface_exists = lambda n: os.path.exists(TMP + "/wg-iface") if n.startswith("wg") else real(n)
+        seq = TMP + "/seq"
+        reset = lambda: open(seq, "w").close()        # noqa: E731
+        lines = lambda: open(seq).read().split()      # noqa: E731
+        try:
+            self.c.call("profiles.import", name="sw-wg", text=WG, filename="sw-wg.conf", files={})
+            self.c.call("profiles.import", name="sw-ovpn", text=OVPN.replace("auth-user-pass\n", ""),
+                        filename="sw-ovpn.ovpn", files={})
+            # WireGuard -> OpenVPN: the tunnel is down (command finished, interface gone) before OpenVPN starts
+            reset()
+            self.c.call("connect", ident="sw-wg")
+            self.wait("connected")
+            self.assertEqual(" ".join(lines()), "wg up")
+            self.c.call("connect", ident="sw-ovpn")
+            self.wait("connected")
+            self.assertEqual(" ".join(lines()), "wg up wg down ovpn start")
+            self.assertFalse(os.path.exists(TMP + "/wg-iface"))
+            # OpenVPN -> WireGuard
+            self.c.call("connect", ident="sw-wg")
+            self.wait("connected")
+            self.assertEqual(" ".join(lines()), "wg up wg down ovpn start ovpn stop wg up")
+            self.c.call("disconnect")
+            self.assertEqual(" ".join(lines()), "wg up wg down ovpn start ovpn stop wg up wg down")
+        finally:
+            plat.iface_exists = real
+            self.c.call("disconnect")
+            for n in ("sw-wg", "sw-ovpn"):
+                self.c.call("profiles.remove", ident=n)
+
+    def test_status_reports_the_last_connected_profile(self):
+        self.c.call("profiles.import", name="lastp", text=OVPN.replace("auth-user-pass\n", ""), filename="lastp.ovpn", files={})
+        pid = self.c.call("profiles.get", ident="lastp")["id"]
+        self.c.call("connect", ident="lastp")
+        self.wait("connected")
+        self.c.call("disconnect")
+        self.assertEqual(self.c.call("status")["last_profile"], pid)
+        self.c.call("profiles.remove", ident="lastp")
 
     # ------------------------------------------------------------------ proxy (Xray)
     LINK = "vless://11111111-2222-3333-4444-555555555555@203.0.113.7:443?security=reality&sni=example.com&pbk=PUB&sid=ab&type=tcp&flow=xtls-rprx-vision#Home"
