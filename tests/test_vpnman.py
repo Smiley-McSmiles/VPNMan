@@ -1044,6 +1044,47 @@ class FailoverUpdateLintTests(unittest.TestCase):
             updates.check(opener=opener({"tag_name": "nightly"}))
 
 
+class ManPageTests(unittest.TestCase):
+    """The man page must not drift from the program: every command and every setting is described."""
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def _page(self):
+        with open(os.path.join(self.ROOT, "data", "vpnman.1")) as fh:
+            return fh.read().replace("\\-", "-").replace("\\fB", "").replace("\\fR", "").replace("\\fI", "")
+
+    def test_every_command_is_documented(self):
+        import argparse
+        from vpnman import cli
+        page = self._page()
+        sub = next(a for a in cli.build_parser()._actions if isinstance(a, argparse._SubParsersAction))
+        for name in sub.choices:
+            if name in cli.ALIASES:
+                continue
+            self.assertRegex(page, r"\b%s\b" % name, "command %s is not in the man page" % name)
+
+    def test_every_setting_is_documented(self):
+        from vpnman.settings import DEFAULTS
+        page = self._page()
+        for sec, val in DEFAULTS.items():
+            if isinstance(val, dict):
+                for key in val:
+                    self.assertIn("%s.%s" % (sec, key), page, "setting %s.%s is not in the man page" % (sec, key))
+            else:
+                self.assertIn(sec, page)
+
+    def test_every_option_is_documented(self):
+        import argparse
+        from vpnman import cli
+        page = self._page()
+        sub = next(a for a in cli.build_parser()._actions if isinstance(a, argparse._SubParsersAction))
+        for name, sp in sub.choices.items():
+            for a in sp._actions:
+                for o in a.option_strings:
+                    if o in ("-h", "--help"):
+                        continue
+                    self.assertIn(o, page, "option %s of %s is not in the man page" % (o, name))
+
+
 class StunnelTests(unittest.TestCase):
     def prof(self, **st):
         return profiles.new_profile("s", "openvpn", options={"stunnel": dict({"enabled": True, "host": "h.example.com"}, **st)})

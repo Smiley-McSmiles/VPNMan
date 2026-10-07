@@ -31,7 +31,7 @@ _vpnman() {
             names=1 ;;
         bypass)
             opts=""
-            choices=""
+            choices="list add remove rm available on off mode"
             names=0 ;;
         cleanup)
             opts="--force"
@@ -135,11 +135,11 @@ _vpnman() {
             names=1 ;;
         routes)
             opts=""
-            choices=""
+            choices="list add remove rm"
             names=0 ;;
         schedule)
             opts="--name --days --start --end --profile"
-            choices=""
+            choices="list add remove rm enable disable on off"
             names=0 ;;
         service)
             opts="--init"
@@ -155,7 +155,7 @@ _vpnman() {
             names=0 ;;
         split)
             opts=""
-            choices=""
+            choices="list add remove rm available on off mode"
             names=0 ;;
         status)
             opts="--json"
