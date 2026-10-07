@@ -5,7 +5,7 @@ _vpnman() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     cmd="${COMP_WORDS[1]}"
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=( $(compgen -W "about add autostart backup block bypass cleanup connect daemon disconnect dns doctor down edit failover fav get group gui history import leaktest list lock logs ls menu networks ping protocols remove rm routes schedule service set shell split status unblock unfav up update --version --help" -- "$cur") )
+        COMPREPLY=( $(compgen -W "about add autostart backup block bypass cleanup connect connections daemon disconnect dns doctor down edit failover fav get group gui history import leaktest list lock logs ls menu networks ping protocols proxy remove rm routes schedule service set shell split status unblock unfav up update --version --help" -- "$cur") )
         return
     fi
     case "$cmd" in
@@ -41,6 +41,10 @@ _vpnman() {
             opts="--fastest --last --no-wait --timeout"
             choices=""
             names=1 ;;
+        connections)
+            opts="--listening -l --local --watch -w --json"
+            choices=""
+            names=0 ;;
         daemon)
             opts=""
             choices=""
@@ -128,6 +132,10 @@ _vpnman() {
         protocols)
             opts=""
             choices=""
+            names=0 ;;
+        proxy)
+            opts="--name --group --latency -l --json"
+            choices="list add remove rm edit use on off order mode set status ping refresh"
             names=0 ;;
         remove)
             opts=""

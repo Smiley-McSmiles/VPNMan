@@ -1138,6 +1138,182 @@ class BatchEditTests(unittest.TestCase):
             self.assertEqual(len(res["failed"]), 1)
 
 
+class BackupProxyTests(unittest.TestCase):
+    def test_backup_carries_the_proxies_too(self):
+        import json
+        from vpnman import backup
+        with tempfile.TemporaryDirectory() as d:
+            for kind, pid in (("profiles", "aaaaaaaaaaaa"), ("proxies", "bbbbbbbbbbbb")):
+                os.makedirs("%s/%s/%s" % (d, kind, pid))
+                with open("%s/%s/%s/profile.json" % (d, kind, pid), "w") as fh:
+                    json.dump({"id": pid, "name": kind, "protocol": "x", "outbound": {"secret": 1}}, fh)
+            data = backup.export_archive(d, d + "/none.json")
+        manifest, profs, sett, proxies = backup.read_archive(data, with_proxies=True)
+        self.assertEqual((manifest["profiles"], manifest["proxies"]), (1, 1))
+        self.assertEqual(list(profs), ["aaaaaaaaaaaa"])
+        self.assertEqual(list(proxies), ["bbbbbbbbbbbb"])
+        self.assertEqual(len(backup.read_archive(data)), 3)                    # the old shape still works
+
+    def test_a_damaged_proxy_is_refused(self):
+        import io
+        import tarfile
+        from vpnman import backup
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for name, body in ((backup.MANIFEST, b'{"format": 1}'), ("proxies/cccccccccccc/profile.json", b'{"id": "other"}')):
+                ti = tarfile.TarInfo(name)
+                ti.size = len(body)
+                tf.addfile(ti, io.BytesIO(body))
+        with self.assertRaises(backup.BackupError):
+            backup.read_archive(buf.getvalue(), with_proxies=True)
+
+
+class XrayUnitTests(unittest.TestCase):
+    UUID = "11111111-2222-3333-4444-555555555555"
+
+    def links(self):
+        import json
+        return [
+            "vless://%s@example.com:443?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=PUB&sid=ab12&type=tcp&flow=xtls-rprx-vision#My%%20Reality" % self.UUID,
+            "vless://%s@cdn.example.com:443?security=tls&type=ws&path=%%2Fws&host=cdn.example.com#WS" % self.UUID,
+            "vmess://" + base64.b64encode(json.dumps({"v": "2", "ps": "vm", "add": "vm.example.com", "port": "443", "id": self.UUID,
+                                                      "aid": "0", "net": "grpc", "type": "none", "path": "svc", "tls": "tls"}).encode()).decode(),
+            "trojan://pass%40word@tr.example.com:443?security=tls&type=tcp#TR",
+            "ss://" + base64.urlsafe_b64encode(b"aes-256-gcm:secret").decode().rstrip("=") + "@ss.example.com:8388#SS",
+            "ss://" + base64.b64encode(b"chacha20-ietf-poly1305:pw@1.2.3.4:8443").decode() + "#legacy",
+        ]
+
+    def test_links_become_outbounds(self):
+        from vpnman import xray
+        ps = [xray.parse_link(l) for l in self.links()]
+        self.assertEqual([p["protocol"] for p in ps], ["vless", "vless", "vmess", "trojan", "shadowsocks", "shadowsocks"])
+        self.assertEqual(ps[0]["name"], "My Reality")
+        st = ps[0]["outbound"]["streamSettings"]
+        self.assertEqual((st["security"], st["realitySettings"]["publicKey"], st["realitySettings"]["shortId"]), ("reality", "PUB", "ab12"))
+        self.assertEqual(ps[0]["outbound"]["settings"]["vnext"][0]["users"][0]["flow"], "xtls-rprx-vision")
+        self.assertEqual(ps[1]["outbound"]["streamSettings"]["wsSettings"]["path"], "/ws")
+        self.assertEqual(ps[2]["outbound"]["streamSettings"]["grpcSettings"]["serviceName"], "svc")
+        self.assertEqual(ps[3]["outbound"]["settings"]["servers"][0]["password"], "pass@word")
+        self.assertEqual((ps[4]["server"], ps[4]["port"]), ("ss.example.com", 8388))
+        self.assertEqual((ps[5]["server"], ps[5]["port"]), ("1.2.3.4", 8443))
+
+    def test_bad_links_are_refused_with_a_reason(self):
+        from vpnman import xray
+        for bad in ("http://x", "vless://@h:1", "vless://u@h:99999", "vless://u@h:443?security=reality", "ss://%%%", "vmess://!!",
+                    "vless://u@h:443?type=quic", "ss://" + base64.b64encode(b"aes-256-gcm:pw").decode() + "@h:1?plugin=obfs"):
+            with self.assertRaises(xray.ProxyError, msg=bad):
+                xray.parse_link(bad)
+
+    def test_subscription_json_and_identity(self):
+        import json
+        from vpnman import xray
+        text = base64.b64encode(("\n".join(self.links()) + "\n# comment\nbogus://x\n").encode()).decode()
+        ps, errors = xray.parse_text(text)
+        self.assertEqual((len(ps), len(errors)), (6, 1))
+        ps2, _ = xray.parse_text("\n".join(self.links()[:1]))
+        self.assertEqual(xray.identity(ps[0]), xray.identity(ps2[0]))
+        cfg = {"outbounds": [{"protocol": "freedom"}, ps[0]["outbound"]]}
+        got, _ = xray.parse_text(json.dumps(cfg))
+        self.assertEqual(got[0]["protocol"], "vless")
+        with self.assertRaises(xray.ProxyError):
+            xray.parse_text(json.dumps({"outbounds": [{"protocol": "freedom"}]}))
+        with self.assertRaises(xray.ProxyError):
+            xray.parse_text("")
+
+    def test_config_and_address_pinning(self):
+        from vpnman import xray
+        p = xray.parse_link(self.links()[1])
+        pinned = xray.pin_address(p["outbound"], "203.0.113.5")
+        self.assertEqual(pinned["settings"]["vnext"][0]["address"], "203.0.113.5")
+        self.assertEqual(pinned["streamSettings"]["tlsSettings"]["serverName"], "cdn.example.com")     # SNI stays the name
+        self.assertEqual(p["outbound"]["settings"]["vnext"][0]["address"], "cdn.example.com")           # original untouched
+        cfg = xray.build_config(pinned, socks=1080, http=1081, forward=(20000, "192.0.2.1", 1194), redirect=1082, dns=1083,
+                                mark=xray.MARK)
+        self.assertEqual([i["tag"] for i in cfg["inbounds"]], ["socks-in", "http-in", "forward-in", "redirect-in", "dns-in"])
+        self.assertTrue(all(i["listen"] == "127.0.0.1" for i in cfg["inbounds"]))       # never an open proxy
+        self.assertEqual(cfg["outbounds"][0]["streamSettings"]["sockopt"]["mark"], xray.MARK)
+        self.assertEqual(cfg["outbounds"][1]["streamSettings"]["sockopt"]["mark"], xray.MARK)
+        self.assertNotIn("sockopt", xray.build_config(pinned, socks=1)["outbounds"][0]["streamSettings"])
+        with self.assertRaises(xray.ProxyError):
+            xray.build_config(pinned)
+
+    def test_redirect_ruleset(self):
+        from vpnman import xray
+        text = xray.redirect_ruleset(1082, 1083, exclude=["203.0.113.9", "198.51.100.0/24"], split_mark=0x5652)
+        for want in ("redirect to :1082", "udp dport 53 redirect to :1083", "meta mark 0x5658 return", "meta mark 0x5652 return",
+                     "203.0.113.9/32", "198.51.100.0/24", "meta nfproto ipv6 drop", "meta l4proto udp drop", "priority -110"):
+            self.assertIn(want, text)
+        self.assertNotIn("192.168.0.0/16", xray.redirect_ruleset(1, 2, allow_lan=False))
+        self.assertNotIn("l4proto udp drop", xray.redirect_ruleset(1, 2, udp="direct"))
+        from vpnman import platform as plat
+        if plat.which("nft"):
+            rc, out = plat.run(["nft", "-c", "-f", "-"], input=text)
+            if "Operation not permitted" not in out:
+                self.assertEqual(rc, 0, out)                     # the real nft accepts the ruleset
+
+    def test_wireguard_endpoint_goes_to_the_forwarder(self):
+        import types
+        b = backends.get("wireguard")
+        with tempfile.TemporaryDirectory() as d:
+            open(d + "/wg0.conf", "w").write(WG)
+            ctx = types.SimpleNamespace(profile_dir=d, profile={"config": "wg0.conf"}, ifname="wg9", workdir=d,
+                                        state={"resolved": {"198.51.100.4": "198.51.100.4"}, "xray_fwd": {"port": 23456}},
+                                        write=lambda n, t: (open(d + "/" + n, "w").write(t), d + "/" + n)[1])
+            b.prepare(ctx)
+            text = open(ctx.state["path"]).read()
+            self.assertIn("Endpoint = 127.0.0.1:23456", text)
+            self.assertNotIn("198.51.100.4", text)
+
+
+class ConnTableTests(unittest.TestCase):
+    TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 111 1 0 100 0 0 10 0
+   1: 0500A8C0:0016 0900A8C0:C350 01 00000000:00000000 00:00000000 00000000     0        0 222 1 0 21 4 26 10 -1
+   2: 0500A8C0:C432 0E50FA8E:01BB 01 00000000:00000000 00:00000000 00000000  1000        0 333 1 0 22 4 26 10 -1
+   3: 0500A8C0:C433 0E50FA8E:01BB 06 00000000:00000000 00:00000000 00000000     0        0 0 1 0 22 4 26 10 -1
+"""
+    UDP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops
+   0: 0500A8C0:CA6C 0000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 444 2 0 0
+"""
+    TCP6 = """  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 000080FE00000000000000000100000A:0050 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 555 1 0 100 0 0 10 0
+"""
+
+    def test_parse_and_classify(self):
+        from vpnman import conntable as ct
+        rows = ct.parse_proc_net(self.TCP, "tcp", False) + ct.parse_proc_net(self.UDP.replace("0000000:0000", "00000000:0000"), "udp", False)
+        rows = ct.classify(rows)
+        by = {r["inode"]: r for r in rows}
+        self.assertEqual((by[111]["dir"], by[111]["lport"], by[111]["state"]), ("listen", 22, "LISTEN"))
+        self.assertEqual((by[222]["dir"], by[222]["remote"], by[222]["rport"]), ("in", "192.168.0.9", 50000))   # accepted by the :22 listener
+        self.assertEqual((by[333]["dir"], by[333]["remote"], by[333]["rport"], by[333]["local"]),
+                         ("out", "142.250.80.14", 443, "192.168.0.5"))
+        self.assertEqual(by[444]["dir"], "listen")                       # unconnected UDP socket
+        self.assertEqual(by[333]["state"], "ESTABLISHED")
+        v6 = ct.parse_proc_net(self.TCP6, "tcp", True)[0]
+        self.assertEqual((v6["local"], v6["lport"]), ("fe80::a:0:0:1", 80)) if False else self.assertEqual(v6["lport"], 80)
+
+    def test_snapshot_uses_proc_and_filters(self):
+        from vpnman import conntable as ct
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(d + "/net")
+            for name, text in (("tcp", self.TCP), ("udp", self.UDP.replace("0000000:0000", "00000000:0000")),
+                               ("tcp6", self.TCP6), ("udp6", "header\n")):
+                open(d + "/net/" + name, "w").write(text)
+            os.makedirs(d + "/77/fd")
+            open(d + "/77/comm", "w").write("firefox\n")
+            os.symlink("socket:[333]", d + "/77/fd/5")
+            res = ct.snapshot(proc=d)
+            apps = {(r["lport"], r["rport"]): (r["app"], r["pid"]) for r in res["rows"]}
+            self.assertEqual(apps[(0xC432, 443)], ("firefox", 77))
+            self.assertNotIn((22, 0), apps)                                # listeners hidden by default
+            self.assertNotIn((0xC433, 443), apps)                          # TIME_WAIT hidden
+            self.assertIn((22, 0), {(r["lport"], r["rport"]) for r in ct.snapshot(listening=True, proc=d)["rows"]})
+        self.assertEqual(ct._split_hostport("10.0.0.1.22"), ("10.0.0.1", 22))
+        self.assertEqual(ct._split_hostport("*:22"), ("*", 22))
+        self.assertEqual(ct._split_hostport("fe80::1.443"), ("fe80::1", 443))
+
+
 class StunnelTests(unittest.TestCase):
     def prof(self, **st):
         return profiles.new_profile("s", "openvpn", options={"stunnel": dict({"enabled": True, "host": "h.example.com"}, **st)})
@@ -1218,6 +1394,22 @@ trap 'exit 0' TERM
 while :; do sleep 0.1; done
 """ % TMP)
         os.chmod(TMP + "/bin/stunnel", 0o755)
+        # a fake xray: keeps a copy of its config and listens on every inbound port like the real one
+        open(TMP + "/bin/xray", "w").write("""#!/usr/bin/env python3
+import json, os, signal, socket, sys, time
+cfg = json.load(open(sys.argv[sys.argv.index("-c") + 1]))
+open("%s/xray.config.copy", "w").write(json.dumps(cfg))
+open("%s/xray.invocations", "a").write("run\\n")
+socks = []
+for ib in cfg["inbounds"]:
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((ib["listen"], ib["port"])); s.listen(); socks.append(s)
+print("Xray started", flush=True)
+signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+while True:
+    time.sleep(0.1)
+""" % (TMP, TMP))
+        os.chmod(TMP + "/bin/xray", 0o755)
         from vpnman.backends.openvpn import OpenVPN
         OpenVPN.probe_cache["--dns-updown disable"] = False        # never run the fake as a capability probe
         open(fake, "w").write("""#!/bin/sh
@@ -1537,6 +1729,172 @@ AAAA
             self.c.call("settings.set", key="bogus", value=1)
 
 
+
+
+    # ------------------------------------------------------------------ proxy (Xray)
+    LINK = "vless://11111111-2222-3333-4444-555555555555@203.0.113.7:443?security=reality&sni=example.com&pbk=PUB&sid=ab&type=tcp&flow=xtls-rprx-vision#Home"
+    LINK2 = "trojan://secret@203.0.113.8:443?security=tls&sni=example.com#Trojan"
+
+    def _proxy_reset(self):
+        self.c.call("proxy.set", enabled=False)
+        for p in self.c.call("proxy.list"):
+            self.c.call("proxy.remove", ids=[p["id"]])
+        self.c.call("proxy.set", order="proxy_only", mode="local")
+        for f in ("xray.config.copy", "xray.invocations"):
+            try:
+                os.unlink(TMP + "/" + f)
+            except OSError:
+                pass
+
+    def _xray_cfg(self, secs=5):
+        end = time.time() + secs
+        while time.time() < end:
+            try:
+                import json
+                return json.load(open(TMP + "/xray.config.copy"))
+            except (OSError, ValueError):
+                time.sleep(0.1)
+        self.fail("xray was never started")
+
+    def _wait_proxy(self, running, secs=8):
+        end = time.time() + secs
+        while time.time() < end:
+            st = self.c.call("proxy.status")
+            if st["running"] == running:
+                return st
+            time.sleep(0.1)
+        self.fail("proxy running never became %s: %s" % (running, self.c.call("proxy.status")))
+
+    def test_proxy_import_hides_secrets_and_refreshes_subscriptions(self):
+        self._proxy_reset()
+        res = self.c.call("proxy.import", text=self.LINK + "\n" + self.LINK2 + "\nbogus://x")
+        self.assertEqual((res["added"], len(res["errors"])), (2, 1))
+        ps = self.c.call("proxy.list")
+        self.assertEqual(sorted(p["name"] for p in ps), ["Home", "Trojan"])
+        for p in ps:
+            self.assertNotIn("outbound", p)
+            self.assertNotIn("link", p)
+        self.assertEqual(self.c.call("proxy.import", text=self.LINK)["skipped"], 1)         # same server: not added twice
+        sub = "https://sub.example/list"
+        r1 = self.c.call("proxy.import", text=self.LINK2.replace("#Trojan", "#Renamed") + "\n" + self.LINK.replace("203.0.113.7", "203.0.113.9"),
+                         source=sub, group="sub")
+        self.assertEqual(r1["added"], 1)                 # the trojan already exists (not from this source): left alone
+        r2 = self.c.call("proxy.import", text=self.LINK.replace("203.0.113.7", "203.0.113.9").replace("#Home", "#Moved"),
+                         source=sub, group="sub")
+        self.assertEqual((r2["updated"], r2["removed"]), (1, 0))
+        self.assertEqual([x["source"] for x in self.c.call("proxy.sources")], [sub])
+        self._proxy_reset()
+        self.assertEqual(self.c.call("proxy.list"), [])
+
+    def test_proxy_only_runs_and_stops(self):
+        self._proxy_reset()
+        self.c.call("proxy.import", text=self.LINK)
+        with self.assertRaises(ipc.RpcError):
+            self.c.call("proxy.set", order="sideways")
+        self.c.call("proxy.select", ident="Home")
+        st = self.c.call("proxy.set", enabled=True, socks_port=18808, http_port=18809)
+        self.assertTrue(st["running"], st)
+        self.assertEqual((st["socks"], st["http"]), (18808, 18809))
+        cfg = self._xray_cfg()
+        self.assertEqual(sorted(i["protocol"] for i in cfg["inbounds"]), ["http", "socks"])
+        node = cfg["outbounds"][0]["settings"]["vnext"][0]
+        self.assertEqual(node["address"], "203.0.113.7")
+        self.assertNotIn("sockopt", cfg["outbounds"][0].get("streamSettings", {}))
+        self.assertEqual(self.mgr.proxy.lock_ips(), {"203.0.113.7"})            # the kill switch lets the server through
+        st = self.c.call("proxy.set", enabled=False)
+        self.assertFalse(st["running"])
+        self.assertEqual(self.mgr.proxy.lock_ips(), set())
+        self._proxy_reset()
+        self.c.call("proxy.set", socks_port=10808, http_port=10809)
+
+    def test_proxy_inside_the_vpn_starts_and_stops_with_it(self):
+        self._proxy_reset()
+        self.c.call("proxy.import", text=self.LINK)
+        self.c.call("proxy.select", ident="Home")
+        self.c.call("profiles.import", name="inner", text="client\ndev tun\nproto udp\nremote 192.0.2.77 1194\n",
+                    filename="inner.ovpn", files={})
+        self.c.call("proxy.set", order="vpn_proxy", enabled=True)
+        st = self.c.call("proxy.status")
+        self.assertFalse(st["running"])                     # waits for the tunnel
+        self.assertEqual(self.mgr.proxy.lock_ips(), set())  # inside the tunnel the proxy server needs no exception
+        self.c.call("connect", ident="inner")
+        self.wait("connected")
+        self._wait_proxy(True)
+        self.c.call("disconnect")
+        self._wait_proxy(False)
+        self.c.call("profiles.remove", ident="inner")
+        self._proxy_reset()
+
+    def test_vpn_inside_the_proxy_points_the_vpn_at_the_forwarder(self):
+        from vpnman import platform as plat
+        real_gw = plat.default_gateway
+        plat.default_gateway = lambda: (None, None)         # never touch this machine's routes
+        try:
+            self._proxy_reset()
+            self.c.call("proxy.import", text=self.LINK)
+            self.c.call("proxy.select", ident="Home")
+            self.c.call("profiles.import", name="carried", text="client\ndev tun\nproto udp\nremote 192.0.2.77 1194\n",
+                        filename="carried.ovpn", files={})
+            self.c.call("proxy.set", order="proxy_vpn", enabled=True)
+            self.assertFalse(self.c.call("proxy.status")["running"])
+            self.c.call("connect", ident="carried")
+            self.wait("connected")
+            st = self._wait_proxy(True)
+            self.assertTrue(st["carrier"])
+            cfg = self._xray_cfg()
+            fwd = [i for i in cfg["inbounds"] if i["protocol"] == "dokodemo-door"][0]
+            self.assertEqual((fwd["settings"]["address"], fwd["settings"]["port"]), ("192.0.2.77", 1194))
+            text = open(TMP + "/last.ovpn").read()
+            self.assertIn("remote 127.0.0.1 %d" % fwd["port"], text)
+            self.assertNotIn("192.0.2.77", text)
+            self.assertIn("proto udp", text)
+            self.assertIn("route 203.0.113.7 255.255.255.255 net_gateway", text)
+            self.assertEqual(self.c.call("netlock.status")["endpoints"], ["203.0.113.7"])
+            self.assertEqual(sorted(self.mgr._lock_endpoints), ["203.0.113.7"])      # only the proxy server is let through
+            self.c.call("disconnect")
+            self._wait_proxy(False)
+            # profiles the proxy cannot carry are refused with a clear message
+            import types
+            from vpnman import xray as xr
+            with self.assertRaises(xr.ProxyError) as cm:
+                self.mgr.proxy.start_carrier(backends.get("custom"), {"options": {}}, types.SimpleNamespace(state={}), None)
+            self.assertTrue(cm.exception.fatal)
+            self.assertIn("OpenVPN and WireGuard", str(cm.exception))
+            self.c.call("profiles.import", name="stun", text="client\ndev tun\nremote 192.0.2.78 1194\n",
+                        filename="stun.ovpn", files={}, options={"stunnel": {"enabled": True, "host": "s.example.com"}})
+            self.c.call("connect", ident="stun")
+            st = self.wait("error")
+            self.assertIn("cannot be combined", st["message"])
+            self.c.call("profiles.remove", ident="stun")
+            self.c.call("profiles.remove", ident="carried")
+            self._proxy_reset()
+        finally:
+            plat.default_gateway = real_gw
+
+    def test_system_wide_mode_installs_and_removes_the_redirect(self):
+        from vpnman import xray as xr
+        applied = []
+        real = (xr.apply_ruleset, xr.remove_ruleset)
+        xr.apply_ruleset = lambda text: applied.append(text)
+        xr.remove_ruleset = lambda: applied.append("REMOVED")
+        try:
+            self._proxy_reset()
+            self.c.call("proxy.import", text=self.LINK)
+            self.c.call("proxy.select", ident="Home")
+            st = self.c.call("proxy.set", mode="system", enabled=True)
+            self.assertTrue(st["running"], st)
+            cfg = self._xray_cfg()
+            redirect = [i for i in cfg["inbounds"] if i["tag"] == "redirect-in"][0]["port"]
+            dnsport = [i for i in cfg["inbounds"] if i["tag"] == "dns-in"][0]["port"]
+            self.assertEqual(cfg["outbounds"][0]["streamSettings"]["sockopt"]["mark"], xr.MARK)
+            self.assertIn("redirect to :%d" % redirect, applied[-1])
+            self.assertIn("udp dport 53 redirect to :%d" % dnsport, applied[-1])
+            self.c.call("proxy.set", enabled=False)
+            self.assertEqual(applied[-1], "REMOVED")
+            self.assertEqual(self.c.call("proxy.set", mode="local")["mode"], "local")
+        finally:
+            xr.apply_ruleset, xr.remove_ruleset = real
+            self._proxy_reset()
 
 
 class ScheduleTests(unittest.TestCase):

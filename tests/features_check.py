@@ -10,14 +10,22 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 from vpnman.gui import app as A
 from vpnman.gui import pages as P
+from vpnman.gui import proxypage as PP
 from vpnman.settings import DEFAULTS
 
 CALLS = []
+PROXY_STATUS = {"enabled": True, "selected": "%012d" % 1, "name": "Home", "order": "vpn_proxy", "mode": "local", "running": True,
+                "carrier": False, "error": "", "socks": 10808, "http": 10809, "installed": True, "system_ok": True,
+                "socks_port": 10808, "http_port": 10809, "dns": "1.1.1.1", "udp": "block"}
 
 
 def fake_rpc(method, ok=None, fail=None, **kw):
     CALLS.append((method, kw))
     canned = {
+        "proxy.list": [{"id": "%012d" % i, "name": n, "protocol": "vless", "server": "p%d.example.com" % i, "port": 443,
+                        "group": g, "selected": i == 1, "notes": ""} for i, (n, g) in enumerate([("Home", ""), ("WS", "sub"), ("TR", "sub")], 1)],
+        "proxy.status": PROXY_STATUS, "proxy.sources": [], "proxy.set": PROXY_STATUS, "proxy.select": {"id": "x"},
+        "proxy.latency": {"%012d" % 1: 12.5, "%012d" % 2: None},
         "leaktest": {"checks": [{"id": "tunnel", "name": "VPN tunnel", "status": "ok", "detail": "Connected"},
                                 {"id": "dns", "name": "DNS servers", "status": "fail", "detail": "leak <&> test"},
                                 {"id": "ipv6", "name": "IPv6", "status": "warn", "detail": "maybe"}], "summary": "fail"},
@@ -28,6 +36,12 @@ def fake_rpc(method, ok=None, fail=None, **kw):
     }
     if ok and method in canned:
         ok(canned[method])
+
+
+def fake_proxy_list():
+    return [{"id": "%012d" % i, "name": n, "protocol": "vless", "server": "p%d.example.com" % i,
+                                        "port": 443, "group": g, "selected": i == 1, "notes": ""}
+                                       for i, (n, g) in enumerate([("Home", ""), ("WS", "sub"), ("TR", "sub")], 1)]
 
 
 def prof(i, group="", fav=False):
@@ -182,6 +196,62 @@ class App(A.Application):
         bd._apply()
         call = [kw for m, kw in CALLS if m == "profiles.update_many"]
         assert call and call[0]["ids"] == [p["id"] for p in members] and call[0]["changes"]["group"] == "Beta", call
+        # ---- servers tab: search above the buttons, VPN / Proxy sub-tabs
+        assert w.srv_tabs.get_visible_child_name() == "vpn"
+        sib = w.search.get_next_sibling()
+        assert sib is not None and w.sort_drop.get_parent() is sib and w.ping_btn.get_parent() is sib, "search must sit above the buttons"
+        # ---- proxy page
+        pp = w.proxy_page
+        pp.rpc = fake_rpc
+        pp.update_list(fake_proxy_list())
+        pp.update_status(PROXY_STATUS)
+        assert len(pp._rows) == 3 and pp.enable.get_active() and "Running" in pp.enable.get_subtitle()
+        assert pp.order.get_selected() == 1 and pp.mode.get_visible() and "SOCKS5 127.0.0.1:10808" in pp.addr.get_subtitle()
+        CALLS.clear()
+        pp.order.set_selected(2)                                  # "Proxy, then VPN"
+        assert CALLS[-1] == ("proxy.set", {"order": "proxy_vpn"}), CALLS
+        pp.update_status(dict(PROXY_STATUS, order="proxy_vpn", running=False))
+        assert not pp.mode.get_visible() and "Starts with the next VPN" in pp.enable.get_subtitle()
+        pp.update_status(dict(PROXY_STATUS, error="boom <b>", running=False))
+        assert "boom" in pp.enable.get_subtitle()
+        pp.update_status(dict(PROXY_STATUS, installed=False))
+        assert pp.banner.get_revealed()
+        CALLS.clear()
+        pp.update_status(PROXY_STATUS)
+        assert not CALLS, "updating the widgets from a status must not send changes back"
+        pp.enable.set_active(False)
+        assert CALLS[-1] == ("proxy.set", {"enabled": False}), CALLS
+        pp.update_status(PROXY_STATUS)
+        CALLS.clear()
+        pp._rows["%012d" % 2].use.set_active(True)
+        assert ("proxy.select", {"ident": "%012d" % 2}) in CALLS, CALLS
+        pp.search.set_text("tr")
+        pp.listbox.invalidate_filter()
+        add = PP.ProxyAddDialog(w, fake_rpc, lambda: None)
+        add._submit()
+        assert add.err.get_revealed(), "an empty add dialog must complain"
+        add.url.set_text("ftp://x")
+        add._submit()
+        assert "http" in add.err.get_title()
+        PP.ProxyEditDialog(w, fake_rpc, fake_proxy_list()[0], lambda: None)
+        # ---- connection table
+        cg = w.conn_group
+        rows = [{"dir": "out", "proto": "tcp", "v6": False, "local": "10.0.0.2", "lport": 40000, "remote": "93.184.216.34", "rport": 443,
+                 "state": "ESTABLISHED", "pid": 7, "app": "firefox"},
+                {"dir": "in", "proto": "udp", "v6": True, "local": "::1", "lport": 53, "remote": "::", "rport": 0, "state": "", "pid": 0, "app": ""}]
+        cg.update({"rows": rows})
+        assert cg.store.get_n_items() == 2 and cg.params() == {"listening": False, "local": False}
+        assert "2 connections" in cg.summary.get_label()
+        cg.search.set_text("firefox")
+        cg.refilter()
+        assert cg.filtered.get_n_items() == 1 and "of 2" in cg.summary.get_label()
+        cg.search.set_text("")
+        cg.refilter()
+        first = cg.store.get_item(0)
+        cg.update({"rows": rows})
+        assert cg.store.get_item(0) is first, "an unchanged table must not be rebuilt"
+        cg.update({"rows": rows[:1], "note": "n"})
+        assert cg.store.get_n_items() == 1 and "n" in cg.summary.get_label()
         # ---- update result dialog / import notes build without errors
         w.show_warnings(["a: Will be ignored: 'register-dns'"])
         w._update_result({"current": "1.0.6", "latest": "9.9.9", "newer": True, "url": "https://github.com/x", "notes": "n"}, False)

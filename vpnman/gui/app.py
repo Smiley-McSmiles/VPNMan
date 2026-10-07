@@ -19,7 +19,8 @@ except (ImportError, ValueError) as exc:  # pragma: no cover
 import json
 
 from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof, updates
-from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
+from .pages import BypassPage, ConnectionsGroup, HistoryGroup, SchedulePage, TrafficGraph
+from .proxypage import ProxyPage
 from .tray import HelperTray, Tray, wants_helper
 from ..settings import DNS_PRESETS, DEFAULTS
 from ..ipc import Client, DaemonUnavailable, RpcError
@@ -856,6 +857,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.graph_group.add(self.graph)
         self.graph_group.set_visible(False)
         groups.append(self.graph_group)
+        self.conn_group = ConnectionsGroup()
+        groups.append(self.conn_group)
 
         dns = Adw.PreferencesGroup(title="DNS", description="Name servers used while the VPN is active. "
                                    "Changes apply immediately, even when connected.")
@@ -976,18 +979,31 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ---- servers -----------------------------------------------------
     def _build_servers(self):
+        """The Servers tab: VPN servers and proxies as two sub-tabs."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # a plain stack switcher: the view switcher wants an icon per page, and icon themes differ
+        self.srv_tabs = Gtk.Stack(vexpand=True)
+        self.srv_tabs.add_titled(self._build_vpn_servers(), "vpn", "VPN Servers")
+        self.proxy_page = ProxyPage(self, rpc)
+        self.srv_tabs.add_titled(self.proxy_page, "proxy", "Proxy")
+        switcher = Gtk.StackSwitcher(stack=self.srv_tabs, halign=Gtk.Align.CENTER, margin_top=8, margin_bottom=4)
+        box.append(switcher)
+        box.append(self.srv_tabs)
+        return box
+
+    def _build_vpn_servers(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.search = Gtk.SearchEntry(placeholder_text="Search servers")
         self.search.connect("search-changed", lambda *_: self.listbox.invalidate_filter())
         top = Gtk.Box(spacing=6)
         self.search.set_hexpand(True)
-        top.append(self.search)
         self.sort_modes = [("favourites", "Favourites first"), ("name", "Name"), ("latency", "Fastest first")]
         self.sort_drop = Gtk.DropDown(model=Gtk.StringList.new([m[1] for m in self.sort_modes]),
                                       tooltip_text="Sort servers")
         cur = self.get_application().userconfig.get("server_sort") if self.get_application() else "favourites"
         self.sort_drop.set_selected(next((i for i, m in enumerate(self.sort_modes) if m[0] == cur), 0))
         self.sort_drop.connect("notify::selected", self._on_sort_changed)
+        self.sort_drop.set_hexpand(True)
         top.append(self.sort_drop)
         self.ping_btn = Gtk.Button(label="Test Latency")
         self.ping_btn.connect("clicked", self.on_ping)
@@ -1010,6 +1026,7 @@ class MainWindow(Adw.ApplicationWindow):
         keys.connect("key-pressed", self._on_list_key)
         self.listbox.add_controller(keys)
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        inner.append(self.search)             # the search box gets its own row: the buttons below need the width
         inner.append(top)
         inner.append(self.listbox)
         clamp = Adw.Clamp(maximum_size=720, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12,
@@ -1538,7 +1555,18 @@ class MainWindow(Adw.ApplicationWindow):
         self._ticks = getattr(self, "_ticks", 0) + 1
         self.refresh(slow=self._ticks % 20 == 0)
         self._auto_latency()
+        self._poll_extras()
         return True
+
+    def _poll_extras(self):
+        """Things that are only worth asking the daemon for while their page is on screen."""
+        if not self.is_visible():
+            return
+        page = self.stack.get_visible_child_name()
+        if page == "overview" and self._ticks % 2 == 0:
+            rpc("connections", self.conn_group.update, None, **self.conn_group.params())
+        elif page == "servers" and self.srv_tabs.get_visible_child_name() == "proxy" and self._ticks % 3 == 0:
+            rpc("proxy.status", self.proxy_page.update_status, None)
 
     def _auto_latency(self):
         """Optional: re-test server latency every N minutes while the Servers tab is on screen."""
@@ -1558,6 +1586,7 @@ class MainWindow(Adw.ApplicationWindow):
             rpc("schedule.status", self.sched_page.update, None)
             rpc("split.status", self.bypass_page.update, None)
         if full:
+            self.proxy_page.reload()
             rpc("profiles.list", self._on_profiles, None)
             rpc("settings.get", self._on_settings, None)
             if not self.protocols:

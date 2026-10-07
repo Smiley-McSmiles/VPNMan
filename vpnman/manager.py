@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, backup, dns, history, leaktest, netlock, network, paths, schedule, split, stunnel
+from . import __version__, backends, backup, conntable, dns, history, leaktest, netlock, network, paths, proxysvc, schedule, split, stunnel, xray
 from . import platform as plat
 from .backends.base import CredentialsRequired
 from .profiles import ProfileError, ProfileStore, public_view
@@ -123,6 +123,10 @@ class Manager:
         self._routes_added = []   # networks routed around the tunnel right now (mutated in place on network change)
         self._host_ips = {}       # domain -> IPv4 list, for "addresses that skip the VPN" given as names
         self._host_checked = 0.0
+        self.proxy = proxysvc.ProxyService(self)
+
+    def _resolve(self, host):
+        return resolve_host(host, self._ep_cache)
 
     # ------------------------------------------------------------------ status
     @staticmethod
@@ -174,7 +178,8 @@ class Manager:
         return self._fw
 
     def _lock_apply(self):
-        spec = netlock.Spec.from_settings(self.settings, self._lock_endpoints, self._lock_ifaces,
+        spec = netlock.Spec.from_settings(self.settings, set(self._lock_endpoints) | self.proxy.lock_ips(),
+                                          self._lock_ifaces,
                                           split.MARK if self._split.active else 0, extra_out=self._route_nets())
         self._firewall().apply(spec)
         if not self.lock_engaged:
@@ -228,6 +233,9 @@ class Manager:
         dns.restore_resolv_conf()
         if plat.os_family() == "linux":
             split.cleanup()
+            if xray.cleanup():
+                self.log.add("warn", "Removed the proxy firewall rules left by a previous run")
+        self.proxy.runner.kill_stale()
         self.scheduler.start()
         self._start_network_monitor()
         st = self._load_state()
@@ -243,6 +251,7 @@ class Manager:
             stale = netlock.cleanup_all()
             if stale:
                 self.log.add("warn", "Removed a stale network lock left by a previous run (%s)" % ", ".join(stale))
+        self.proxy.sync()
         auto = self.settings.get("connection.autoconnect")
         if auto and auto != "off":
             self._autoconnect(auto)
@@ -266,6 +275,7 @@ class Manager:
         self._net_stop.set()
         self.disconnect()
         self._split_stop()
+        self.proxy.shutdown()
 
     def connect(self, ident=None, fastest=False, last=False, persistent=False):
         profiles = self.store.list()
@@ -446,6 +456,7 @@ class Manager:
         tproc = None
         treader = None
         routes_added = []
+        carrier = False
         try:
             # --- endpoints & lock (before anything touches the network)
             ips = set()
@@ -458,6 +469,13 @@ class Manager:
                     ctx.state["resolved"][host] = got[0]
                 ips.update(got)
             self._lock_endpoints = ips
+            if self.proxy.carrier_wanted():
+                # the VPN is reached through the proxy: the kill switch lets only the proxy server through
+                try:
+                    self._lock_endpoints = self.proxy.carrier_ips()
+                except xray.ProxyError as e:
+                    raise (FatalError if e.fatal else ConnectError)("Proxy: %s" % e)
+                carrier = True
             self._refresh_route_hosts(apply=False)       # names given as "skip the VPN" addresses, before the lock
             if self._lock_wanted():
                 try:
@@ -469,6 +487,13 @@ class Manager:
                 return False
             if stunnel.settings_of(profile):
                 tproc, treader = self._start_stunnel(profile, ctx, stop)
+                if stop.is_set():
+                    return False
+            if carrier:
+                try:
+                    self.proxy.start_carrier(backend, profile, ctx, stop)
+                except xray.ProxyError as e:
+                    raise (FatalError if e.fatal else ConnectError)("Proxy: %s" % e)
                 if stop.is_set():
                     return False
             gw, gwif = plat.default_gateway()
@@ -564,6 +589,7 @@ class Manager:
             self._routes_added = routes_added
             self._split_ctx = (gw, gwif, orig_dns)
             self._split_sync()
+            self._proxy_sync_safe(vpn_up=True)          # proxy inside the VPN: now that the tunnel carries traffic
             up = True
             self._set(state="connected", iface=primary, since=time.time(), message="", attempt=0)
             self._hist_cur = {"profile": profile["name"], "protocol": profile["protocol"], "start": time.time(),
@@ -581,6 +607,9 @@ class Manager:
                     break
                 if tproc is not None and tproc.poll() is not None:
                     self.log.add("warn", "stunnel terminated (status %s)" % tproc.returncode)
+                    break
+                if carrier and not self.proxy.carrier_alive():
+                    self.log.add("warn", "The proxy in front of the VPN terminated")
                     break
                 if oneshot and primary and not plat.iface_exists(primary):
                     self.log.add("warn", "Tunnel interface %s disappeared" % primary)
@@ -622,6 +651,7 @@ class Manager:
                             self.log.add("tool", line)
                 except Exception as e:  # noqa: BLE001
                     self.log.add("warn", "cleanup failed: %s" % e)
+            self.proxy.stop_carrier()
             self._remove_routes(routes_added)
             cur, self._hist_cur = self._hist_cur, None
             if cur and up:
@@ -632,6 +662,7 @@ class Manager:
                     self.log.add("warn", "Could not save connection history: %s" % e)
             self._split_ctx = None
             self._split_sync()              # stays up for the whitelisted apps if the kill switch is still engaged
+            self._proxy_sync_safe(vpn_up=False)    # a proxy that ran inside the VPN stops with it
             self._dns.restore()
             if up:
                 self._hook("disconnected", ctx)
@@ -767,6 +798,13 @@ class Manager:
                     self._lock_apply()          # let the kill switch pass (or stop passing) the bypassed traffic
                 except Exception as e:  # noqa: BLE001
                     self.log.add("error", "Network lock update failed: %s" % e)
+        self._proxy_sync_safe()
+
+    def _proxy_sync_safe(self, **kw):
+        try:
+            self.proxy.sync(**kw)
+        except Exception as e:  # noqa: BLE001
+            self.log.add("warn", "Proxy: %s" % e)
 
     def _split_stop(self):
         with self._mlock:
@@ -916,6 +954,7 @@ class Manager:
         self.settings.update({"routes": clean})
         self._refresh_route_hosts(apply=False)
         self._reapply_routes()
+        self._proxy_sync_safe()
         return self.settings.get("routes")
 
     # ------------------------------------------------------------- networks
@@ -927,6 +966,7 @@ class Manager:
         while not stop.is_set():
             try:
                 self.network_tick()
+                self.proxy.watch()
             except Exception as e:  # noqa: BLE001
                 self.log.add("debug", "network monitor: %s" % e)
             stop.wait(3)
@@ -961,6 +1001,8 @@ class Manager:
         if ctx and (cur["gateway"], cur["device"]) != ctx[:2] and self._status.get("state") == "connected":
             self._split_ctx = (cur["gateway"], cur["device"], [cur["gateway"]] if cur["gateway"] else [])
             self._split_sync()
+        if cur["gateway"]:
+            self.proxy.follow_gateway(cur["gateway"])
         if self._status.get("state") == "connected" and cur["gateway"]:
             self._reapply_routes(cur["gateway"])
         elif self.lock_engaged and not ctx:
@@ -1122,7 +1164,7 @@ class Manager:
         except (binascii.Error, ValueError):
             raise ProfileError("the backup data is not valid")
         try:
-            manifest, profiles, new_settings = backup.read_archive(raw)
+            manifest, profiles, new_settings, proxies = backup.read_archive(raw, with_proxies=True)
         except backup.BackupError as e:
             raise ProfileError(str(e))
         existing = {p["id"] for p in self.store.list()}
@@ -1130,6 +1172,7 @@ class Manager:
         if replace:
             removed = len(self.remove_profiles(sorted(existing))["removed"])
             existing = set()
+            self.proxy.remove([q["id"] for q in self.proxy.store.list()])
         added = skipped = 0
         for pid, files in sorted(profiles.items()):
             if pid in existing:
@@ -1137,6 +1180,12 @@ class Manager:
                 continue
             backup.write_profile(self.store.root, pid, files)
             added += 1
+        have = {q["id"] for q in self.proxy.store.list()}
+        proxies_added = 0
+        for pid, files in sorted(proxies.items()):
+            if pid not in have:
+                backup.write_profile(self.proxy.store.root, pid, files)
+                proxies_added += 1
         do_settings = new_settings is not None and (restore_settings if restore_settings is not None else replace)
         if do_settings:
             from .settings import DEFAULTS, _merge
@@ -1144,9 +1193,11 @@ class Manager:
                 self.settings.data = _merge(DEFAULTS, new_settings)
                 self.settings.save()
             self.split_changed()
+            self.proxy.changed()
         self.log.add("info", "Backup restored: %d profile(s) added, %d already present%s%s" % (
             added, skipped, ", %d replaced" % removed if replace else "", ", settings restored" if do_settings else ""))
         return {"added": added, "skipped": skipped, "removed": removed, "settings": bool(do_settings),
+                "proxies": proxies_added,
                 "created": manifest.get("created"), "version": manifest.get("vpnman")}
 
     def leak_test(self):

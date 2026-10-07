@@ -54,6 +54,16 @@ DEFAULTS = {
         "apps": [],                # [{id, name, match: [process names], icon}]
     },
     "routes": [],                  # [{"ip": "10.0.0.0/8", "action": "out"}]  out = bypass the VPN
+    "proxy": {
+        "enabled": False,          # use the selected proxy (see vpnman proxy)
+        "selected": "",            # id of the proxy in use
+        "order": "proxy_only",     # proxy_only | vpn_proxy (the proxy inside the VPN) | proxy_vpn (the VPN inside the proxy)
+        "mode": "local",           # local: SOCKS/HTTP proxy for applications | system: send all TCP and DNS through it
+        "socks_port": 10808,
+        "http_port": 10809,
+        "dns": "1.1.1.1",          # system mode: the resolver that answers queries (asked through the proxy)
+        "udp": "block",            # system mode: block | direct - what happens to UDP other than DNS
+    },
     "events": {
         "pre_connect": "",
         "connected": "",

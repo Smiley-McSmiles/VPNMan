@@ -18,6 +18,7 @@ _vpnman() {
         'bypass:apps that skip the VPN (split tunnel)'
         'cleanup:remove firewall rules, routes and cgroups VPNMan left behind (root)'
         'connect:connect to a profile'
+        'connections:live list of connections - which application, port and protocol'
         'daemon:run the daemon in the foreground (root)'
         'disconnect:disconnect'
         'dns:choose the DNS servers used while connected'
@@ -40,6 +41,7 @@ _vpnman() {
         'networks:show the current network; trust/untrust it'
         'ping:measure latency to profiles'
         'protocols:list supported protocols and whether their tools are installed'
+        'proxy:proxies (Xray - VLESS, VMess, Trojan, Shadowsocks) in front of, or behind, the VPN'
         'remove:delete profiles'
         'rm:delete profiles'
         'routes:addresses, networks or domains that skip the VPN'
@@ -67,6 +69,7 @@ _vpnman() {
         bypass) _arguments '1:action:(list add remove rm available on off mode)' ;;
         cleanup) _arguments '--force[even if the service is running]' ;;
         connect) _arguments '--fastest[measure all servers and use the one with the lowest latency]' '--last[use the last connected profile (the default without a profile)]' '--no-wait[return immediately instead of waiting for the tunnel]' '--timeout[how long to wait (default 90)]' '*:profile:_vpnman_profiles' ;;
+        connections) _arguments '(--listening -l)'{--listening,-l}'[also show sockets that wait for connections]' '--local[also show connections within this computer (loopback)]' '(--watch -w)'{--watch,-w}'[refresh every 2 seconds]' '--json[print machine-readable JSON instead of text]' ;;
         daemon) _arguments '*:: :' ;;
         disconnect) _arguments '*:: :' ;;
         dns) _arguments '*:: :' ;;
@@ -89,6 +92,7 @@ _vpnman() {
         networks) _arguments '1:action:(show trust untrust)' ;;
         ping) _arguments '*:profile:_vpnman_profiles' ;;
         protocols) _arguments '*:: :' ;;
+        proxy) _arguments '--name[add: name for a single imported proxy]' '--group[add: group to put the imported proxies in (default: the subscription'\''s host)]' '(--latency -l)'{--latency,-l}'[list: measure every server]' '--json[print machine-readable JSON instead of text]' '1:action:(list add remove rm edit use on off order mode set status ping refresh)' ;;
         remove) _arguments '*:profile:_vpnman_profiles' ;;
         rm) _arguments '*:profile:_vpnman_profiles' ;;
         routes) _arguments '1:action:(list add remove rm)' ;;

@@ -26,7 +26,7 @@ It speaks OpenVPN, WireGuard and a long list of other protocols (see
 .BR PROTOCOLS ),
 keeps your traffic from leaking with a firewall\-based \fBkill switch\fR, reconnects and fails over
 automatically, lets chosen applications and addresses bypass the VPN, connects on a schedule or on
-untrusted networks, and runs on systemd, runit, OpenRC, SysV init, OpenBSD and FreeBSD.
+untrusted networks, can put a VLESS/VMess/Trojan/Shadowsocks proxy (Xray) in front of or behind the VPN, and runs on systemd, runit, OpenRC, SysV init, OpenBSD and FreeBSD.
 .PP
 It consists of three programs:
 .TP
@@ -203,6 +203,56 @@ Test the live connection: that the tunnel is up, the public IP, that traffic out
 while the kill switch is engaged, that the DNS servers sit behind the tunnel and that IPv6 cannot bypass it.
 Prints a mark for each check (ok, warning, fail, info). Exit status 1 if a check fails. Connect first.
 .TP
+.B connections \fR[\fB\-l\fR|\fB\-\-listening\fR] [\fB\-\-local\fR] [\fB\-w\fR|\fB\-\-watch\fR] [\fB\-\-json\fR]
+The network connections of this computer as the daemon sees them: the way (\fBin\fR, \fBout\fR, \fBlisten\fR), the
+application and its pid, the protocol (TCP, UDP, with a 6 for IPv6), the local and remote address and port, and the TCP
+state. A TCP connection is \fBin\fR when a local listener accepted it. Sockets that only wait for connections
+(\fB\-\-listening\fR) and connections that never leave this computer (\fB\-\-local\fR) are hidden unless asked for.
+\fB\-\-watch\fR refreshes every two seconds. Linux reads \fI/proc/net\fR and finds the owner of every socket through
+\fI/proc/PID/fd\fR; FreeBSD uses \fBsockstat\fR; other BSD systems use \fBnetstat\fR and show no application names.
+The same table is on the Connection page of the application.
+.TP
+.B proxy \fR[\fIlist\fR|\fIadd\fR|\fIrefresh\fR|\fIremove\fR|\fIedit\fR|\fIuse\fR|\fIon\fR|\fIoff\fR|\fIorder\fR|\fImode\fR|\fIset\fR|\fIstatus\fR|\fIping\fR] [\fIARG\fR...]
+Proxies served through Xray, alone or together with the VPN. See
+.BR "PROXIES (XRAY)" .
+.RS
+.TP
+.B proxy list \fR[\fB\-l\fR|\fB\-\-latency\fR] [\fB\-\-json\fR]
+The proxies; a dot marks the one in use.
+.TP
+.B proxy add \fISOURCE\fR... [\fB\-\-name\fR \fINAME\fR] [\fB\-\-group\fR \fIGROUP\fR]
+Add proxies. A \fISOURCE\fR is a share link (\fBvless://\fR, \fBvmess://\fR, \fBtrojan://\fR, \fBss://\fR), a file that
+holds links (or an Xray JSON config), or an \fBhttp(s)://\fR subscription address, which is downloaded as you (not by the
+daemon) and remembered so that \fBrefresh\fR can update it. \fB\-\-group\fR names the group the proxies go into
+(default: the subscription's host name). A proxy that is already present is not added twice; a line that cannot be
+understood is reported and does not stop the others.
+.TP
+.B proxy refresh \fR[\fIURL\fR...]
+Download the subscriptions again (all of them, or the given ones): new servers appear, changed ones are updated, servers
+that vanished from the list are removed.
+.TP
+.B proxy remove \fINAME\fR...   proxy edit \fINAME\fR \fIKEY=VALUE\fR...
+Delete proxies, or change \fBname\fR, \fBgroup\fR, \fBnotes\fR or \fBfavorite\fR.
+.TP
+.B proxy use \fINAME\fR
+Choose the proxy to use.
+.TP
+.B proxy on   proxy off
+Switch the proxy on or off.
+.TP
+.B proxy order proxy_only\fR|\fBvpn_proxy\fR|\fBproxy_vpn
+How the proxy and the VPN are combined (see PROXIES).
+.TP
+.B proxy mode local\fR|\fBsystem
+A proxy for applications, or all TCP and DNS of this computer (Linux).
+.TP
+.B proxy set \fIKEY\fR \fIVALUE
+\fBsocks_port\fR, \fBhttp_port\fR, \fBdns\fR, \fBudp\fR (\fBblock\fR or \fBdirect\fR), \fBorder\fR, \fBmode\fR.
+.TP
+.B proxy status \fR[\fB\-\-json\fR]   \fBproxy ping \fR[\fINAME\fR...]
+Show whether it runs, with the addresses of the local proxies; or measure the connect time to the proxy servers.
+.RE
+.TP
 .B networks \fR[\fIshow\fR|\fItrust\fR|\fIuntrust\fR] [\fINAME\fR]
 Show the current network and the trusted ones, or mark one as trusted (the current one when no \fINAME\fR is
 given). See
@@ -287,11 +337,13 @@ Plain \fBvpnman\fR in a terminal shows the status and a one\-key menu: \fBc\fR C
 pycairo (without it a text line is shown instead). Its pages are:
 .TP
 .B Connection
-Choose a server and connect or disconnect; status, public IP, uptime and a live traffic graph; recent
+Choose a server and connect or disconnect; status, public IP, uptime and a live traffic graph; a live
+\fBConnections\fR table (way, application and pid, protocol, local and remote address and port, state, refreshed every two
+seconds while the page is open, with a filter box and switches for listening sockets and local connections); recent
 connections; DNS servers; start at boot. The server drop\-down follows profile changes immediately.
 .TP
 .B Servers
-All profiles with a search box, grouping by group name, sorting by favourites, name or latency (\fBTest
+Two sub\-tabs. \fBVPN Servers\fR: all profiles, with a search box on top, grouped by group name and sorted by favourites, name or latency (\fBTest
 Latency\fR, or automatically every 5/15/30 minutes while the tab is open), and favourite and block buttons.
 Select several servers with Ctrl+click, Shift+click or Ctrl+A and remove or \fBEdit\fR them together (Delete key,
 or the selection bar). The \fBEdit\fR button next to a group's name renames the group and edits all its servers
@@ -299,6 +351,13 @@ at once; the same dialog, opened from the selection bar, edits just the selected
 the username and password, and enable, change or disable the SSL tunnel (stunnel) server for all of them; fields
 left empty stay as they are. \fBAdd Profile\fR (and the \fB+\fR button in the header bar) imports files or adds a profile by
 hand; editing a profile also sets its failover servers.
+.RS
+.PP
+\fBProxy\fR: the proxies (add share links, load a file, or give a subscription address; \fBRefresh Subscriptions\fR
+re\-downloads them), a radio button to choose the one in use, latency, and above the list the controls: \fBUse the
+proxy\fR (with its live state), \fBPath of your traffic\fR (proxy only, VPN then proxy, proxy then VPN), \fBMode\fR (local proxy or
+system\-wide), the local addresses with copy buttons, and the ports, DNS server and UDP behaviour.
+.RE
 .TP
 .B Network Lock
 The kill switch: engage it now, and its behaviour (see
@@ -430,6 +489,67 @@ VPNMan runs \fBstunnel\fR in client mode on a local port and points OpenVPN at i
 \fBstunnel_verify\fR selects \fBnone\fR, \fBsystem\fR (the system CA bundle) or \fBca\fR (the certificate given with
 \fBstunnel_ca\fR, stored in the profile); \fBstunnel_sni\fR sets the TLS server name. The \fBstunnel\fR program must be
 installed.
+.SH PROXIES (XRAY)
+VPNMan can use VLESS, VMess, Trojan and Shadowsocks servers (including Reality, WebSocket, gRPC, HTTPUpgrade, XHTTP,
+mKCP and HTTP/2 transports) through \fBXray\fR (https://github.com/XTLS/Xray\-core), a single self\-contained program
+that is not part of VPNMan: install the \fBxray\fR package of your distribution if it has one, or the release binary for
+your system (Xray publishes builds for Linux, FreeBSD, OpenBSD and others) and put it where \fBPATH\fR finds it
+(\fI/usr/local/bin\fR is searched too). \fBvpnman doctor\fR reports whether it is found.
+.PP
+Proxies are stored like VPN profiles, root\-only in \fI/etc/vpnman/proxies/\fR, and are managed in the \fBProxy\fR
+sub\-tab of the Servers page or with \fBvpnman proxy\fR. Share links and subscriptions are converted to Xray's
+configuration when they are imported; the server address is resolved by the daemon, so Xray never needs DNS (which matters
+while the kill switch is up), and clients never see the credentials inside a link.
+.SS Order: how the proxy and the VPN are combined (proxy.order)
+The names describe the path your traffic takes:
+.TP
+.B proxy_only
+You \(-> proxy \(-> internet. Xray runs whenever the proxy is switched on, with or without a VPN. Websites see the
+proxy server's address.
+.TP
+.B vpn_proxy
+You \(-> VPN \(-> proxy \(-> internet. Xray runs \fIinside\fR the tunnel: it is started once the VPN is connected (so its
+own connection to the proxy server goes through the tunnel) and stopped when the VPN goes down or reconnects. Websites see
+the proxy server's address; the proxy server only sees the VPN's address. The kill switch needs no exception for the
+proxy server.
+.TP
+.B proxy_vpn
+You \(-> proxy \(-> VPN \(-> internet. The VPN's own packets travel through the proxy: VPNMan starts Xray before the VPN,
+which then connects to a local forwarder (\fI127.0.0.1\fR) instead of the VPN server, exactly like the SSL tunnel (stunnel)
+does. Your ISP only sees the proxy; websites see the VPN's address. Works with \fBOpenVPN\fR (UDP and TCP) and
+\fBWireGuard\fR/AmneziaWG profiles with a single peer; other protocols are refused with a message, and so is a profile
+that also uses the SSL tunnel. The kill switch lets only the proxy server through, and a host route keeps the proxy server's
+traffic outside the VPN (it follows the default gateway when you change from Wi\-Fi to Ethernet). UDP VPNs need a proxy
+server that carries UDP (VLESS, VMess, Trojan and Shadowsocks do); a TCP profile is the more dependable choice.
+.SS Mode (proxy.mode)
+.TP
+.B local
+Xray offers a SOCKS5 proxy (\fBproxy.socks_port\fR, default 10808) and an HTTP proxy (\fBproxy.http_port\fR, default 10809),
+both on \fI127.0.0.1\fR only, never on the network. Point a browser or program at them, or copy the address from the
+Proxy tab. Nothing else changes on the system.
+.TP
+.B system
+(Linux with nftables.) In addition, every TCP connection and every DNS query of this computer is redirected to Xray with
+the nftables table \fIinet vpnman_proxy\fR, so programs need no settings. Xray's own connections carry the socket mark
+\fB0x5658\fR and are left alone. Not redirected: loopback, the local network (if \fBnetlock.allow_lan\fR), the VPN server
+(in \fBvpn_proxy\fR), the bypass addresses (\fBvpnman routes\fR) and the applications of the app bypass. DNS queries are answered by
+\fBproxy.dns\fR (default 1.1.1.1) \fIthrough the proxy\fR. \fBIPv6 is blocked\fR in this mode, and so is UDP other than DNS
+(QUIC, NTP, voice and game traffic) unless \fBproxy.udp\fR is \fBdirect\fR, in which case that UDP leaves around the
+proxy. System\-wide mode is not available on the BSDs; \fBlocal\fR works everywhere Xray does.
+.SS Behaviour to know
+.IP \(bu 2
+A proxy switched on without a kill switch is not a guarantee: if Xray stops, traffic may go out directly. Combine it with
+the kill switch (\fBvpnman lock on\fR): in \fBproxy_only\fR the proxy server is let through automatically.
+.IP \(bu 2
+Xray is restarted if it dies, and a stale Xray or stale firewall rules left by a crash are removed when the daemon starts.
+\fBvpnman cleanup\fR removes the proxy's firewall table as well.
+.IP \(bu 2
+Subscriptions are downloaded by the program you run (the command line or the GUI), as you; the downloaded text is given to
+the daemon. Nothing is fetched automatically.
+.IP \(bu 2
+Shadowsocks plugins (obfs, v2ray\-plugin) are not supported; use the matching Xray transport instead.
+.IP \(bu 2
+Backups (\fBvpnman backup\fR) include the proxies.
 .SH PROTOCOLS
 The protocol of a profile decides which program VPNMan runs. \fBvpnman protocols\fR shows which are installed.
 .TP
@@ -577,6 +697,29 @@ App bypass switch, mode and the applications (managed with \fBvpnman bypass\fR).
 .B routes
 Addresses that skip the VPN (managed with \fBvpnman routes\fR).
 .PP
+.B proxy
+.TP
+.B proxy.enabled \fR(false)
+Use the selected proxy.
+.TP
+.B proxy.selected \fR(empty)
+Id of the proxy in use (set with \fBvpnman proxy use\fR).
+.TP
+.B proxy.order \fR(proxy_only)
+\fBproxy_only\fR, \fBvpn_proxy\fR or \fBproxy_vpn\fR (see PROXIES).
+.TP
+.B proxy.mode \fR(local)
+\fBlocal\fR or \fBsystem\fR.
+.TP
+.B proxy.socks_port \fR(10808), \fBproxy.http_port \fR(10809)
+Ports of the local SOCKS5 and HTTP proxies (1024\-65535, different from each other).
+.TP
+.B proxy.dns \fR(1.1.1.1)
+System\-wide mode: the resolver that answers redirected DNS queries (asked through the proxy).
+.TP
+.B proxy.udp \fR(block)
+System\-wide mode: \fBblock\fR drops UDP other than DNS; \fBdirect\fR lets it bypass the proxy.
+.PP
 .B events
 .TP
 .B events.pre_connect\fR, \fBevents.connected\fR, \fBevents.disconnected \fR(empty)
@@ -692,6 +835,10 @@ Configuration directory, root only (mode 700). Override with \fBVPNMAN_CONFIG_DI
 One directory per profile: \fIprofile.json\fR (name, protocol, server, credentials, group, failover list, options) and the
 config files, certificates and keys it needs. Mode 700/600 because it holds credentials.
 .TP
+.I /etc/vpnman/proxies/ID/
+One directory per proxy (same layout as the profiles; \fIprofile.json\fR holds the share link and the Xray outbound with
+its credentials), root only.
+.TP
 .I /etc/vpnman/settings.json
 The settings (see SETTINGS).
 .TP
@@ -707,6 +854,9 @@ The daemon socket (\fI/var/run/vpnman/\fR on the BSDs). Override with \fBVPNMAN_
 .I /run/vpnman/vpnmand.pid
 The daemon's process id.
 .TP
+.I /run/vpnman/proxy/
+Xray's runtime configuration (\fIconfig.json\fR, mode 600) and \fIxray.pid\fR while it runs.
+.TP
 .I /run/vpnman/conn/ID/
 Runtime files of a live connection (the config copy given to the VPN program, a credentials file, the stunnel
 configuration). Removed on disconnect and on reboot.
@@ -721,8 +871,8 @@ Per\-user GUI preferences (run in background, server sort, automatic latency tes
 .I ~/.config/autostart/io.github.smiley_mcsmiles.VPNMan.desktop
 Created by \fBvpnman autostart \-\-login\-app on\fR.
 .PP
-Firewall objects created while running (all removed again by \fBvpnman cleanup\fR): nftables tables \fIinet vpnman\fR and
-\fIinet vpnman_split\fR; iptables chains \fBVPNMAN_OUT\fR and \fBVPNMAN_IN\fR; cgroups \fI/sys/fs/cgroup/vpnman\-bypass\fR and
+Firewall objects created while running (all removed again by \fBvpnman cleanup\fR): nftables tables \fIinet vpnman\fR,
+\fIinet vpnman_split\fR and \fIinet vpnman_proxy\fR (system\-wide proxy mode); iptables chains \fBVPNMAN_OUT\fR and \fBVPNMAN_IN\fR; cgroups \fI/sys/fs/cgroup/vpnman\-bypass\fR and
 \fI/sys/fs/cgroup/vpnman\-tunnel\fR; an \fBip rule\fR with fwmark 0x5652 and routing table 5652.
 .SH ENVIRONMENT
 .TP
@@ -841,6 +991,15 @@ The password or username is wrong: run \fBvpnman connect\fR again and enter them
 Add it with \fBvpnman bypass add\fR, or its destination with \fBvpnman routes add\fR, or allow it in
 \fBnetlock.whitelist_out\fR.
 .TP
+.B The proxy does not start
+\fBvpnman proxy status\fR shows the reason. Is \fBxray\fR installed (\fBvpnman doctor\fR)? Does the log (\fBvpnman logs\fR)
+show lines from Xray (\fBproxy\fR level)? In \fBvpn_proxy\fR order it waits for the VPN. A share link that Xray rejects
+usually has a transport or Reality parameter missing: import the link again from its source.
+.TP
+.B Proxy then VPN does not connect
+Check that the profile is OpenVPN or WireGuard with a single server, that the proxy server carries UDP if the profile is
+UDP, and that the proxy server address resolves. The kill switch is only open to the proxy server in this order.
+.TP
 .B Bypass or include mode does nothing
 It needs nft, ip and cgroup v2 (check \fBvpnman bypass list\fR for the reason). WireGuard with IPv6 disabled by sysctl
 needs IPv6 enabled again (\fBnet.ipv6.conf.all.disable_ipv6=0\fR) because \fBwg\-quick\fR configures it.
@@ -868,6 +1027,7 @@ Project page, releases and issue tracker: https://github.com/Smiley\-McSmiles/VP
 .SH BUGS
 Report problems at https://github.com/Smiley\-McSmiles/VPNMan/issues. Include the output of \fBvpnman doctor\fR and
 \fBvpnman logs\fR (remove server names and addresses you do not want to publish). Not verified on real systems yet: the
-OpenRC, OpenBSD, FreeBSD, Void and Alpine builds and the trusted\-network detection on every Wi\-Fi stack.
+OpenRC, OpenBSD, FreeBSD, Void and Alpine builds, the trusted\-network detection on every Wi\-Fi stack, connections to real
+Xray servers (the tests use a stand\-in for Xray), the system\-wide proxy mode on a live machine, and the connection table on the BSDs.
 .SH AUTHORS
 VPNMan contributors. Licensed under the MIT license.

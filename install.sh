@@ -193,6 +193,9 @@ preflight() {
     if ! have openvpn && ! have wg && ! have wg-quick; then
         warn "no VPN client found yet - install openvpn and/or wireguard-tools (see: vpnman protocols)"
     fi
+    if ! have xray; then
+        say "Optional: xray is not installed (only needed for 'vpnman proxy'; https://github.com/XTLS/Xray-core)"
+    fi
     if ! have nft && ! have iptables && ! have pfctl; then
         warn "no firewall tool (nft, iptables or pfctl) - the kill switch will be unavailable until one is installed"
     fi
@@ -370,6 +373,7 @@ uninstall() {
     # a stale kill switch must never outlive the software that owns it
     if [ -z "$DESTDIR" ]; then
         have nft && nft delete table inet vpnman 2>/dev/null || true
+        have nft && nft delete table inet vpnman_proxy 2>/dev/null || true
     fi
     exit 0
 }

@@ -27,6 +27,10 @@ def profiles_dir():
     return os.path.join(config_dir(), "profiles")
 
 
+def proxies_dir():
+    return os.path.join(config_dir(), "proxies")
+
+
 def settings_file():
     return os.path.join(config_dir(), "settings.json")
 

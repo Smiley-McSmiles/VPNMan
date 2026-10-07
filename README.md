@@ -86,6 +86,22 @@ VPNMan starts stunnel in client mode on a free `127.0.0.1` port, rewrites the ru
 lets the kill switch allow only the stunnel server. Without a CA file the TLS layer is not verified (the OpenVPN
 session inside is still authenticated); a warning is logged.
 
+### Proxies (Xray)
+
+VPNMan can run a VLESS, VMess, Trojan or Shadowsocks server through [Xray](https://github.com/XTLS/Xray-core) (one
+static program; install it from your distribution or from the project's releases). Add share links or a subscription URL
+in **Servers → Proxy** (or `vpnman proxy add ...`), choose one, and pick how it combines with the VPN:
+
+| Order | Path of your traffic |
+| --- | --- |
+| `proxy_only` | you → proxy → internet |
+| `vpn_proxy` | you → VPN → proxy → internet (Xray starts once the tunnel is up) |
+| `proxy_vpn` | you → proxy → VPN → internet (the VPN connection rides inside the proxy; OpenVPN and WireGuard) |
+
+*Mode* `local` gives applications a SOCKS5 and an HTTP proxy on `127.0.0.1`; `system` (Linux) redirects all TCP and DNS of
+the computer into Xray with nftables (IPv6 and other UDP are blocked so nothing goes around it). The kill switch is aware
+of the proxy server. See `man vpnman` (PROXIES) for the details and limits.
+
 ## Feature set
 
 | Feature | Status |
@@ -106,7 +122,10 @@ session inside is still authenticated); a warning is logged.
 | **Failover lists**: per server, the servers to try in order when it keeps failing, then its group, then favourites (`vpnman failover`) | ✔ |
 | Import notes: options in a config that do not work here (Windows-only options, missing `up`/`down` scripts) are listed when you import it | ✔ |
 | Update check: *Check for Updates…* in the menu, `vpnman update`, or once a day if you switch it on in Preferences | ✔ |
-| Backup and restore of all profiles (with credentials) and settings | ✔ |
+| **Proxies through Xray** (VLESS, VMess, Trojan, Shadowsocks; Reality, WebSocket, gRPC, ...): share links, files and subscription URLs; a local SOCKS5/HTTP proxy or system-wide (Linux); proxy only, **VPN → proxy** or **proxy → VPN** (`vpnman proxy`, Servers → Proxy) | ✔ (needs `xray`) |
+| **Live connection table**: every connection with its application, port, protocol and direction (Connection page, `vpnman connections`) | ✔ (Linux; FreeBSD) |
+| Edit a whole group or a selection at once (group, login, SSL tunnel server) | ✔ |
+| Backup and restore of all profiles and proxies (with credentials) and settings | ✔ |
 | Shell completions for bash, zsh and fish (profile names included) | ✔ |
 | **Schedule**: connect (and optionally disconnect) at set times on chosen days, overnight windows, per-entry server; runs in the daemon | ✔ |
 | **App bypass** (per-app split tunnel): whitelist installed apps such as Steam or Firefox so they ignore the VPN | ✔ (Linux: nftables + cgroup v2) |

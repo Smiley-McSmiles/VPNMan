@@ -8,7 +8,7 @@ import sys
 import threading
 import traceback
 
-from . import __version__, access, backends, ipc, paths
+from . import __version__, access, backends, conntable, ipc, paths
 from . import platform as plat
 from .manager import Manager
 from .profiles import ProfileError, public_view
@@ -59,6 +59,8 @@ def _changed(m, key, result):
         m.reapply_dns()
     elif key.startswith("split"):
         m.split_changed()
+    elif key.startswith("proxy"):
+        m.proxy.changed()
     return result
 
 
@@ -102,6 +104,16 @@ METHODS = {
     "split.status": lambda m: m.split_status(),
     "split.set": lambda m, apps=None, enabled=None, mode=None: m.split_set(apps, enabled, mode),
     "routes.set": lambda m, entries: m.routes_set(entries),
+    "proxy.list": lambda m: m.proxy.list(),
+    "proxy.status": lambda m: m.proxy.status(),
+    "proxy.sources": lambda m: m.proxy.sources(),
+    "proxy.import": lambda m, text, source="", group="", name=None: m.proxy.import_text(text, source, group, name),
+    "proxy.remove": lambda m, ids: m.proxy.remove(ids),
+    "proxy.update": lambda m, ident, changes: m.proxy.update(ident, changes),
+    "proxy.select": lambda m, ident: m.proxy.select(ident),
+    "proxy.set": lambda m, **kw: m.proxy.configure(**kw),
+    "proxy.latency": lambda m, ids=None: m.proxy.latency(ids),
+    "connections": lambda m, listening=False, local=False: conntable.snapshot(bool(listening), bool(local)),
     "network.status": lambda m: m.network_status(),
     "network.trust": lambda m, name=None, trusted=True: m.network_trust(name, trusted),
     "backup.export": lambda m: m.backup_export(),
