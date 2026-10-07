@@ -13,11 +13,11 @@ from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 WAY = {"in": "In", "out": "Out", "listen": "Listening"}
 COLUMNS = (
     ("Way", 62, False, lambda r: WAY.get(r["dir"], r["dir"])),
-    ("Application", 150, True, lambda r: ("%s (%d)" % (r["app"], r["pid"])) if r["pid"] else (r["app"] or "–")),
+    ("Application", 140, True, lambda r: ("%s (%d)" % (r["app"], r["pid"])) if r["pid"] else (r["app"] or "–")),
     ("Protocol", 66, False, lambda r: r["proto"].upper() + ("6" if r["v6"] else "")),
-    ("Local", 140, True, lambda r: "%s:%d" % (r["local"], r["lport"])),
-    ("Remote", 140, True, lambda r: ("%s:%d" % (r["remote"], r["rport"])) if r["rport"] else "–"),
-    ("State", 120, False, lambda r: r["state"] or "–"),
+    ("Local", 175, True, lambda r: "%s:%d" % (r["local"], r["lport"])),
+    ("Remote", 175, True, lambda r: ("%s:%d" % (r["remote"], r["rport"])) if r["rport"] else "–"),
+    ("State", 110, False, lambda r: r["state"] or "–"),
 )
 KIND_LABELS = {"address": "Address", "endpoint": "Address and port", "port": "Port", "app": "Application"}
 
@@ -329,10 +329,13 @@ class ConnectionsGroup(Adw.PreferencesGroup):
         self._real_host = host
         self.pop = Gtk.Button(label="Pop out", valign=Gtk.Align.CENTER, tooltip_text="Open the table in its own window")
         self.pop.connect("clicked", lambda *_: self.popout())
-        hdr = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER)
-        hdr.append(self.table.controls)
-        hdr.append(self.pop)
-        self.set_header_suffix(hdr)
+        # the title and description stay on top; the filter, switches and Pop out get a row of their own below them
+        self.table.search.set_hexpand(True)
+        bar = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER, margin_bottom=6)
+        bar.append(self.table.controls)
+        bar.append(self.pop)
+        self.table.controls.set_hexpand(True)
+        self.add(bar)
         self.add(self.table)
         self.blocked_btn = Gtk.Button(label="Blocked connections…", halign=Gtk.Align.START, margin_top=6)
         self.blocked_btn.connect("clicked", lambda *_: self.open_blocked())
