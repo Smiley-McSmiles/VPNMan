@@ -88,6 +88,7 @@ METHODS = {
     "profiles.update": lambda m, ident, changes: public_view(m.store.update(ident, changes)),
     "profiles.remove": lambda m, ident: _remove_one(m, ident),
     "profiles.remove_many": lambda m, ids: m.remove_profiles(ids),
+    "profiles.update_many": lambda m, ids, changes: m.update_profiles(ids, changes),
     "latency": lambda m, ids=None: m.latency(ids),
     "connect": lambda m, ident=None, fastest=False, last=False: m.connect(ident, fastest, last),
     "disconnect": lambda m: m.disconnect(),

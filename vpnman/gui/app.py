@@ -235,6 +235,112 @@ class FailoverDialog(Adw.Window):
         self.close()
 
 
+class BatchEditDialog(Adw.Window):
+    """Edit several profiles at once: a whole group, or the selected servers.  Empty fields stay as they are."""
+
+    def __init__(self, parent, profiles, group=None, on_done=None):
+        count = len(profiles)
+        super().__init__(transient_for=parent, modal=True, default_width=460, default_height=560,
+                         title="Edit group" if group is not None else "Edit %d servers" % count)
+        self.parent_win, self.profiles, self.group, self.on_done = parent, profiles, group, on_done
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar(show_end_title_buttons=False, show_start_title_buttons=False)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self.close())
+        self.save = Gtk.Button(label="Apply")
+        self.save.add_css_class("suggested-action")
+        self.save.connect("clicked", self._apply)
+        header.pack_start(cancel)
+        header.pack_end(self.save)
+        view.add_top_bar(header)
+        self.err = Adw.Banner(revealed=False)
+        view.add_top_bar(self.err)
+        page = Adw.PreferencesPage()
+        view.set_content(page)
+        self.set_content(view)
+
+        g = Adw.PreferencesGroup(title="Group" if group is not None else "Servers",
+                                 description="Changes apply to all %d servers%s. Empty fields stay as they are."
+                                             % (count, " in this group" if group is not None else " selected"))
+        self.group_row = Adw.EntryRow(title="Group name" if group is not None else "Move to group (empty = leave as is)")
+        if group is not None:
+            self.group_row.set_text(group)
+        g.add(self.group_row)
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Login")
+        self.user = Adw.EntryRow(title="Username")
+        self.password = Adw.PasswordEntryRow(title="Password")
+        g.add(self.user)
+        g.add(self.password)
+        page.add(g)
+        g = Adw.PreferencesGroup(title="SSL Tunnel (stunnel)", description="OpenVPN profiles only.")
+        self.st_mode = Adw.ComboRow(title="SSL tunnel", model=Gtk.StringList.new(["Leave as is", "Enable / change server", "Disable"]))
+        self.st_host = Adw.EntryRow(title="stunnel server (host:port, default port 443)")
+        self.st_sni = Adw.EntryRow(title="SNI hostname (empty = leave as is)")
+        for r in (self.st_mode, self.st_host, self.st_sni):
+            g.add(r)
+        self.st_mode.connect("notify::selected", self._sync)
+        page.add(g)
+        self._sync()
+
+    def _sync(self, *_):
+        on = self.st_mode.get_selected() == 1
+        self.st_host.set_visible(on)
+        self.st_sni.set_visible(on)
+
+    def _error(self, msg, *_):
+        self.err.set_title(str(msg))
+        self.err.set_revealed(True)
+        self.save.set_sensitive(True)
+
+    def changes(self):
+        """The edit as the daemon wants it (raises ValueError when a field is invalid)."""
+        ch = {}
+        name = self.group_row.get_text().strip()
+        if name != (self.group or "") and (name or self.group is not None):
+            ch["group"] = name
+        if self.user.get_text():
+            ch["username"] = self.user.get_text()
+        if self.password.get_text():
+            ch["password"] = self.password.get_text()
+        mode = self.st_mode.get_selected()
+        if mode == 2:
+            ch["stunnel"] = {"mode": "off"}
+        elif mode == 1:
+            target = self.st_host.get_text().strip()
+            if not target:
+                raise ValueError("Enter the stunnel server (host:port)")
+            host, _, port = target.rpartition(":") if ":" in target else (target, "", "")
+            host = host or target
+            if port and not port.isdigit():
+                raise ValueError("The stunnel port must be a number")
+            ch["stunnel"] = {"mode": "set", "host": host, "port": int(port) if port else 443}
+            if self.st_sni.get_text().strip():
+                ch["stunnel"]["sni"] = self.st_sni.get_text().strip()
+        return ch
+
+    def _apply(self, *_):
+        try:
+            ch = self.changes()
+        except ValueError as e:
+            return self._error(e)
+        if not ch:
+            return self._error("Nothing to change")
+        self.save.set_sensitive(False)
+
+        def done(res):
+            n = len(res["updated"])
+            notes = ["%s: %s" % (s["name"], s["reason"]) for s in res["skipped"]] + \
+                    ["%s" % f["error"] for f in res["failed"]]
+            self.parent_win.toast("Edited %d server%s" % (n, "" if n == 1 else "s"))
+            if self.on_done:
+                self.on_done()
+            self.close()
+            if notes:
+                self.parent_win.show_warnings(notes)
+        rpc("profiles.update_many", done, self._error, ids=[p["id"] for p in self.profiles], changes=ch)
+
+
 class ProfileDialog(Adw.Window):
     """Import a config file, add a profile by hand, or edit an existing one."""
 
@@ -931,12 +1037,15 @@ class MainWindow(Adw.ApplicationWindow):
         sel_all.connect("clicked", lambda *_: self.listbox.select_all())
         sel_none = Gtk.Button(label="Clear")
         sel_none.connect("clicked", lambda *_: self.listbox.unselect_all())
+        self.sel_edit = Gtk.Button(label="Edit…")
+        self.sel_edit.connect("clicked", lambda *_: self._edit_selected())
         self.sel_remove = Gtk.Button(label="Remove…")
         self.sel_remove.add_css_class("destructive-action")
         self.sel_remove.connect("clicked", lambda *_: self._remove_selected())
         bar = Gtk.ActionBar()
         bar.pack_start(self.sel_label)
         bar.pack_end(self.sel_remove)
+        bar.pack_end(self.sel_edit)
         bar.pack_end(sel_none)
         bar.pack_end(sel_all)
         self.sel_bar = Gtk.Revealer(child=bar, reveal_child=False, transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
@@ -978,11 +1087,27 @@ class MainWindow(Adw.ApplicationWindow):
         group = row.profile.get("group") or ""
         prev = (before.profile.get("group") or "") if before else None
         if group and group != prev:
-            lbl = Gtk.Label(label=group, xalign=0, margin_start=12, margin_top=10, margin_bottom=4)
+            lbl = Gtk.Label(label=group, xalign=0, margin_start=12, valign=Gtk.Align.CENTER)
             lbl.add_css_class("heading")
-            row.set_header(lbl)
+            # a text button (not an icon): some icon themes lack the usual edit icons
+            btn = Gtk.Button(label="Edit…", valign=Gtk.Align.CENTER, tooltip_text="Rename this group or edit all its servers")
+            btn.add_css_class("flat")
+            btn.connect("clicked", lambda *_, g=group: self._edit_group(g))
+            box = Gtk.Box(spacing=6, margin_top=10, margin_bottom=4)
+            box.append(lbl)
+            box.append(btn)
+            row.set_header(box)
         else:
             row.set_header(None)
+
+    def _edit_group(self, group):
+        members = [p for p in self.profiles if (p.get("group") or "") == group]
+        BatchEditDialog(self, members, group=group, on_done=lambda: self.refresh(full=True)).present()
+
+    def _edit_selected(self):
+        sel = self.selected_profiles()
+        if sel:
+            BatchEditDialog(self, sel, on_done=lambda: self.refresh(full=True)).present()
 
     def _on_sort_changed(self, *_):
         app = self.get_application()

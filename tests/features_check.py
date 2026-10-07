@@ -128,7 +128,7 @@ class App(A.Application):
         assert order() == ["srv2", "srv3", "srv4", "srv1"]
         rows = sorted(w._rows.values(), key=w._sort_key)
         w._header(rows[1], rows[0])
-        assert rows[1].get_header() is not None and rows[1].get_header().get_label() == "Alpha"
+        assert rows[1].get_header() is not None and rows[1].get_header().get_first_child().get_label() == "Alpha"
         w._header(rows[2], rows[1])
         assert rows[2].get_header() is None
         w._header(rows[0], None)
@@ -149,6 +149,39 @@ class App(A.Application):
         ed._submit()
         ch = [kw for m, kw in CALLS if m == "profiles.update" and "failover" in kw.get("changes", {})]
         assert ch and ch[-1]["changes"]["failover"] == got[0], ch
+        # ---- batch edit: group header button, group dialog, selection dialog
+        rows = sorted(w._rows.values(), key=w._sort_key)
+        w._header(rows[1], rows[0])
+        hdr = rows[1].get_header()
+        btns = []
+        c = hdr.get_first_child()
+        while c:
+            if isinstance(c, A.Gtk.Button):
+                btns.append(c.get_label())
+            c = c.get_next_sibling()
+        assert btns == ["Edit…"], btns
+        members = [p for p in w.profiles if p.get("group") == "Alpha"]
+        bd = A.BatchEditDialog(w, members, group="Alpha")
+        assert bd.group_row.get_text() == "Alpha" and bd.changes() == {}
+        bd.group_row.set_text("Beta"); bd.user.set_text("bob"); bd.password.set_text("pw")
+        assert bd.changes() == {"group": "Beta", "username": "bob", "password": "pw"}, bd.changes()
+        bd.st_mode.set_selected(1)
+        try:
+            bd.changes(); raise SystemExit("empty stunnel host must be refused")
+        except ValueError:
+            pass
+        bd.st_host.set_text("vpn.example.com:8443"); bd.st_sni.set_text("sni.example")
+        assert bd.changes()["stunnel"] == {"mode": "set", "host": "vpn.example.com", "port": 8443, "sni": "sni.example"}
+        bd.st_mode.set_selected(2)
+        assert bd.changes()["stunnel"] == {"mode": "off"}
+        sel = A.BatchEditDialog(w, members)
+        assert sel.changes() == {}
+        sel.group_row.set_text("Moved")
+        assert sel.changes() == {"group": "Moved"}
+        CALLS.clear()
+        bd._apply()
+        call = [kw for m, kw in CALLS if m == "profiles.update_many"]
+        assert call and call[0]["ids"] == [p["id"] for p in members] and call[0]["changes"]["group"] == "Beta", call
         # ---- update result dialog / import notes build without errors
         w.show_warnings(["a: Will be ignored: 'register-dns'"])
         w._update_result({"current": "1.0.6", "latest": "9.9.9", "newer": True, "url": "https://github.com/x", "notes": "n"}, False)

@@ -166,6 +166,15 @@ Mark or unmark favourites. Favourites sort first and are the last resort of fail
 Blacklist a profile: \fB\-\-fastest\fR, the scheduler's \fBfastest\fR and failover never pick it (you can still
 connect to it by name).
 .TP
+.B group \fR[\fIlist\fR]
+.TQ
+.B group edit \fIGROUP\fR \fIKEY=VALUE\fR... [\fB\-\-ask\-password\fR]
+List the groups (a profile's group is set with \fBedit PROFILE group=NAME\fR, or comes from the folder it was
+imported from), or change \fBevery server in a group at once\fR. Keys: \fBname\fR (renames the group),
+\fBusername\fR, \fBpassword\fR (or \fB\-\-ask\-password\fR), \fBstunnel=HOST[:PORT]\fR (or \fBoff\fR),
+\fBstunnel_sni\fR and \fBstunnel_verify\fR. Whatever is not named stays as it is. The SSL tunnel is applied to the
+OpenVPN servers of the group only; the others are reported as skipped. \fIGROUP\fR may be a unique part of the name.
+.TP
 .B failover \fIPROFILE\fR [\fISERVER\fR...] [\fB\-\-clear\fR]
 Show or set the servers tried, in order, when \fIPROFILE\fR keeps failing. See
 .BR FAILOVER .
@@ -284,8 +293,11 @@ connections; DNS servers; start at boot. The server drop\-down follows profile c
 .B Servers
 All profiles with a search box, grouping by group name, sorting by favourites, name or latency (\fBTest
 Latency\fR, or automatically every 5/15/30 minutes while the tab is open), and favourite and block buttons.
-Select several servers with Ctrl+click, Shift+click or Ctrl+A and remove them together (Delete key, or the
-selection bar). \fBAdd Profile\fR (and the \fB+\fR button in the header bar) imports files or adds a profile by
+Select several servers with Ctrl+click, Shift+click or Ctrl+A and remove or \fBEdit\fR them together (Delete key,
+or the selection bar). The \fBEdit\fR button next to a group's name renames the group and edits all its servers
+at once; the same dialog, opened from the selection bar, edits just the selected servers. In it you can set the group,
+the username and password, and enable, change or disable the SSL tunnel (stunnel) server for all of them; fields
+left empty stay as they are. \fBAdd Profile\fR (and the \fB+\fR button in the header bar) imports files or adds a profile by
 hand; editing a profile also sets its failover servers.
 .TP
 .B Network Lock

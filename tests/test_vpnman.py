@@ -1085,6 +1085,59 @@ class ManPageTests(unittest.TestCase):
                     self.assertIn(o, page, "option %s of %s is not in the man page" % (o, name))
 
 
+class BatchEditTests(unittest.TestCase):
+    def _mgr(self, d):
+        import types
+        from vpnman.manager import Manager
+        from vpnman.profiles import ProfileStore, new_profile
+        store = ProfileStore(d)
+        logs = []
+        m = types.SimpleNamespace(store=store, log=types.SimpleNamespace(add=lambda *a: logs.append(a)))
+        ids = {}
+        for name, proto, grp in (("a", "openvpn", "G"), ("b", "openvpn", "G"), ("w", "wireguard", "G"), ("o", "openvpn", "H")):
+            p = new_profile(name, proto, group=grp)
+            store.save(p)
+            ids[name] = p["id"]
+        return (lambda idents, ch: Manager.update_profiles(m, idents, ch)), store, ids
+
+    def test_group_login_and_rename(self):
+        with tempfile.TemporaryDirectory() as d:
+            upd, store, ids = self._mgr(d)
+            res = upd([ids["a"], ids["b"], ids["w"]], {"group": "New", "username": "bob", "password": "pw"})
+            self.assertEqual(sorted(res["updated"]), ["a", "b", "w"])
+            for n in ("a", "b", "w"):
+                p = store.find(ids[n])
+                self.assertEqual((p["group"], p["username"], p["password"]), ("New", "bob", "pw"))
+            self.assertEqual(store.find(ids["o"])["group"], "H")           # other groups untouched
+
+    def test_group_stunnel_set_keeps_ca_and_skips_other_protocols(self):
+        with tempfile.TemporaryDirectory() as d:
+            upd, store, ids = self._mgr(d)
+            a = store.find(ids["a"])
+            a["options"]["stunnel"] = {"enabled": False, "host": "old", "port": 8443, "ca": "stunnel-ca.pem", "verify": "ca"}
+            store.save(a)
+            res = upd([ids["a"], ids["w"]], {"stunnel": {"mode": "set", "host": "vpn.example.com", "port": 443, "sni": "x.example"}})
+            self.assertEqual(res["updated"], ["a"])
+            self.assertEqual([s["name"] for s in res["skipped"]], ["w"])
+            st = store.find(ids["a"])["options"]["stunnel"]
+            self.assertEqual((st["enabled"], st["host"], st["port"], st["sni"], st["ca"]), (True, "vpn.example.com", 443, "x.example", "stunnel-ca.pem"))
+            upd([ids["a"]], {"stunnel": {"mode": "off"}})
+            self.assertFalse(store.find(ids["a"])["options"]["stunnel"]["enabled"])
+            self.assertEqual(store.find(ids["b"])["options"].get("stunnel"), None)       # off never invents settings
+
+    def test_validation_and_unknown_fields(self):
+        with tempfile.TemporaryDirectory() as d:
+            upd, store, ids = self._mgr(d)
+            from vpnman.profiles import ProfileError
+            for bad in ({"stunnel": {"mode": "set", "host": "bad host;rm"}}, {"stunnel": {"mode": "set", "host": "h", "port": 99999}},
+                        {"stunnel": {"mode": "x"}}, {"config": "evil"}, {"favorite": True}):
+                with self.assertRaises(ProfileError):
+                    upd([ids["a"]], bad)
+            res = upd([ids["a"], "nope"], {"username": "u"})
+            self.assertEqual(res["updated"], ["a"])
+            self.assertEqual(len(res["failed"]), 1)
+
+
 class StunnelTests(unittest.TestCase):
     def prof(self, **st):
         return profiles.new_profile("s", "openvpn", options={"stunnel": dict({"enabled": True, "host": "h.example.com"}, **st)})

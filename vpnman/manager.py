@@ -1173,6 +1173,66 @@ class Manager:
             self.log.add("info", "Removed %d profile(s): %s" % (len(removed), ", ".join(removed)))
         return {"removed": removed, "failed": failed}
 
+    def update_profiles(self, idents, changes):
+        """Apply the same edit to several profiles.  `changes` may hold group, username, password and
+        stunnel: {"mode": "set"|"off", "host", "port", "sni", "verify"}.  Everything not named stays as it is.
+        Never stops half-way: returns {"updated": [names], "skipped": [{"name", "reason"}], "failed": [...]}."""
+        from . import stunnel as stun
+        allowed = {"group", "username", "password"}
+        unknown = set(changes) - allowed - {"stunnel"}
+        if unknown:
+            raise ProfileError("cannot change %s on several profiles at once" % ", ".join(sorted(unknown)))
+        plain = {k: changes[k] for k in allowed if k in changes}
+        st = changes.get("stunnel")
+        if st:
+            if st.get("mode") not in ("set", "off"):
+                raise ProfileError("stunnel mode must be 'set' or 'off'")
+            if st["mode"] == "set":
+                host = str(st.get("host") or "").strip()
+                if not host or not stun._SAFE.match(host):
+                    raise ProfileError("the stunnel server host is missing or invalid")
+                try:
+                    port = int(st.get("port") or 443)
+                    if not 0 < port < 65536:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    raise ProfileError("the stunnel port must be between 1 and 65535")
+        updated, skipped, failed = [], [], []
+        for ident in idents:
+            try:
+                p = self.store.find(ident)
+            except (ProfileError, KeyError) as e:
+                failed.append({"id": ident, "error": str(e.args[0] if isinstance(e, KeyError) and e.args else e)})
+                continue
+            ch = dict(plain)
+            if st:
+                if p["protocol"] != "openvpn":
+                    skipped.append({"name": p["name"], "reason": "the SSL tunnel is for OpenVPN profiles only"})
+                    if not plain:
+                        continue
+                else:
+                    opts = dict(p.get("options") or {})
+                    cur = dict(opts.get("stunnel") or {})
+                    if st["mode"] == "off":
+                        if cur:
+                            cur["enabled"] = False
+                    else:
+                        cur.update(enabled=True, host=host, port=port)
+                        if st.get("sni") is not None:
+                            cur["sni"] = str(st["sni"]).strip()
+                        if st.get("verify"):
+                            cur["verify"] = st["verify"]
+                    opts["stunnel"] = cur
+                    ch["options"] = opts
+            try:
+                self.store.update(p["id"], ch)
+                updated.append(p["name"])
+            except (ProfileError, OSError) as e:
+                failed.append({"id": p["id"], "error": str(e)})
+        if updated:
+            self.log.add("info", "Edited %d profile(s): %s" % (len(updated), ", ".join(updated)))
+        return {"updated": updated, "skipped": skipped, "failed": failed}
+
     def _unique_name(self, p):
         names = {q["name"] for q in self.store.list()}
         base, n = p["name"], 2

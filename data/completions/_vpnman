@@ -27,6 +27,7 @@ _vpnman() {
         'failover:servers to try, in order, when a profile keeps failing'
         'fav:mark favourite'
         'get:show settings'
+        'group:list groups; rename a group or edit all its servers at once'
         'gui:open the GTK4/libadwaita app'
         'history:recent connections - when, how long, how much traffic'
         'import:import config files or a directory of them'
@@ -75,6 +76,7 @@ _vpnman() {
         failover) _arguments '--clear[remove the list]' '*:profile:_vpnman_profiles' ;;
         fav) _arguments '*:profile:_vpnman_profiles' ;;
         get) _arguments '*:: :' ;;
+        group) _arguments '--ask-password[prompt for a new password for all of them]' '1:action:(list edit)' ;;
         gui) _arguments '--background[start minimised to the system tray]' ;;
         history) _arguments '(-n --lines)'{-n,--lines}'[how many entries to show (default 20)]' '--json[print machine-readable JSON instead of text]' '--clear[delete the history]' ;;
         import) _arguments '--name[profile name (default: the file name; only with a single file)]' '--protocol[skip detection and use this protocol]:value:(openvpn wireguard amneziawg openconnect openfortivpn ikev2 sstp pptp vpnc tailscale netbird zerotier nebula networkmanager custom)' '--user[username to store with the profile]' '--password[password to store (visible in the process list - prefer --ask-password)]' '--ask-password[prompt for the password instead of putting it on the command line]' '--stunnel[carry OpenVPN over TLS via stunnel (default port 443)]' '--stunnel-sni[TLS server name to present (SNI)]' '--stunnel-ca[CA certificate to verify the stunnel server with]' '--stunnel-verify[how to verify the stunnel server]:value:(none system ca)' ;;

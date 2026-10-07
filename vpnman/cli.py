@@ -515,6 +515,62 @@ class Cli:
                                                            human_bytes(r["rx"]), human_bytes(r["tx"]), dim(r["reason"])))
         return 0
 
+    def cmd_group(self, a):
+        """vpnman group [list] | vpnman group edit GROUP KEY=VALUE...: look at groups, rename one or edit all its servers."""
+        profiles = self.call("profiles.list")
+        groups = {}
+        for p in profiles:
+            if p.get("group"):
+                groups.setdefault(p["group"], []).append(p)
+        act = a.action or "list"
+        if act == "list":
+            for g in sorted(groups, key=str.lower):
+                print("%-28s %d server%s" % (g, len(groups[g]), "" if len(groups[g]) == 1 else "s"))
+            if not groups:
+                print("No groups yet. Importing a folder makes one per sub-folder, or: vpnman edit PROFILE group=NAME")
+            return 0
+        if act != "edit":
+            raise RpcError("unknown action %r (list, edit)" % act)
+        if not a.group or not a.changes and not a.ask_password:
+            raise RpcError("usage: vpnman group edit GROUP KEY=VALUE...  (keys: name, username, password, stunnel, "
+                           "stunnel_sni, stunnel_verify)")
+        match = [g for g in groups if g.lower() == a.group.lower()] or [g for g in groups if a.group.lower() in g.lower()]
+        if len(match) != 1:
+            raise RpcError("no such group: %s" % a.group if not match else "'%s' is ambiguous: %s" % (a.group, ", ".join(match)))
+        name = match[0]
+        ch, st = {}, {}
+        for kv in a.changes:
+            k, _, v = kv.partition("=")
+            if k == "name":
+                ch["group"] = v
+            elif k in ("username", "password"):
+                ch[k] = v
+            elif k == "stunnel":
+                if v.lower() in ("", "off", "none", "false"):
+                    st["mode"] = "off"
+                else:
+                    o = self.stunnel_opts(v)
+                    st.update(mode="set", host=o["host"], port=o["port"])
+            elif k == "stunnel_sni":
+                st["sni"] = v
+            elif k == "stunnel_verify":
+                st["verify"] = v
+            else:
+                raise RpcError("cannot set %r on a group (name, username, password, stunnel, stunnel_sni, stunnel_verify)" % k)
+        if a.ask_password:
+            ch["password"] = getpass.getpass("New password for all servers in %s: " % name)
+        if st:
+            if "mode" not in st:
+                raise RpcError("stunnel_sni / stunnel_verify need stunnel=HOST[:PORT] as well")
+            ch["stunnel"] = st
+        res = self.call("profiles.update_many", ids=[p["id"] for p in groups[name]], changes=ch)
+        print("%s %d server%s in %s." % (green("edited"), len(res["updated"]), "" if len(res["updated"]) == 1 else "s", name))
+        for s in res["skipped"]:
+            print("  %s %s: %s" % (yellow("skipped"), s["name"], s["reason"]))
+        for f in res["failed"]:
+            print("  %s %s" % (red("failed"), f["error"]), file=sys.stderr)
+        return 1 if res["failed"] else 0
+
     def cmd_failover(self, a):
         """vpnman failover PROFILE [SERVER ...] [--clear]: which servers to try, in order, when PROFILE keeps failing."""
         p = self.call("profiles.get", ident=a.profile)
@@ -1121,6 +1177,17 @@ def build_parser():
     s.add_argument("-n", "--lines", type=int, default=20, help="how many entries to show (default 20)")
     s.add_argument("--json", action="store_true", help=JSON)
     s.add_argument("--clear", action="store_true", help="delete the history")
+    s = add("group", "list groups; rename a group or edit all its servers at once",
+            "Servers are grouped by the folder they were imported from (or 'vpnman edit PROFILE group=NAME').\n"
+            "'edit' changes every server in a group in one go. Keys: name (renames the group), username,\n"
+            "password, stunnel=HOST[:PORT] (or off), stunnel_sni, stunnel_verify. Whatever you do not name stays\n"
+            "as it is. The SSL tunnel applies to the OpenVPN servers of the group only.",
+            ["vpnman group", "vpnman group edit Germany name=DE", "vpnman group edit DE username=bob --ask-password",
+             "vpnman group edit DE stunnel=vpn.example.com:443", "vpnman group edit DE stunnel=off"])
+    s.add_argument("action", nargs="?", choices=["list", "edit"], help="default: list")
+    s.add_argument("group", nargs="?", help="group name (or a unique part of it)")
+    s.add_argument("changes", nargs="*", metavar="KEY=VALUE", help="what to change on every server of the group")
+    s.add_argument("--ask-password", action="store_true", help="prompt for a new password for all of them")
     s = add("failover", "servers to try, in order, when a profile keeps failing",
             "Show or set the servers tried, in order, when PROFILE keeps failing (after connection.retry_max\n"
             "attempts). After that list come the servers of the same group, then your favourites\n"
