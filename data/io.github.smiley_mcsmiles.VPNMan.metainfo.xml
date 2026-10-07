@@ -17,6 +17,19 @@
   <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.0.7" date="2026-10-07">
+      <description>
+        <ul>
+          <li>Proxies through Xray (VLESS, VMess, Trojan, Shadowsocks): a Proxy sub-tab on the Servers page, share links and subscriptions, a local SOCKS5/HTTP proxy or system-wide mode, and proxy only, VPN then proxy, or proxy then VPN</li>
+          <li>Live table of connections on the Connection page (application, port, protocol, direction), with a pop-out window</li>
+          <li>Right-click a connection to copy it, force-close it, stop its program or block its address, port or program; a window to manage blocked connections</li>
+          <li>Edit a whole group or a selection at once: group name, login and SSL tunnel server; multi-select and bulk remove for proxies</li>
+          <li>Switching servers waits until the old tunnel is completely gone, so WireGuard and OpenVPN never overlap</li>
+          <li>The server selector on the Connection page shows the server being connected to, or the last connected one</li>
+          <li>The search box on the Servers page has its own row above the buttons</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.6" date="2026-10-06">
       <description>
         <ul>
