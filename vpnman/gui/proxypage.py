@@ -235,11 +235,16 @@ class ProxyPage(Gtk.Box):
         spacer = Gtk.Box(hexpand=True)
         for w in (self.ping, self.refresh_btn, spacer, self.add_btn):
             top.append(w)
-        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        # MULTIPLE gives Ctrl+click (toggle one), Shift+click (range) and Ctrl+A, like the VPN servers list
+        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.MULTIPLE, activate_on_single_click=False)
         self.listbox.add_css_class("boxed-list")
         self.listbox.set_filter_func(self._filter)
         self.listbox.set_sort_func(self._sort)
         self.listbox.set_header_func(self._header)
+        self.listbox.connect("selected-rows-changed", self._on_selection_changed)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_list_key)
+        self.listbox.add_controller(keys)
         self.empty = Adw.StatusPage(icon_name="network-server-symbolic", title="No Proxies",
                                     description="Add VLESS, VMess, Trojan or Shadowsocks links, or a subscription.",
                                     vexpand=False)
@@ -253,6 +258,22 @@ class ProxyPage(Gtk.Box):
         scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scroll.set_child(clamp)
         self.append(scroll)
+        # selection bar: appears as soon as something is selected
+        self.sel_label = Gtk.Label(label="", hexpand=True, xalign=0, margin_start=6)
+        sel_all = Gtk.Button(label="Select All")
+        sel_all.connect("clicked", lambda *_: self.listbox.select_all())
+        sel_none = Gtk.Button(label="Clear")
+        sel_none.connect("clicked", lambda *_: self.listbox.unselect_all())
+        self.sel_remove = Gtk.Button(label="Remove…")
+        self.sel_remove.add_css_class("destructive-action")
+        self.sel_remove.connect("clicked", lambda *_: self._remove_selected())
+        bar = Gtk.ActionBar()
+        bar.pack_start(self.sel_label)
+        bar.pack_end(self.sel_remove)
+        bar.pack_end(sel_none)
+        bar.pack_end(sel_all)
+        self.sel_bar = Gtk.Revealer(child=bar, reveal_child=False, transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
+        self.append(self.sel_bar)
 
     # ---- data in
     def reload(self, *_):
@@ -262,6 +283,7 @@ class ProxyPage(Gtk.Box):
 
     def update_list(self, proxies):
         self.proxies = proxies
+        keep = {r.proxy["id"] for r in self.listbox.get_selected_rows()}
         old = self._rows
         for r in old.values():
             self.listbox.remove(r)
@@ -270,6 +292,8 @@ class ProxyPage(Gtk.Box):
             row = self._make_row(p)
             self._rows[p["id"]] = row
             self.listbox.append(row)
+            if p["id"] in keep:
+                self.listbox.select_row(row)
         self.empty.set_visible(not proxies)
         self.listbox.set_visible(bool(proxies))
         self.search.set_visible(bool(proxies))
@@ -321,7 +345,7 @@ class ProxyPage(Gtk.Box):
         use.connect("toggled", self._on_use, p)
         row.use = use
         row.add_prefix(use)
-        row.set_activatable_widget(use)
+        row.set_activatable(False)                 # a click on the row selects it (multi-select); "use" has its own button
         lat = Gtk.Label(label=self._lat_text(p["id"]), css_classes=["dim-label", "numeric"])
         row.lat = lat
         row.add_suffix(lat)
@@ -437,12 +461,57 @@ class ProxyPage(Gtk.Box):
             GLib.idle_add(lambda: (self.refresh_btn.set_sensitive(True), self.win.toast(msg), self.reload()))
         threading.Thread(target=work, daemon=True).start()
 
+    # ---- selection / bulk actions
+    def selected_proxies(self):
+        return [r.proxy for r in self.listbox.get_selected_rows()]
+
+    def _on_selection_changed(self, *_):
+        n = len(self.listbox.get_selected_rows())
+        self.sel_label.set_label("%d selected" % n)
+        self.sel_bar.set_reveal_child(n > 0)
+
+    def _on_list_key(self, _c, keyval, _code, _state):
+        if keyval == Gdk.KEY_Delete:
+            self._remove_selected()
+            return True
+        if keyval == Gdk.KEY_Escape and self.listbox.get_selected_rows():
+            self.listbox.unselect_all()
+            return True
+        return False
+
+    def _remove_selected(self):
+        sel = self.selected_proxies()
+        if sel:
+            self._remove_many(sel)
+
     def _remove(self, p):
-        d = Adw.MessageDialog(transient_for=self.win, heading="Remove %s?" % p["name"],
-                              body="The proxy will be deleted.")
+        self._remove_many([p])
+
+    def _remove_many(self, proxies):
+        if not proxies:
+            return
+        if len(proxies) == 1:
+            heading, body = "Remove %s?" % proxies[0]["name"], "The proxy will be deleted."
+        else:
+            names = [p["name"] for p in proxies]
+            shown = ", ".join(names[:6]) + (" and %d more" % (len(names) - 6) if len(names) > 6 else "")
+            heading, body = "Remove %d proxies?" % len(proxies), "%s\n\nThe proxies will be deleted." % shown
+        if any(p["id"] == self.status.get("selected") for p in proxies) and self.status.get("enabled"):
+            body += " The proxy in use will be switched off."
+        d = Adw.MessageDialog(transient_for=self.win, heading=heading, body=body)
         d.add_response("cancel", "Cancel")
         d.add_response("remove", "Remove")
         d.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
-        d.connect("response", lambda _d, r: r == "remove" and self.rpc("proxy.remove", lambda *_: self.reload(), self._fail,
-                                                                       ids=[p["id"]]))
+        ids = [p["id"] for p in proxies]
+        d.connect("response", lambda _d, r: r == "remove" and self.do_remove(ids))
         d.present()
+
+    def do_remove(self, ids):
+        def done(res):
+            gone = len(res.get("removed", []))
+            if res.get("failed"):
+                self.win.toast("Removed %d, %d failed: %s" % (gone, len(res["failed"]), res["failed"][0]["error"]))
+            else:
+                self.win.toast("Removed %d prox%s" % (gone, "y" if gone == 1 else "ies"))
+            self.reload()
+        self.rpc("proxy.remove", done, self._fail, ids=ids)

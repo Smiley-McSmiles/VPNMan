@@ -26,6 +26,7 @@ def fake_rpc(method, ok=None, fail=None, **kw):
                         "group": g, "selected": i == 1, "notes": ""} for i, (n, g) in enumerate([("Home", ""), ("WS", "sub"), ("TR", "sub")], 1)],
         "proxy.status": PROXY_STATUS, "proxy.sources": [], "proxy.set": PROXY_STATUS, "proxy.select": {"id": "x"},
         "proxy.latency": {"%012d" % 1: 12.5, "%012d" % 2: None},
+        "proxy.remove": {"removed": ["WS", "TR"], "failed": []},
         "leaktest": {"checks": [{"id": "tunnel", "name": "VPN tunnel", "status": "ok", "detail": "Connected"},
                                 {"id": "dns", "name": "DNS servers", "status": "fail", "detail": "leak <&> test"},
                                 {"id": "ipv6", "name": "IPv6", "status": "warn", "detail": "maybe"}], "summary": "fail"},
@@ -256,6 +257,20 @@ class App(A.Application):
         CALLS.clear()
         pp._rows["%012d" % 2].use.set_active(True)
         assert ("proxy.select", {"ident": "%012d" % 2}) in CALLS, CALLS
+        # multi-select and bulk remove, like the VPN servers list
+        assert pp.listbox.get_selection_mode() == A.Gtk.SelectionMode.MULTIPLE and not pp.sel_bar.get_reveal_child()
+        pp.listbox.select_all()
+        assert len(pp.selected_proxies()) == 3 and pp.sel_label.get_label() == "3 selected" and pp.sel_bar.get_reveal_child()
+        pp.update_list(fake_proxy_list())                              # a refresh keeps the selection
+        assert len(pp.selected_proxies()) == 3
+        pp.listbox.unselect_all()
+        assert not pp.sel_bar.get_reveal_child()
+        pp.listbox.select_row(pp._rows["%012d" % 2])
+        assert [p["name"] for p in pp.selected_proxies()] == ["WS"]
+        CALLS.clear()
+        pp.do_remove([p["id"] for p in pp.selected_proxies()] + ["%012d" % 3])
+        assert CALLS[0] == ("proxy.remove", {"ids": ["%012d" % 2, "%012d" % 3]}), CALLS
+        pp.listbox.unselect_all()
         pp.search.set_text("tr")
         pp.listbox.invalidate_filter()
         add = PP.ProxyAddDialog(w, fake_rpc, lambda: None)
