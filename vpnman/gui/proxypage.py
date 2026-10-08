@@ -10,6 +10,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from .. import __version__  # noqa: E402
+from .keys import close_keys  # noqa: E402
 
 ORDERS = [
     ("proxy_only", "Proxy only", "You → Proxy → Internet. It runs whenever it is switched on, with or without the VPN."),
@@ -38,6 +39,7 @@ class ProxyAddDialog(Adw.Window):
 
     def __init__(self, parent, rpc, on_done):
         super().__init__(transient_for=parent, modal=True, default_width=520, default_height=560, title="Add Proxies")
+        close_keys(self)
         self.rpc, self.on_done, self.parent_win = rpc, on_done, parent
         view = Adw.ToolbarView()
         header = Adw.HeaderBar(show_end_title_buttons=False, show_start_title_buttons=False)
@@ -137,6 +139,7 @@ class ProxyAddDialog(Adw.Window):
 class ProxyEditDialog(Adw.Window):
     def __init__(self, parent, rpc, proxy, on_done):
         super().__init__(transient_for=parent, modal=True, default_width=420, default_height=360, title="Edit Proxy")
+        close_keys(self)
         self.rpc, self.proxy, self.on_done = rpc, proxy, on_done
         view = Adw.ToolbarView()
         header = Adw.HeaderBar(show_end_title_buttons=False, show_start_title_buttons=False)

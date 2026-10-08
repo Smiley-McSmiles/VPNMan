@@ -20,6 +20,7 @@ import json
 
 from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof, updates
 from .connpage import ConnectionsGroup
+from .keys import close_keys
 from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .proxypage import ProxyPage
 from .tray import HelperTray, Tray, wants_helper
@@ -182,6 +183,7 @@ class FailoverDialog(Adw.Window):
     def __init__(self, parent, profiles, chosen, on_save):
         super().__init__(transient_for=parent, modal=True, default_width=420, default_height=560,
                          title="Failover Servers")
+        close_keys(self)
         self.on_save = on_save
         by_id = {p["id"]: p for p in profiles}
         self.order = [by_id[i] for i in chosen if i in by_id] + [p for p in profiles if p["id"] not in chosen]
@@ -244,6 +246,7 @@ class BatchEditDialog(Adw.Window):
         count = len(profiles)
         super().__init__(transient_for=parent, modal=True, default_width=460, default_height=560,
                          title="Edit group" if group is not None else "Edit %d servers" % count)
+        close_keys(self)
         self.parent_win, self.profiles, self.group, self.on_done = parent, profiles, group, on_done
         view = Adw.ToolbarView()
         header = Adw.HeaderBar(show_end_title_buttons=False, show_start_title_buttons=False)
@@ -348,6 +351,7 @@ class ProfileDialog(Adw.Window):
 
     def __init__(self, parent, mode, protocols, profile=None, files=None, on_done=None):
         super().__init__(transient_for=parent, modal=True, default_width=480, default_height=640)
+        close_keys(self)
         self.mode, self.profile, self.on_done, self.parent_win = mode, profile, on_done, parent
         self.protocols = protocols
         self.files = files or []
@@ -635,6 +639,7 @@ class LeakTestDialog(Adw.Window):
 
     def __init__(self, parent):
         super().__init__(transient_for=parent, modal=True, default_width=520, default_height=480, title="Connection Test")
+        close_keys(self)
         view = Adw.ToolbarView()
         header = Adw.HeaderBar()
         self.again = Gtk.Button(label="Run Again")
@@ -1749,6 +1754,7 @@ class MainWindow(Adw.ApplicationWindow):
 class PreferencesWindow(Adw.PreferencesWindow):
     def __init__(self, parent, settings):
         super().__init__(transient_for=parent, modal=True, search_enabled=False)
+        close_keys(self)
         self.s = settings
         self.set_title("Preferences")
 

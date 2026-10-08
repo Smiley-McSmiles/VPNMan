@@ -10,6 +10,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
+from .keys import close_keys  # noqa: E402
+
 WAY = {"in": "In", "out": "Out", "listen": "Listening"}
 COLUMNS = (
     ("Way", 62, False, lambda r: WAY.get(r["dir"], r["dir"])),
@@ -389,6 +391,7 @@ class ConnectionsWindow(Adw.Window):
     def __init__(self, host, rpc, group):
         super().__init__(application=host.get_application(), default_width=1080, default_height=640,
                          title="Connections")
+        close_keys(self)
         self.rpc, self.group = rpc, group
         view = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -437,6 +440,7 @@ class BlockedWindow(Adw.Window):
     def __init__(self, host, rpc, group):
         super().__init__(application=host.get_application(), default_width=620, default_height=700,
                          title="Blocked Connections")
+        close_keys(self)
         self.rpc, self.group = rpc, group
         self.entries, self.status, self._rows, self._quiet = [], {}, {}, False
         view = Adw.ToolbarView()

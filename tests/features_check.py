@@ -388,6 +388,8 @@ class App(A.Application):
         CALLS.clear()
         bw._on_entry_switch("aaaa1111", False)
         assert ("blocks.update", {"ident": "aaaa1111", "enabled": False}) in CALLS, CALLS
+        ctrls = [bw.observe_controllers().get_item(i) for i in range(bw.observe_controllers().get_n_items())]
+        assert any(isinstance(c, A.Gtk.ShortcutController) for c in ctrls), "pop-ups close with Escape and Ctrl+W"
         bw.fill(dict(BLOCK_STATUS, supported=False, reason="needs Linux", active=False))
         assert bw.banner.get_revealed()
         bw.close()

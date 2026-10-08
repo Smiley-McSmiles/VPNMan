@@ -394,6 +394,9 @@ default).
 A rejected login opens a prompt for the username and password and reconnects. Closing the window keeps the
 application in the system tray when a tray is available (\fBrun in background\fR); \fBQuit\fR ends it. The GUI
 holds no privileges; everything it does goes through the daemon.
+.PP
+All pop\-up windows and dialogs (the connection table window, blocked connections, profile and group editors, preferences, ...)
+close with \fBEscape\fR or \fBCtrl+W\fR.
 .SH KILL SWITCH
 The network lock (kill switch) blocks all traffic that does not go through the VPN. While it is engaged only these
 may send or receive packets:
