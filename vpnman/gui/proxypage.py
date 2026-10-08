@@ -2,14 +2,16 @@
 
 import re
 import threading
-import urllib.request
+import time
 
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
-from .. import __version__  # noqa: E402
+from .. import qr  # noqa: E402
+from ..leaktest import is_cloudflare  # noqa: E402
+from ..xray import fetch  # noqa: E402
 from .keys import close_keys, restore_scroll  # noqa: E402
 
 ORDERS = [
@@ -27,11 +29,6 @@ MODES = [
 ]
 
 
-def fetch(url, timeout=15):
-    """Download a subscription as the user (not through the daemon)."""
-    req = urllib.request.Request(url, headers={"User-Agent": "vpnman/%s" % __version__})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read(5 << 20).decode("utf-8", "replace")
 
 
 class ProxyAddDialog(Adw.Window):
@@ -173,6 +170,83 @@ class ProxyEditDialog(Adw.Window):
                  changes={"name": name, "group": self.group.get_text().strip(), "notes": self.notes.get_text()})
 
 
+def qr_widget(text, size=280):
+    """A drawing of ``text`` as a QR code (dark on white, with the quiet zone), or None when it does not fit."""
+    try:
+        matrix = qr.encode(text)
+    except qr.TooLong:
+        return None
+    n, quiet = len(matrix), 4
+
+    def draw(_area, cr, w, h):
+        cell = min(w, h) / (n + 2 * quiet)
+        x0, y0 = (w - cell * (n + 2 * quiet)) / 2, (h - cell * (n + 2 * quiet)) / 2
+        cr.set_source_rgb(1, 1, 1)
+        cr.rectangle(x0, y0, cell * (n + 2 * quiet), cell * (n + 2 * quiet))
+        cr.fill()
+        cr.set_source_rgb(0, 0, 0)
+        for y, row in enumerate(matrix):
+            for x, dark in enumerate(row):
+                if dark:
+                    cr.rectangle(x0 + (x + quiet) * cell, y0 + (y + quiet) * cell, cell + 0.3, cell + 0.3)
+        cr.fill()
+    area = Gtk.DrawingArea(content_width=size, content_height=size, halign=Gtk.Align.CENTER)
+    area.set_draw_func(draw)
+    area.matrix = matrix
+    return area
+
+
+class ProxyShareDialog(Adw.Window):
+    """The share link of one proxy as a QR code and as text, to move it to a phone or another computer."""
+
+    def __init__(self, parent, name, link):
+        super().__init__(transient_for=parent, modal=True, default_width=420, default_height=560,
+                         title="Share %s" % name)
+        close_keys(self)
+        self.link = link
+        view = Adw.ToolbarView()
+        view.add_top_bar(Adw.HeaderBar())
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=18,
+                      margin_start=18, margin_end=18)
+        self.qr = qr_widget(link)
+        if self.qr is not None:
+            box.append(self.qr)
+        else:
+            box.append(Gtk.Label(label="This link is too long for a QR code.", css_classes=["dim-label"]))
+        warn = Gtk.Label(label="Anyone with this link can use the proxy – share it only with your own devices.",
+                         wrap=True, justify=Gtk.Justification.CENTER, css_classes=["dim-label"])
+        box.append(warn)
+        text = Gtk.Label(label=link, selectable=True, wrap=True, wrap_mode=Pango.WrapMode.CHAR, xalign=0,
+                         css_classes=["monospace"])
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_insert_hyphens_new(False))      # a hyphen at the line end is not part of the link
+        text.set_attributes(attrs)
+        frame = Gtk.ScrolledWindow(vexpand=True, min_content_height=80, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        frame.set_child(text)
+        box.append(frame)
+        copy = Gtk.Button(label="Copy Link", halign=Gtk.Align.CENTER)
+        copy.add_css_class("suggested-action")
+        copy.add_css_class("pill")
+        copy.connect("clicked", self._copy)
+        box.append(copy)
+        self.set_default_widget(copy)
+
+        def unselect(*_):                          # the link text would otherwise take the focus, fully selected
+            copy.grab_focus()
+            text.select_region(0, 0)
+            return False
+        self.connect("map", lambda *_: GLib.idle_add(unselect))
+        self.toasts = Adw.ToastOverlay(child=box)
+        view.set_content(self.toasts)
+        self.set_content(view)
+
+    def _copy(self, *_):
+        disp = Gdk.Display.get_default()
+        if disp:
+            disp.get_clipboard().set(self.link)
+            self.toasts.add_toast(Adw.Toast(title="Link copied", timeout=2))
+
+
 class ProxyPage(Gtk.Box):
     """Controls (on/off, path, mode) on top, the list of proxies below."""
 
@@ -180,6 +254,7 @@ class ProxyPage(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.win, self.rpc = window, rpc
         self.proxies, self.status, self.latency = [], {}, {}
+        self.status_failover = None
         self._quiet = False
         self._rows = {}
 
@@ -220,6 +295,11 @@ class ProxyPage(Gtk.Box):
         self.udp.connect("notify::selected", lambda r, _p: self._set(udp=["block", "direct"][r.get_selected()]) if not self._quiet else None)
         adv.add_row(self.dns)
         adv.add_row(self.udp)
+        self.failover = Adw.SwitchRow(title="Fail over to another proxy",
+                                      subtitle="When the server stops answering, switch to the next favourite "
+                                               "(else the next proxy of its group)")
+        self.failover.connect("notify::active", lambda r, _p: self._set(failover=r.get_active()) if not self._quiet else None)
+        ctl.add(self.failover)
         ctl.add(adv)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         box.append(ctl)
@@ -230,13 +310,16 @@ class ProxyPage(Gtk.Box):
         top = Gtk.Box(spacing=6)
         self.ping = Gtk.Button(label="Test Latency")
         self.ping.connect("clicked", self._on_ping)
+        self.fastest = Gtk.Button(label="Use Fastest", tooltip_text="Choose the quickest server (of the favourites, "
+                                                                    "if there are any)")
+        self.fastest.connect("clicked", self._on_fastest)
         self.refresh_btn = Gtk.Button(label="Refresh Subscriptions", visible=False)
         self.refresh_btn.connect("clicked", self._on_refresh)
         self.add_btn = Gtk.Button(label="Add Proxy")
         self.add_btn.add_css_class("suggested-action")
         self.add_btn.connect("clicked", lambda *_: ProxyAddDialog(self.win, self.rpc, self.reload).present())
         spacer = Gtk.Box(hexpand=True)
-        for w in (self.ping, self.refresh_btn, spacer, self.add_btn):
+        for w in (self.ping, self.fastest, self.refresh_btn, spacer, self.add_btn):
             top.append(w)
         # MULTIPLE gives Ctrl+click (toggle one), Shift+click (range) and Ctrl+A, like the VPN servers list
         self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.MULTIPLE, activate_on_single_click=False)
@@ -287,7 +370,8 @@ class ProxyPage(Gtk.Box):
 
     def update_list(self, proxies):
         self.proxies = proxies
-        sig = [(p["id"], p["name"], p["protocol"], p["server"], p["port"], p.get("group", "")) for p in proxies]
+        sig = [(p["id"], p["name"], p["protocol"], p["server"], p["port"], p.get("group", ""), tuple(p.get("ips") or ()))
+               for p in proxies]
         if sig == self._sig:
             # nothing but, perhaps, the chosen proxy changed: leave the rows (and the scroll position) alone
             for pid, row in self._rows.items():
@@ -331,6 +415,14 @@ class ProxyPage(Gtk.Box):
         self.http_port.set_value(st["http_port"])
         self.dns.set_text(st["dns"])
         self.udp.set_selected(0 if st["udp"] == "block" else 1)
+        self.failover.set_active(bool(st.get("failover")))
+        self.failover.set_visible(st["order"] != "proxy_vpn")
+        lf = st.get("last_failover")
+        if lf and lf != self.status_failover:
+            if self.status_failover is not None or time.time() - lf["at"] < 30:
+                self._announce("Proxy %s stopped working – switched to %s" % (lf["from"], lf["to"]))
+            self.reload()
+        self.status_failover = lf
         self.addr.set_subtitle("SOCKS5 127.0.0.1:%d    HTTP 127.0.0.1:%d" % (
             st["socks"] or st["socks_port"], st["http"] or st["http_port"]) if st["order"] != "proxy_vpn"
             else "Not used: in this path the proxy only carries the VPN connection")
@@ -355,8 +447,14 @@ class ProxyPage(Gtk.Box):
 
     # ---- rows
     def _make_row(self, p):
+        ips = p.get("ips") or []
+        cf = bool(ips) and all(is_cloudflare(i) for i in ips)
         row = Adw.ActionRow(title=GLib.markup_escape_text(p["name"]),
-                            subtitle=GLib.markup_escape_text("%s  ·  %s:%s" % (p["protocol"], p["server"], p["port"])))
+                            subtitle=GLib.markup_escape_text("%s  ·  %s:%s%s" % (p["protocol"], p["server"], p["port"],
+                                                                                "  ·  via Cloudflare" if cf else "")))
+        if cf:
+            row.set_tooltip_text("%s resolves to %s, a Cloudflare address: the server is behind Cloudflare's CDN or runs "
+                                 "on Cloudflare, so Cloudflare is what this computer connects to." % (p["server"], ips[0]))
         row.proxy = p
         use = Gtk.CheckButton(valign=Gtk.Align.CENTER, tooltip_text="Use this proxy")
         use.set_active(bool(p.get("selected")))
@@ -367,6 +465,10 @@ class ProxyPage(Gtk.Box):
         lat = Gtk.Label(label=self._lat_text(p["id"]), css_classes=["dim-label", "numeric"])
         row.lat = lat
         row.add_suffix(lat)
+        share = Gtk.Button(label="Share…", valign=Gtk.Align.CENTER, tooltip_text="Share link and QR code")
+        share.add_css_class("flat")
+        share.connect("clicked", lambda *_: self.share(p))
+        row.add_suffix(share)
         edit = Gtk.Button(label="Edit…", valign=Gtk.Align.CENTER)
         edit.add_css_class("flat")
         edit.connect("clicked", lambda *_: ProxyEditDialog(self.win, self.rpc, p, self.reload).present())
@@ -468,6 +570,40 @@ class ProxyPage(Gtk.Box):
                 row.lat.set_label(self._lat_text(pid))
             self.ping.set_sensitive(True)
         self.rpc("proxy.latency", done, lambda *a: (self.ping.set_sensitive(True), self.win.toast(a[0])))
+
+    def _announce(self, text):
+        """A toast when the window is in front, else a desktop notification (unless they are switched off)."""
+        if self.win.is_active():
+            self.win.toast(text)
+            return
+        if not (getattr(self.win, "settings", None) or {}).get("ui", {}).get("notifications", True):
+            return
+        app = self.win.get_application()
+        if app:
+            from gi.repository import Gio
+            n = Gio.Notification.new("VPNMan")
+            n.set_body(text)
+            app.send_notification("proxy", n)
+
+    def _on_fastest(self, *_):
+        self.fastest.set_sensitive(False)
+
+        def done(p):
+            self.fastest.set_sensitive(True)
+            self.latency[p["id"]] = p["latency"]
+            if p["id"] in self._rows:
+                self._rows[p["id"]].lat.set_label(self._lat_text(p["id"]))
+            self.win.toast("Using %s (%d ms)" % (p["name"], p["latency"]))
+            self.rpc("proxy.status", self.update_status, None)
+        self.rpc("proxy.fastest", done, lambda msg, *_: (self.fastest.set_sensitive(True), self.win.toast(msg)))
+
+    def share(self, p):
+        def got(res):
+            if not res["link"]:
+                self.win.toast("%s has no share link (it was imported from an Xray config)" % res["name"])
+                return
+            ProxyShareDialog(self.win, res["name"], res["link"]).present()
+        self.rpc("proxy.link", got, lambda msg, *_: self.win.toast(msg), ident=p["id"])
 
     def _on_refresh(self, *_):
         self.refresh_btn.set_sensitive(False)

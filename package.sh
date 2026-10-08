@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# Build distributable packages for VPNMan into ./dist
+# ==============================================================================
+# VPNMan Multi-Platform Packaging Script (the same options as GPGMan's package.sh)
+# Builds packages for Debian/Ubuntu (.deb), Fedora/RHEL/openSUSE (.rpm), Arch Linux (.pkg.tar.xz), Void Linux
+# (.xbps), a portable source tarball (.tar.gz), and recipes for Alpine (APKBUILD) and OpenBSD (port), plus
+# dist/SHA256SUMS.  No Flatpak or AppImage: VPNMan's root service, firewall and routing cannot live in a sandbox
+# or a self-mounting image - the tarball's install.sh is the portable route.
 #
-#   ./package.sh            build everything that can be built on this machine, and
-#                           generate recipes (PKGBUILD, spec, template, APKBUILD, port) for the rest
-#   ./package.sh tar deb    build selected targets
-#   ./package.sh --container rpm    build inside a Fedora container (podman/docker) - works from any distro
-#
-# Targets: tar  deb  rpm  arch  void  alpine  openbsd  recipes  clean
-#   arch needs nothing but python3 (packaging/mkarch.py); void needs xbps-create; alpine/openbsd get recipes.
-#   With no target (all) a missing tool only skips that target - the rest still build.
+#   ./package.sh                     build everything this machine can build (= --all); a missing tool only skips
+#                                    that package, the rest still build, and the summary says why
+#   ./package.sh --deb --arch        selected packages (the plain names work too: ./package.sh deb arch)
+#   ./package.sh --container --rpm   build inside a Fedora container (podman/docker) - works from any distro
+#   ./package.sh --help
+# ==============================================================================
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -22,6 +25,7 @@ URL=https://github.com/Smiley-McSmiles/VPNMan
 DESC="Multi-protocol VPN manager with GTK4/libadwaita UI, interactive CLI and kill switch"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+ok() { printf '\033[1;32m[SUCCESS]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 # A target that cannot be built on this machine (tool missing) exits 3: "skipped", not "failed".
@@ -74,7 +78,7 @@ Architecture: all
 Installed-Size: $size
 Depends: python3 (>= 3.9), python3-gi, python3-gi-cairo, gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.4), iproute2
 Recommends: openvpn, wireguard-tools, nftables | iptables, openresolv | resolvconf
-Suggests: stunnel4, gnome-shell-extension-appindicator, openconnect, openfortivpn, sstp-client, pptp-linux, strongswan-swanctl, vpnc, network-manager
+Suggests: xray, stunnel4, gnome-shell-extension-appindicator, openconnect, openfortivpn, sstp-client, pptp-linux, strongswan-swanctl, vpnc, network-manager
 Maintainer: VPNMan contributors <noreply@example.invalid>
 Homepage: $URL
 Description: $DESC
@@ -166,7 +170,7 @@ Source0:        $SRCNAME.tar.gz
 BuildArch:      noarch
 Requires:       python3 >= 3.9, python3-gobject, python3-cairo, gtk4, libadwaita >= 1.4, iproute
 Recommends:     openvpn, wireguard-tools, nftables
-Suggests:       stunnel, gnome-shell-extension-appindicator, openconnect, openfortivpn, strongswan, NetworkManager
+Suggests:       xray, stunnel, gnome-shell-extension-appindicator, openconnect, openfortivpn, strongswan, NetworkManager
 
 %description
 VPNMan manages OpenVPN, WireGuard, AmneziaWG, OpenConnect, Fortinet, SSTP, IKEv2,
@@ -262,9 +266,13 @@ build_rpm() {
     mkdir -p "$top"/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
     cp "$DIST/$SRCNAME.tar.gz" "$top/SOURCES/"
     cp "$DIST/recipes/$NAME.spec" "$top/SPECS/"
-    rpmbuild --define "_topdir $top" -bb "$top/SPECS/$NAME.spec" >/dev/null
+    if ! rpmbuild --define "_topdir $top" -bb "$top/SPECS/$NAME.spec" >"$top/rpmbuild.log" 2>&1; then
+        tail -n 40 "$top/rpmbuild.log" >&2
+        echo "rpmbuild failed (full log: $top/rpmbuild.log)" >&2
+        exit 1
+    fi
     cp "$top"/RPMS/*/*.rpm "$DIST/"
-    log "  -> $(ls "$DIST"/*.rpm)"
+    log "  -> dist/$(cd "$DIST" && ls -- *"$VERSION"*.rpm)"
 }
 
 recipe_arch() {
@@ -281,7 +289,7 @@ license=('MIT')
 depends=('python' 'python-gobject' 'python-cairo' 'gtk4' 'libadwaita' 'iproute2')
 optdepends=('openvpn: OpenVPN' 'wireguard-tools: WireGuard' 'nftables: kill switch (preferred)'
             'iptables: kill switch fallback' 'openconnect: AnyConnect/GlobalProtect' 'openfortivpn: Fortinet'
-            'strongswan: IKEv2' 'networkmanager: L2TP and others')
+            'strongswan: IKEv2' 'networkmanager: L2TP and others' 'xray: proxies and the Network Proxy')
 source=("\$pkgname-\$pkgver.tar.gz")
 sha256sums=('SKIP')
 
@@ -338,7 +346,7 @@ INST
         --optdepend 'nftables: kill switch and app bypass (preferred)' --optdepend 'iptables: kill switch fallback' \
         --optdepend 'stunnel: OpenVPN over TLS' --optdepend 'openconnect: AnyConnect/GlobalProtect' \
         --optdepend 'openfortivpn: Fortinet' --optdepend 'strongswan: IKEv2' \
-        --optdepend 'networkmanager: L2TP and others' --install "$BUILD/arch/vpnman.install" >/dev/null
+        --optdepend 'networkmanager: L2TP and others' --optdepend 'xray: proxies and the Network Proxy' --install "$BUILD/arch/vpnman.install" >/dev/null
     log "  -> dist/$NAME-$VERSION-1-any.pkg.tar.xz   (install with: sudo pacman -U ...)"
 }
 
@@ -350,6 +358,7 @@ pkgname=$NAME
 version=$VERSION
 revision=1
 depends="python3 python3-gobject python3-cairo gtk4 libadwaita iproute2 nftables openvpn wireguard-tools"
+# optional: xray (proxies and the Network Proxy; or: sudo ./install.sh --xray-only from the tarball)
 short_desc="$DESC"
 maintainer="VPNMan contributors <noreply@example.invalid>"
 license="MIT"
@@ -404,6 +413,7 @@ url="$URL"
 arch="noarch"
 license="MIT"
 depends="python3 py3-gobject3 py3-cairo gtk4.0 libadwaita iproute2 nftables openvpn wireguard-tools"
+# optional: xray (community; proxies and the Network Proxy)
 source="\$pkgname-\$pkgver.tar.gz"
 builddir="\$srcdir/\$pkgname-\$pkgver"
 options="!check"
@@ -445,30 +455,101 @@ MK
 
 build_recipes() { recipe_rpm; recipe_arch; recipe_void; recipe_alpine; recipe_openbsd; log "recipes -> dist/recipes/"; }
 
-# --container [IMAGE]: build the rpm inside a Fedora container (podman or docker), so it works from any distro
-if [ "${1:-}" = "--container" ]; then
-    shift
+show_help() {
+    cat <<HELP
+VPNMan Multi-Platform Packaging Tool (version $VERSION)
+Usage: ./package.sh [options]
+
+Options:
+  --all         Build every package this machine can build (the default)
+  --tar         Portable source tarball (.tar.gz) - unpack and run: sudo ./install.sh
+  --deb         Debian / Ubuntu / Mint package (.deb)
+  --rpm         Fedora / RHEL / openSUSE package (.rpm) - needs rpmbuild (or use --container)
+  --arch        Arch Linux package (.pkg.tar.xz) and PKGBUILD - needs only python3
+  --void        Void Linux package (.xbps) and template - needs xbps-create
+  --alpine      Alpine APKBUILD (build it with abuild on Alpine)
+  --openbsd     OpenBSD port recipe
+  --recipes     Only the recipes (spec, PKGBUILD, template, APKBUILD, port) in dist/recipes/
+  --container   Build inside a Fedora container (podman/docker), e.g. --container --rpm
+  --clean       Remove dist/ and build/
+  --help, -h    Show this message
+
+The plain names work too (./package.sh deb arch). Every build also writes dist/SHA256SUMS.
+Not built: Flatpak and AppImage - VPNMan's root service, firewall rules and routing cannot run from a sandbox or
+a self-mounting image; the tarball with install.sh is the portable way (any distribution, any init system).
+Output: $DIST/
+HELP
+}
+
+# dist/SHA256SUMS for this version's release files (old versions left in dist/ are not listed)
+checksums() {
+    local files=() f
+    for f in "$DIST"/*"$VERSION"*; do
+        case "$f" in
+            *.tar.gz|*.deb|*.rpm|*.pkg.tar.*|*.xbps) [ -f "$f" ] && files+=("$(basename "$f")") ;;
+        esac
+    done
+    [ ${#files[@]} -gt 0 ] || return 0
+    if have sha256sum; then
+        (cd "$DIST" && sha256sum "${files[@]}") > "$DIST/SHA256SUMS.tmp"
+    elif have shasum; then
+        (cd "$DIST" && shasum -a 256 "${files[@]}") > "$DIST/SHA256SUMS.tmp"
+    elif have sha256; then                     # BSD
+        (cd "$DIST" && sha256 -r "${files[@]}" | awk '{print $1 "  " $2}') > "$DIST/SHA256SUMS.tmp"
+    else
+        warn "no sha256sum, shasum or sha256: dist/SHA256SUMS not written"
+        return 0
+    fi
+    mv "$DIST/SHA256SUMS.tmp" "$DIST/SHA256SUMS"
+    log "checksums -> dist/SHA256SUMS (${#files[@]} files)"
+}
+
+summary() {
+    checksums
+    local f
+    echo
+    ok "Packaging complete! Artifacts in $DIST/:"
+    for f in "$DIST"/*"$VERSION"* "$DIST/SHA256SUMS"; do
+        [ -f "$f" ] && printf '    %s\n' "$(basename "$f")"
+    done
+    [ -d "$DIST/recipes" ] && printf '    recipes/  (%s)\n' "$(cd "$DIST/recipes" && ls | tr '\n' ' ' | sed 's/ $//')"
+    return 0
+}
+
+# GPGMan-style options (--deb) and the plain names (deb) both work.
+targets=()
+container=0
+for a in "$@"; do
+    case "$a" in
+        -h|--help|help) show_help; exit 0 ;;
+        --container) container=1 ;;
+        --*) targets+=("${a#--}") ;;
+        *) targets+=("$a") ;;
+    esac
+done
+[ ${#targets[@]} -eq 0 ] && targets=(all)
+
+# --container: build inside a Fedora container (podman or docker), so the rpm builds from any distro
+if [ "$container" -eq 1 ]; then
     engine=$(command -v podman || command -v docker || true)
     [ -n "$engine" ] || { echo "--container needs podman or docker" >&2; exit 1; }
     image=${PKG_IMAGE:-registry.fedoraproject.org/fedora:latest}
-    log "building [$*] in $image with $(basename "$engine")"
+    [ "${targets[*]}" = all ] && targets=(rpm)
+    log "building [${targets[*]}] in $image with $(basename "$engine")"
     "$engine" run --rm -v "$ROOT:/src:Z" -w /src "$image" bash -c \
         "dnf -y -q install rpm-build python3 tar gzip findutils sed systemd-rpm-macros >/dev/null && \
-         cp -r /src /tmp/build-src && cd /tmp/build-src && rm -rf dist build && ./package.sh ${*:-rpm} && \
+         cp -r /src /tmp/build-src && cd /tmp/build-src && rm -rf dist build && ./package.sh ${targets[*]} && \
          mkdir -p /src/dist && cp dist/*.rpm dist/*.tar.gz dist/*.deb /src/dist/ 2>/dev/null; true"
-    log "done. Output in $DIST"
+    summary
     exit 0
 fi
-
-targets=("$@")
-[ ${#targets[@]} -eq 0 ] && targets=(all)
 
 if [ "${targets[0]}" = all ]; then
     # Every target runs in its own process: one that cannot be built here (missing tool) or that fails must not stop
     # the others, and a failure is reported at the end instead of silently skipping everything after it.
     built=(); skipped=(); failed=()
     build_tar || { warn "tarball failed"; failed+=(tar); }
-    export PKG_TAR_DONE=1
+    export PKG_TAR_DONE=1 PKG_CHILD=1
     for t in deb rpm arch void alpine openbsd recipes; do
         set +e
         bash "$ROOT/package.sh" "$t"
@@ -486,7 +567,7 @@ if [ "${targets[0]}" = all ]; then
         echo "FAILED:  ${failed[*]}" >&2
         exit 1
     fi
-    log "done. Output in $DIST"
+    summary
     exit 0
 fi
 
@@ -500,8 +581,8 @@ for t in "${targets[@]}"; do
         alpine) build_alpine ;;
         openbsd) build_openbsd ;;
         recipes) build_recipes ;;
-        clean) rm -rf "$DIST" "$BUILD" ;;
-        *) echo "unknown target: $t" >&2; exit 2 ;;
+        clean) rm -rf "$DIST" "$BUILD"; log "removed dist/ and build/" ;;
+        *) echo "unknown target: $t (see ./package.sh --help)" >&2; exit 2 ;;
     esac
 done
-[ -n "${PKG_TAR_DONE:-}" ] || log "done. Output in $DIST"
+if [ -z "${PKG_CHILD:-}" ] && [ "${targets[*]}" != clean ]; then summary; fi

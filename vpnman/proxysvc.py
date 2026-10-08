@@ -12,13 +12,11 @@ Two modes: ``local`` gives applications a SOCKS5 and an HTTP proxy on 127.0.0.1;
 redirects all TCP and DNS of this machine into Xray with nftables.
 """
 
-import os
-import re
 import threading
 
 from . import paths
 from . import platform as plat
-from . import split, xray
+from . import blocks, split, xray
 from .profiles import ProfileError, ProfileStore, new_profile
 
 ORDERS = ("proxy_only", "vpn_proxy", "proxy_vpn")
@@ -27,8 +25,57 @@ CARRIED = ("openvpn", "wireguard", "amneziawg")          # protocols whose serve
 _HIDDEN = ("outbound", "link")
 
 
+HEALTH_EVERY = 20                     # seconds between checks of the proxy server (failover on)
+HEALTH_FAILS = 3                      # checks in a row that must fail before switching to another proxy
+
+
+NET_FIELDS = ("host", "port", "user", "password")
+
+
+class ProxyExempt(blocks.AppBlocker):
+    """Keeps the programs that skip the network proxy in a cgroup of their own (the redirect lets it pass)."""
+    cgroup = blocks.NOPROXY_CGROUP
+    thread_name = "noproxy-scan"
+    label = "Programs that skip the proxy"
+
+
 def _view(p):
     return {k: v for k, v in p.items() if k not in _HIDDEN}
+
+
+def _is_ip(text):
+    import ipaddress
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        return False
+
+
+def connect_ms(ip, port, timeout=3):
+    """TCP connect time in ms, or None.  The socket carries Xray's mark, so the system-wide redirect does not send the
+    probe through the proxy itself (Linux, root; elsewhere the mark is skipped)."""
+    import socket
+    import time
+    try:
+        fam = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        s = socket.socket(fam, socket.SOCK_STREAM)
+    except OSError:
+        return None
+    try:
+        if plat.os_family() == "linux":
+            try:
+                s.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_MARK", 36), xray.MARK)
+            except OSError:
+                pass
+        s.settimeout(timeout)
+        t0 = time.monotonic()
+        s.connect((ip, int(port)))
+        return round((time.monotonic() - t0) * 1000, 1)
+    except (OSError, ValueError):
+        return None
+    finally:
+        s.close()
 
 
 class ProxyService:
@@ -38,12 +85,22 @@ class ProxyService:
         self.runner = xray.Runner(lambda level, text: mgr.log.add(level, text), paths.run_dir())
         self.lock = threading.RLock()
         self.error = ""
-        self.owner = None            # None | "local" | "carrier"
+        self.owner = None            # None | "local" | "carrier" | "net" (the network proxy)
         self.key = None              # what the running local instance was built from
         self.ports = {}
         self._fw_on = False
         self._routes = []
         self.server_ip = ""
+        self.probe = connect_ms       # replaced in tests
+        self._health_at = 0.0
+        self._fails = 0
+        self._deaths = []
+        self.last_failover = None
+        self.net_error = ""
+        self.net_blocked = False      # the kill switch is holding all traffic back
+        self.net_ips = {}             # kind -> resolved address of the network proxy's servers
+        self.exempt = ProxyExempt(lambda: list(self.net_settings().get("apps") or []),
+                                  lambda level, text: mgr.log.add(level, text))
 
     # ------------------------------------------------------------------ the list
     def list(self):
@@ -81,13 +138,17 @@ class ProxyService:
         if name and len(found) == 1:
             found[0]["name"] = name
         existing = self.store.list()
+        if source and not group:            # a refresh: new servers join the group the subscription already uses
+            group = next((p.get("group") for p in existing if p.get("source") == source and p.get("group")), "")
         by_id = {xray.identity(p): p for p in existing}
         added = updated = removed = skipped = 0
         keep = set()
+        sel, sel_changed = self.m.settings.get("proxy.selected"), False
         for f in found:
             key = xray.identity(f)
             cur = by_id.get(key)
             if cur and source and cur.get("source") == source:
+                sel_changed |= cur["id"] == sel and cur.get("outbound") != f["outbound"]   # e.g. new SNI or path
                 cur.update(name=f["name"], outbound=f["outbound"], link=f["link"], server=f["server"], port=f["port"])
                 self.store.save(cur)
                 keep.add(cur["id"])
@@ -106,6 +167,9 @@ class ProxyService:
         if source:
             stale = [p["id"] for p in existing if p.get("source") == source and p["id"] not in keep]
             removed = len(self.remove(stale)["removed"]) if stale else 0
+        if sel_changed:                     # the proxy in use got a new address or credentials: restart Xray with them
+            self.key = None
+            self.changed()
         self.m.log.add("info", "Proxies imported: %d new, %d updated, %d removed, %d already present"
                        % (added, updated, removed, skipped))
         return {"added": added, "updated": updated, "removed": removed, "skipped": skipped, "errors": errors}
@@ -133,7 +197,7 @@ class ProxyService:
         if removed:
             self.m.log.add("info", "Removed %d prox%s: %s" % (len(removed), "y" if len(removed) == 1 else "ies",
                                                               ", ".join(removed)))
-            self.sync()
+            self.changed()
         return {"removed": removed, "failed": failed}
 
     def update(self, ident, changes):
@@ -145,27 +209,102 @@ class ProxyService:
     def select(self, ident):
         p = self.store.find(ident)
         self.m.settings.update({"proxy": {"selected": p["id"]}})
-        self.sync()
+        self.changed()                      # the kill switch must let the new server through (proxy only)
         return _view(p)
 
     def latency(self, idents=None):
-        import time
-        out = {}
-        for p in self.store.list():
-            if idents and p["id"] not in idents:
-                continue
+        """TCP connect time to each server in ms (None: unreachable), 16 at a time so a long subscription stays quick."""
+        import concurrent.futures
+
+        def probe(p):
             ips = self.ips(p)
-            ms = None
-            if ips:
-                t0 = time.time()
-                try:
-                    import socket
-                    with socket.create_connection((ips[0], int(p["port"])), timeout=3):
-                        ms = round((time.time() - t0) * 1000, 1)
-                except OSError:
-                    ms = None
-            out[p["id"]] = ms
-        return out
+            return p["id"], (self.probe(ips[0], p["port"]) if ips else None)
+
+        todo = [p for p in self.store.list() if not idents or p["id"] in idents]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
+            return dict(ex.map(probe, todo))
+
+    def info(self, ident, resolve=True):
+        """What a proxy really connects to (without its secrets): the server name and the addresses it resolves to,
+        the transport, TLS name and Host header - and whether those addresses belong to Cloudflare."""
+        from . import leaktest
+        p = self.store.find(ident)
+        ob = p.get("outbound") or {}
+        st = ob.get("settings") or {}
+        node = (st.get("vnext") or st.get("servers") or [{}])[0]
+        ss = ob.get("streamSettings") or {}
+        net = ss.get("network") or "tcp"
+        sec = ss.get("security") or "none"
+        tls = ss.get("tlsSettings") or ss.get("realitySettings") or {}
+        nets = {"ws": "wsSettings", "httpupgrade": "httpupgradeSettings", "xhttp": "xhttpSettings",
+                "splithttp": "xhttpSettings", "grpc": "grpcSettings", "h2": "httpSettings", "http": "httpSettings"}
+        tp = ss.get(nets.get(net, ""), {}) or {}
+        host = (tp.get("headers") or {}).get("Host") or tp.get("host") or ""
+        if isinstance(host, list):
+            host = ", ".join(host)
+        ips = self.ips(p, live=resolve)
+        cf = [ip for ip in ips if leaktest.is_cloudflare(ip)]
+        return {"id": p["id"], "name": p["name"], "protocol": p["protocol"], "address": node.get("address") or "",
+                "port": node.get("port") or p.get("port"), "ips": ips, "cloudflare": bool(ips) and len(cf) == len(ips),
+                "network": net, "security": sec, "sni": tls.get("serverName") or "", "host": host,
+                "path": tp.get("path") or tp.get("serviceName") or ""}
+
+    def link(self, ident):
+        """The share link of one proxy (to move it to another device).  Empty for proxies imported from an Xray config."""
+        p = self.store.find(ident)
+        return {"id": p["id"], "name": p["name"], "link": p.get("link") or ""}
+
+    def fastest(self, group=None):
+        """Choose the proxy with the quickest server: of ``group``, else of the favourites, else of all."""
+        ps = self.store.list()
+        if group:
+            cands = [p for p in ps if (p.get("group") or "").lower() == group.lower()]
+            if not cands:
+                raise ProfileError("no proxies in group %s" % group)
+        else:
+            cands = [p for p in ps if p.get("favorite")] or ps
+        if not cands:
+            raise ProfileError("no proxies yet")
+        lat = self.latency([p["id"] for p in cands])
+        best = min(cands, key=lambda p: (lat.get(p["id"]) is None, lat.get(p["id"]) or 0, p["name"].lower()))
+        if lat.get(best["id"]) is None:
+            raise ProfileError("none of the %d proxies answers" % len(cands))
+        view = self.select(best["id"])
+        view["latency"] = lat[best["id"]]
+        return view
+
+    def failover_order(self, cur):
+        """Where to go when ``cur`` stops working: the next favourites (if ``cur`` is one or there are any), else
+        the rest of its group, else every other proxy - in name order, starting after ``cur``."""
+        ps = sorted(self.store.list(), key=lambda p: p["name"].lower())
+        i = next((n for n, p in enumerate(ps) if p["id"] == cur["id"]), -1)
+        ring = ps[i + 1:] + ps[:max(i, 0)]                 # everybody else, starting after cur
+        favs = [p for p in ring if p.get("favorite")]
+        group = [p for p in ring if (p.get("group") or "") == (cur.get("group") or "")]
+        return favs or group or ring
+
+    def fail_over(self, reason):
+        """Switch to the first proxy of ``failover_order`` that answers.  Returns it, or None."""
+        cur = self.selected()
+        if not cur:
+            return None
+        for p in self.failover_order(cur):
+            ips = self.ips(p)
+            if ips and self.probe(ips[0], p["port"]) is not None:
+                import time
+                self.m.log.add("warn", "Proxy %s: %s - switching to %s" % (cur["name"], reason, p["name"]))
+                self.last_failover = {"from": cur["name"], "to": p["name"], "reason": reason, "at": int(time.time())}
+                self._fails, self._deaths = 0, []
+                self.m.settings.update({"proxy": {"selected": p["id"]}})
+                self.changed()
+                return _view(p)
+        self.m.log.add("error", "Proxy %s: %s, and no other proxy answers" % (cur["name"], reason))
+        self._fails = 0
+        with self.lock:
+            if self.owner == "local" and not self.runner.alive():
+                self.key = None
+                self.sync()
+        return None
 
     def ips(self, p, live=True):
         """The server's addresses: resolved now (and remembered), else the remembered ones - the kill switch may be
@@ -185,7 +324,8 @@ class ProxyService:
 
     # ------------------------------------------------------------------ settings
     def configure(self, **kw):
-        """Change proxy settings with validation (enabled, selected, order, mode, socks_port, http_port, dns, udp)."""
+        """Change proxy settings with validation (enabled, selected, order, mode, socks_port, http_port, dns, udp,
+        failover)."""
         tree = {}
         for k, v in kw.items():
             if v is None:
@@ -210,7 +350,9 @@ class ProxyService:
                     ipaddress.ip_address(v)
                 except ValueError:
                     raise ProfileError("dns must be an IP address")
-            if k not in ("enabled", "selected", "order", "mode", "socks_port", "http_port", "dns", "udp"):
+            if k == "failover":
+                v = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+            if k not in ("enabled", "selected", "order", "mode", "socks_port", "http_port", "dns", "udp", "failover"):
                 raise ProfileError("unknown proxy setting: %s" % k)
             tree[k] = v
         if tree:
@@ -248,6 +390,8 @@ class ProxyService:
 
     def lock_ips(self):
         """Proxy server addresses the kill switch must let through while the proxy runs outside the VPN."""
+        if self.net_wanted():
+            return set(self.net_ips.values())
         cfg = self.settings()
         p = self.selected()
         if not (cfg["enabled"] and p and cfg["order"] == "proxy_only"):
@@ -257,17 +401,26 @@ class ProxyService:
     def status(self):
         cfg = self.settings()
         p = self.selected()
-        running = self.runner.alive()
+        alive = self.runner.alive()
+        running = alive and self.owner in ("local", "carrier")
         local = running and self.owner == "local"
+        error = self.error
+        if cfg["enabled"] and self.net_wanted():
+            error = "paused while the Network Proxy is on (Preferences → Connection)"
         return {"enabled": bool(cfg["enabled"]), "selected": p["id"] if p else "", "name": p["name"] if p else "",
                 "order": cfg["order"], "mode": cfg["mode"], "running": running,
-                "carrier": running and self.owner == "carrier", "error": self.error,
+                "carrier": running and self.owner == "carrier", "error": error,
                 "socks": self.ports.get("socks") if local else None, "http": self.ports.get("http") if local else None,
                 "installed": bool(xray.binary()), "system_ok": self.system_supported()[0],
-                "socks_port": cfg["socks_port"], "http_port": cfg["http_port"], "dns": cfg["dns"], "udp": cfg["udp"]}
+                "socks_port": cfg["socks_port"], "http_port": cfg["http_port"], "dns": cfg["dns"], "udp": cfg["udp"],
+                "failover": bool(cfg.get("failover")), "last_failover": self.last_failover,
+                "server_ip": self.server_ip if running else "", "net": self.net_status(),
+                "paused": bool(cfg["enabled"]) and self.net_wanted()}
 
     # ------------------------------------------------------------------ local proxy (proxy_only, vpn_proxy)
     def _wanted(self, vpn_up):
+        if self.net_wanted():
+            return False                              # the network proxy has Xray and the redirect to itself
         cfg = self.settings()
         if not (cfg["enabled"] and self.selected()):
             return False
@@ -283,6 +436,11 @@ class ProxyService:
                 return
             if vpn_up is None:
                 vpn_up = self.m._status.get("state") == "connected"
+            if self.net_wanted():
+                self._sync_net()
+                return
+            if self.owner == "net":
+                self._stop_local()
             if not self._wanted(vpn_up):
                 self._stop_local()
                 return
@@ -333,24 +491,79 @@ class ProxyService:
             self._stop_local()
             self.error = str(e)
 
-    def _stop_local(self):
+    def _stop_local(self, keep_block=False):
+        """Stop Xray and take the redirect away.  ``keep_block``: with the network proxy's kill switch, put the
+        block-everything rules in its place instead (in one step), so nothing goes out directly in between."""
         was = self.runner.alive() or self._fw_on
-        if self._fw_on:
+        block = keep_block and self.net_wanted() and bool(self.net_settings().get("killswitch")) \
+            and self.system_supported()[0]
+        if block:
+            try:
+                cfg = self.net_settings()
+                v4, _v6, _d = xray.split_ignore(cfg.get("ignore"))
+                xray.apply_ruleset(xray.blocked_ruleset(
+                    exclude=sorted(self.m._lock_endpoints) + self.m._route_nets() + v4,
+                    allow_lan=bool(self.m.settings.get("netlock.allow_lan")),
+                    split_mark=split.MARK if self.m._split.active else 0,
+                    skip_cgroup=blocks.NOPROXY_CGROUP if self.exempt.active else ""))
+                self._fw_on = True
+                self.net_blocked = True
+            except xray.ProxyError as e:
+                self.m.log.add("error", "Network proxy kill switch: %s" % e)
+                block = False
+        elif self._fw_on:
             xray.remove_ruleset()
             self._fw_on = False
+        if not block:
+            self.net_blocked = False
         self.runner.stop()
+        if self.exempt.active:
+            self.exempt.stop()
+        was_net = self.owner == "net"
         self.owner, self.key, self.ports, self.server_ip = None, None, {}, ""
         if was:
             self.error = ""
-            self.m.log.add("info", "Proxy stopped")
+            self.m.log.add("info", "Network proxy stopped" if was_net else "Proxy stopped")
 
     def watch(self):
-        """Called every second by the daemon: restart a local instance that died."""
+        """Called every few seconds by the daemon: restart a local instance that died; with ``proxy.failover``, also
+        check the server and switch to another proxy when it stops answering (or Xray keeps dying)."""
+        import time
+        reason = target = None
         with self.lock:
-            if self.owner == "local" and not self.runner.alive():
-                self.m.log.add("warn", "Xray terminated unexpectedly - restarting it")
+            failover = bool(self.settings().get("failover"))
+            if self.owner == "net" and not self.runner.alive():
+                self.m.log.add("warn", "Xray (network proxy) terminated unexpectedly - restarting it")
                 self.key = None
                 self.sync()
+                return
+            if self.owner == "local" and not self.runner.alive():
+                now = time.monotonic()
+                self._deaths = [t for t in self._deaths if now - t < 120] + [now]
+                if not failover or len(self._deaths) < 3:
+                    self.m.log.add("warn", "Xray terminated unexpectedly - restarting it")
+                    self.key = None
+                    self.sync()
+                    return
+                reason = "Xray stopped %d times in two minutes" % len(self._deaths)
+            elif self.owner == "local" and failover and time.monotonic() - self._health_at >= HEALTH_EVERY:
+                self._health_at = time.monotonic()
+                target = (self.server_ip, self.selected())
+            else:
+                return
+        if reason is None:
+            ip, p = target
+            if not (p and ip):
+                return
+            if self.probe(ip, p["port"]) is not None:
+                self._fails = 0
+                return
+            self._fails += 1
+            if self._fails < HEALTH_FAILS:
+                self.m.log.add("debug", "Proxy %s did not answer (%d/%d)" % (p["name"], self._fails, HEALTH_FAILS))
+                return
+            reason = "the server stopped answering"
+        self.fail_over(reason)
 
     def shutdown(self):
         with self.lock:
@@ -361,7 +574,158 @@ class ProxyService:
     # ------------------------------------------------------------------ the proxy carries the VPN (proxy_vpn)
     def carrier_wanted(self):
         cfg = self.settings()
-        return bool(cfg["enabled"] and cfg["order"] == "proxy_vpn" and self.selected())
+        return bool(cfg["enabled"] and cfg["order"] == "proxy_vpn" and self.selected() and not self.net_wanted())
+
+    # ------------------------------------------------------------------ the network proxy (plain HTTP / SOCKS5)
+    # All TCP and DNS of this computer go through it (system-wide redirect, Linux): before the internet when no VPN
+    # is connected, after the VPN while one is (Xray's own connections to the proxy then travel in the tunnel).
+    # Ignored hosts and the listed programs go direct; other UDP is blocked (or let through) and IPv6 is blocked.
+    def net_settings(self):
+        return self.m.settings.get("netproxy")
+
+    def net_wanted(self):
+        cfg = self.net_settings()
+        return bool(cfg.get("enabled") and any((cfg.get(k) or {}).get("host") for k in xray.NET_KINDS))
+
+    def net_status(self, secrets=False):
+        cfg = self.net_settings()
+        out = {"enabled": bool(cfg.get("enabled")), "active": self.owner == "net" and self.runner.alive(),
+               "error": self.net_error, "ignore": list(cfg.get("ignore") or []), "apps": list(cfg.get("apps") or []),
+               "dns": cfg.get("dns"), "udp": cfg.get("udp"), "servers": dict(self.net_ips),
+               "killswitch": bool(cfg.get("killswitch")), "blocked": self.net_blocked,
+               "supported": self.system_supported()[0], "installed": bool(xray.binary())}
+        for k in xray.NET_KINDS:
+            e = dict(cfg.get(k) or {})
+            e["has_password"] = bool(e.get("password"))
+            if not secrets:
+                e["password"] = ""
+            out[k] = e
+        if cfg.get("enabled") and not self.net_wanted():
+            out["error"] = "no proxy server is set"
+        return out
+
+    def net_configure(self, **kw):
+        """Change the network proxy: enabled, http/https/ftp/socks ({host, port, user, password}; host "" clears
+        it), ignore (hosts), apps (program names), dns, udp."""
+        import ipaddress
+        tree = {}
+        for k, v in kw.items():
+            if v is None:
+                continue
+            if k == "enabled":
+                tree[k] = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+            elif k in xray.NET_KINDS:
+                if not isinstance(v, dict):
+                    raise ProfileError("%s: give host and port" % k)
+                cur = dict(self.net_settings().get(k) or {})
+                for f, val in v.items():
+                    if f not in NET_FIELDS:
+                        raise ProfileError("unknown field %s" % f)
+                    if f == "port":
+                        try:
+                            val = int(val or 0)
+                        except (TypeError, ValueError):
+                            raise ProfileError("%s port is not a number" % k)
+                        if not 0 <= val <= 65535:
+                            raise ProfileError("%s port must be between 1 and 65535" % k)
+                    elif f == "host":
+                        val = str(val or "").strip()
+                        if val and not xray._HOST.match(val):
+                            raise ProfileError("%s proxy: not a host name or address: %s" % (k, val))
+                    elif f == "password" and val == "********":
+                        continue                          # the masked value the app was shown: keep the password
+                    else:
+                        val = str(val or "")
+                    cur[f] = val
+                if cur.get("host") and not cur.get("port"):
+                    raise ProfileError("%s proxy: give a port" % k)
+                tree[k] = cur
+            elif k == "ignore":
+                tree[k] = [str(h).strip() for h in v if str(h).strip()][:500]
+            elif k == "apps":
+                apps = [str(a).strip() for a in v if str(a).strip()]
+                for a in apps:
+                    if not blocks._APP.match(a):
+                        raise ProfileError("not a program name: %s" % a)
+                tree[k] = apps
+            elif k == "dns":
+                try:
+                    ipaddress.ip_address(str(v))
+                except ValueError:
+                    raise ProfileError("dns must be an IP address")
+                tree[k] = str(v)
+            elif k == "udp":
+                if v not in ("block", "direct"):
+                    raise ProfileError("udp must be block or direct")
+                tree[k] = v
+            elif k == "killswitch":
+                tree[k] = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+            else:
+                raise ProfileError("unknown network proxy setting: %s" % k)
+        if tree.get("enabled") and not self.system_supported()[0]:
+            raise ProfileError(self.system_supported()[1])
+        if tree:
+            self.m.settings.update({"netproxy": tree})
+        self.changed()
+        return self.net_status()
+
+    def _sync_net(self):
+        cfg = self.net_settings()
+        exclude = sorted(self.m._lock_endpoints) + self.m._route_nets()
+        servers = {k: (cfg[k]["host"], int(cfg[k]["port"]), cfg[k].get("user", ""), cfg[k].get("password", ""))
+                   for k in xray.NET_KINDS if (cfg.get(k) or {}).get("host")}
+        key = ("net", tuple(sorted(servers.items())), tuple(cfg.get("ignore") or ()), tuple(cfg.get("apps") or ()),
+               cfg.get("dns"), cfg.get("udp"), tuple(exclude), bool(self.m.settings.get("netlock.allow_lan")),
+               bool(self.m._split.active))
+        if key == self.key and self.owner == "net" and self.runner.alive():
+            return
+        self._stop_local(keep_block=True)
+        self.net_error = ""
+        try:
+            ok, why = self.system_supported()
+            if not ok:
+                raise xray.ProxyError(why)
+            ups, ips = {}, {}
+            for kind, (host, port, user, password) in servers.items():
+                got = [host] if _is_ip(host) else self.m._resolve(host)
+                got = [a for a in (got or []) if ":" not in a]
+                if not got:
+                    raise xray.ProxyError("could not resolve the %s proxy %s" % (kind.upper(), host))
+                ups[kind], ips[kind] = (got[0], port, user, password), got[0]
+            self.net_ips = ips
+            v4, v6, domains = xray.split_ignore(cfg.get("ignore"))
+            redirect = xray.free_port()
+            dns = xray.free_port({redirect})
+            conf = xray.netproxy_config(ups, redirect=redirect, dns=dns, mark=xray.MARK, dns_server=cfg.get("dns"),
+                                        direct_nets=v4 + v6, direct_domains=domains)
+            self.m.log.add("info", "Starting the network proxy (%s)" % ", ".join(
+                "%s %s:%d" % (k.upper(), servers[k][0], servers[k][1]) for k in xray.NET_KINDS if k in servers))
+            self.runner.start(conf, [redirect, dns])
+            self.owner, self.key, self.server_ip = "net", key, next(iter(ips.values()))
+            self.net_blocked = False
+            skip = ""
+            if cfg.get("apps"):
+                if split.cgroup_root():
+                    try:
+                        self.exempt.begin()
+                        skip = blocks.NOPROXY_CGROUP
+                    except OSError as e:
+                        self.net_error = "programs cannot skip the proxy: %s" % e
+                else:
+                    self.net_error = "letting programs skip the proxy needs cgroup v2; the rest works"
+            xray.apply_ruleset(xray.redirect_ruleset(
+                redirect, dns, exclude=exclude + v4 + list(ips.values()),
+                allow_lan=bool(self.m.settings.get("netlock.allow_lan")),
+                split_mark=split.MARK if self.m._split.active else 0, udp=cfg.get("udp") or "block",
+                skip_cgroup=skip, allow6=v6))
+            self._fw_on = True
+            self.m.log.add("info", "Network proxy up: this computer's TCP and DNS go through it")
+        except xray.ProxyError as e:
+            self.m.log.add("error", "Network proxy: %s" % e)
+            self._stop_local(keep_block=True)
+            self.net_error = str(e)
+            if self.net_blocked:
+                self.m.log.add("warn", "Network proxy kill switch: all traffic is blocked until the proxy works again")
 
     def carrier_ips(self):
         """Resolve the proxy server before the kill switch is raised."""

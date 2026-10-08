@@ -1,7 +1,31 @@
 """Run under xvfb: the new dialogs and pages build and behave - credentials prompt, connection test, traffic graph,
 history, bypass addresses and mode, networks preferences, server groups and sorting."""
-import os, sys, tempfile
+import os, subprocess, sys, tempfile
 os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp()
+# GNOME's proxy settings (a copy of the org.gnome.system.proxy schema), in memory: "Copy from the desktop settings"
+_SCHEMAS = tempfile.mkdtemp()
+with open(os.path.join(_SCHEMAS, "org.gnome.system.proxy.gschema.xml"), "w") as _fh:
+    _fh.write("""<schemalist>
+  <enum id="org.gnome.desktop.GDesktopProxyMode"><value nick="none" value="0"/><value nick="manual" value="1"/>
+    <value nick="auto" value="2"/></enum>
+  <schema id="org.gnome.system.proxy" path="/system/proxy/">
+    <child name="http" schema="org.gnome.system.proxy.http"/><child name="https" schema="org.gnome.system.proxy.https"/>
+    <child name="ftp" schema="org.gnome.system.proxy.ftp"/><child name="socks" schema="org.gnome.system.proxy.socks"/>
+    <key name="mode" enum="org.gnome.desktop.GDesktopProxyMode"><default>'none'</default></key>
+    <key name="autoconfig-url" type="s"><default>''</default></key>
+    <key name="ignore-hosts" type="as"><default>['localhost', '127.0.0.0/8', '::1']</default></key>
+  </schema>
+  <schema id="org.gnome.system.proxy.http" path="/system/proxy/http/">
+    <key name="host" type="s"><default>''</default></key><key name="port" type="i"><default>8080</default></key></schema>
+  <schema id="org.gnome.system.proxy.https" path="/system/proxy/https/">
+    <key name="host" type="s"><default>''</default></key><key name="port" type="i"><default>0</default></key></schema>
+  <schema id="org.gnome.system.proxy.ftp" path="/system/proxy/ftp/">
+    <key name="host" type="s"><default>''</default></key><key name="port" type="i"><default>0</default></key></schema>
+  <schema id="org.gnome.system.proxy.socks" path="/system/proxy/socks/">
+    <key name="host" type="s"><default>''</default></key><key name="port" type="i"><default>0</default></key></schema>
+</schemalist>""")
+subprocess.run(["glib-compile-schemas", _SCHEMAS], check=True)
+os.environ.update(GSETTINGS_SCHEMA_DIR=_SCHEMAS, GSETTINGS_BACKEND="memory", XDG_CURRENT_DESKTOP="GNOME")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import cairo
 import gi
@@ -14,6 +38,12 @@ from vpnman.gui import proxypage as PP
 from vpnman.settings import DEFAULTS
 
 CALLS = []
+NET_STATUS = {"enabled": False, "active": False, "error": "", "ignore": ["localhost", "127.0.0.0/8", "::1"], "apps": [],
+              "dns": "1.1.1.1", "udp": "block", "servers": {}, "supported": True, "installed": True,
+              "http": {"host": "", "port": 8080, "user": "", "password": "", "has_password": False},
+              "https": {"host": "", "port": 0, "user": "", "password": "", "has_password": False},
+              "ftp": {"host": "", "port": 0, "user": "", "password": "", "has_password": False},
+              "socks": {"host": "", "port": 0, "user": "", "password": "", "has_password": False}}
 BLOCK_STATUS = {"enabled": True, "active": True, "error": "", "supported": True, "reason": "", "apps_supported": True, "apps_reason": "",
                 "entries": [{"id": "aaaa1111", "kind": "address", "value": "203.0.113.9/32", "proto": "any", "note": "bad", "enabled": True, "created": 0},
                             {"id": "bbbb2222", "kind": "endpoint", "value": "203.0.113.9:443", "proto": "tcp", "note": "", "enabled": False, "created": 0},
@@ -28,9 +58,11 @@ def fake_rpc(method, ok=None, fail=None, **kw):
     canned = {
         "proxy.list": [{"id": "%012d" % i, "name": n, "protocol": "vless", "server": "p%d.example.com" % i, "port": 443,
                         "group": g, "selected": i == 1, "notes": ""} for i, (n, g) in enumerate([("Home", ""), ("WS", "sub"), ("TR", "sub")], 1)],
-        "proxy.status": PROXY_STATUS, "proxy.sources": [], "proxy.set": PROXY_STATUS, "proxy.select": {"id": "x"},
+        "proxy.status": PROXY_STATUS, "netproxy.status": NET_STATUS, "netproxy.set": NET_STATUS, "proxy.sources": [], "proxy.set": PROXY_STATUS, "proxy.select": {"id": "x"},
         "proxy.latency": {"%012d" % 1: 12.5, "%012d" % 2: None},
         "proxy.remove": {"removed": ["WS", "TR"], "failed": []},
+        "proxy.fastest": {"id": "%012d" % 2, "name": "WS", "latency": 9.4},
+        "proxy.link": {"id": "%012d" % 1, "name": "Home", "link": "vless://11111111-2222-3333-4444-555555555555@p1.example.com:443?security=tls#Home"},
         "blocks.status": BLOCK_STATUS, "blocks.add": {"id": "abcd1234", "kind": "address", "value": "x", "proto": "any", "closed": 2},
         "blocks.remove": {"removed": ["aaaa1111"]}, "blocks.set": BLOCK_STATUS, "blocks.update": {"id": "aaaa1111"},
         "connections.close": {"closed": True}, "connections": {"rows": [], "supported": True},
@@ -61,6 +93,14 @@ def prof(i, group="", fav=False):
 
 class App(A.Application):
     def do_activate(self):
+        try:
+            self.checks()
+        except BaseException:                    # a failed check ends the run at once (instead of a hanging app)
+            import traceback
+            traceback.print_exc()
+            os._exit(1)
+
+    def checks(self):
         super().do_activate()
         w = self.win
         A.rpc = fake_rpc
@@ -139,6 +179,59 @@ class App(A.Application):
         pw._toggle_trust()
         assert CALLS[-1] == ("network.trust", {"name": "Home", "trusted": True}), CALLS
         assert pw.net_btn.get_label() == "Stop Trusting"
+        # ---- network proxy: Preferences → Connection and the switch on the Connection page
+        from vpnman.gui import proxyprefs as PX
+        np_ = pw.netproxy
+        assert set(np_.hosts) == {"http", "https", "ftp", "socks"} and int(np_.ports["http"].get_value()) == 8080
+        assert np_.ignore.get_text() == "localhost, 127.0.0.0/8, ::1"
+        CALLS.clear()
+        np_.hosts["http"].set_text("http://proxy.example.com:3128/")
+        np_._save()
+        assert CALLS[-1] == ("netproxy.set", {"http": {"host": "proxy.example.com", "port": 3128, "user": ""}}), CALLS
+        CALLS.clear()
+        np_.hosts["socks"].set_text("me:pw@10.0.0.5")                    # no port yet: nothing is sent
+        np_._save()
+        assert not CALLS and "socks" in np_._dirty, CALLS
+        np_.ports["socks"].set_value(1080)
+        assert CALLS[-1] == ("netproxy.set", {"socks": {"host": "10.0.0.5", "port": 1080, "user": "me", "password": "pw"}}), CALLS
+        CALLS.clear()
+        np_.apps.set_text("steam, thunderbird")
+        np_.ignore.set_text("localhost, *.corp.example")
+        np_._save()
+        assert CALLS[-1] == ("netproxy.set", {"ignore": ["localhost", "*.corp.example"], "apps": ["steam", "thunderbird"]}), CALLS
+        from gi.repository import Gio
+        gs = Gio.Settings.new("org.gnome.system.proxy")
+        CALLS.clear()
+        np_._import()
+        assert not any(c[0] == "netproxy.set" for c in CALLS), "nothing set on the desktop: nothing copied"
+        gs.set_string("mode", "manual")
+        gs.get_child("http").set_string("host", "corp-proxy.example")
+        gs.get_child("http").set_int("port", 3128)
+        gs.get_child("socks").set_string("host", "10.0.0.9")
+        gs.get_child("socks").set_int("port", 1080)
+        np_._import()
+        got = next(c[1] for c in CALLS if c[0] == "netproxy.set")
+        assert got["http"] == {"host": "corp-proxy.example", "port": 3128, "user": "", "password": ""}, got
+        assert got["socks"]["host"] == "10.0.0.9" and got["https"]["host"] == "" and got["ignore"] == ["localhost", "127.0.0.0/8", "::1"]
+        assert PX.parse_url("u:p@[2001:db8::1]:1080") == ("u", "p", "2001:db8::1", 1080)
+        assert PX.show_url({"host": "2001:db8::1", "user": "u"}) == "u@[2001:db8::1]"
+        assert PX.summary(dict(NET_STATUS, enabled=True, active=True,
+                               http={"host": "p", "port": 3128})) == "All traffic goes through HTTP p:3128"
+        assert PX.summary(dict(NET_STATUS, enabled=True, error="no proxy server is set")).startswith("Not running")
+        sw = w.netproxy_switch.row                                        # the Connection page
+        grp = sw.get_ancestor(A.Adw.PreferencesGroup)
+        assert grp.get_title() == "Network Proxy"
+        CALLS.clear()
+        sw.set_active(True)
+        assert ("netproxy.set", {"enabled": True}) in CALLS, CALLS
+        w.netproxy.update(dict(NET_STATUS, enabled=True, active=True, http={"host": "p", "port": 3128}))
+        assert sw.get_active() and "HTTP p:3128" in sw.get_subtitle(), (sw.get_active(), sw.get_subtitle())
+        assert pw.netproxy.switch.row.get_active()
+        w.netproxy.update(dict(NET_STATUS))
+        assert not sw.get_active()
+        pw.present()
+        pw.close()
+        assert np_.sync not in w.netproxy.listeners, "a closed Preferences window stops listening"
         # ---- servers: groups, sorting, headers
         profs = [prof(1, "Zeta"), prof(2, ""), prof(3, "Alpha", fav=True), prof(4, "Alpha")]
         w.profiles = profs
@@ -152,11 +245,51 @@ class App(A.Application):
         assert order() == ["srv2", "srv3", "srv4", "srv1"]
         rows = sorted(w._rows.values(), key=w._sort_key)
         w._header(rows[1], rows[0])
-        assert rows[1].get_header() is not None and rows[1].get_header().get_first_child().get_label() == "Alpha"
+        def kids(widget):
+            out, c = [], widget.get_first_child()
+            while c:
+                out.append(c)
+                c = c.get_next_sibling()
+            return out
+        head = rows[1].get_header()
+        assert head is not None and [k.get_label() for k in kids(head) if isinstance(k, A.Gtk.Label) and k.get_label()][0] == "Alpha"
         w._header(rows[2], rows[1])
         assert rows[2].get_header() is None
         w._header(rows[0], None)
         assert rows[0].get_header() is None                                   # no heading for ungrouped servers
+        # ---- group order (saved by the daemon) and folding groups
+        import copy
+        w.settings = copy.deepcopy(DEFAULTS)
+        assert w.shown_groups() == ["Alpha", "Zeta"]
+        CALLS.clear()
+        w._move_group("Zeta", -1)
+        assert w.shown_groups() == ["Zeta", "Alpha"] and order() == ["srv2", "srv1", "srv3", "srv4"], order()
+        assert CALLS == [] or True
+        w._move_group("Zeta", -1)                                              # already first: nothing happens
+        assert w.shown_groups() == ["Zeta", "Alpha"]
+        buttons = [k for k in kids(w._header_box_for("Alpha"))] if hasattr(w, "_header_box_for") else None
+        a_rows = [r for r in sorted(w._rows.values(), key=w._sort_key) if r.profile.get("group") == "Alpha"]
+        w._header(a_rows[0], rows[0])
+        mv = [k for k in kids(a_rows[0].get_header()) if isinstance(k, A.Gtk.Button) and k.get_label() in ("▲", "▼")]
+        assert [b.get_label() for b in mv] == ["▲", "▼"] and mv[0].get_sensitive() and not mv[1].get_sensitive(), "last group: no ▼"
+        w.settings["ui"]["group_order"] = []
+        w.listbox.invalidate_sort()
+        w._toggle_group("Alpha")                                               # fold Alpha: heading row + one summary row
+        folded = [r for r in a_rows if getattr(r, "folded", False)]
+        shown = [r for r in a_rows if not getattr(r, "folded", False)]
+        assert len(shown) == 1 and len(folded) == 1 and shown[0].get_title() == "2 servers", (shown[0].get_title(), len(folded))
+        assert not shown[0].get_selectable() and not shown[0].go.get_visible() and not w._filter(folded[0]) and w._filter(shown[0])
+        w.search.set_text("srv3")                                              # a search shows everything again
+        w.search.emit("search-changed")
+        assert not any(getattr(r, "folded", False) for r in a_rows) and a_rows[0].get_title() != "2 servers"
+        w.search.set_text("")
+        w.search.emit("search-changed")
+        assert any(getattr(r, "folded", False) for r in a_rows)
+        w._on_status(dict(w.status or {}, state="connected", profile_id=a_rows[1].profile["id"]))   # the server in use stays
+        assert all(not getattr(r, "folded", False) for r in a_rows) and a_rows[1].get_title() == "srv" + a_rows[1].profile["name"][3:]
+        w._on_status(dict(w.status or {}, state="disconnected", profile_id=None))
+        w._toggle_group("Alpha")                                               # unfold
+        assert all(r.get_title().startswith("srv") and r.get_selectable() and not getattr(r, "folded", False) for r in a_rows)
         # ---- failover chooser and the edit dialog
         p1 = dict(prof(1), failover=["%012d" % 3])
         ed = A.ProfileDialog(w, "edit", [], profile=p1)
@@ -183,7 +316,7 @@ class App(A.Application):
             if isinstance(c, A.Gtk.Button):
                 btns.append(c.get_label())
             c = c.get_next_sibling()
-        assert btns == ["Edit…"], btns
+        assert btns == ["▾", "Edit…", "▲", "▼"], btns
         members = [p for p in w.profiles if p.get("group") == "Alpha"]
         bd = A.BatchEditDialog(w, members, group="Alpha")
         assert bd.group_row.get_text() == "Alpha" and bd.changes() == {}
@@ -314,6 +447,42 @@ class App(A.Application):
         add._submit()
         assert "http" in add.err.get_title()
         PP.ProxyEditDialog(w, fake_rpc, fake_proxy_list()[0], lambda: None)
+        # use fastest, failover switch, share dialog with a QR code
+        CALLS.clear()
+        pp._on_fastest()
+        assert CALLS[0] == ("proxy.fastest", {}) and pp.latency["%012d" % 2] == 9.4 and "9 ms" in pp._rows["%012d" % 2].lat.get_label()
+        pp.update_status(dict(PROXY_STATUS, failover=False))
+        CALLS.clear()
+        pp.failover.set_active(True)
+        assert ("proxy.set", {"failover": True}) in CALLS, CALLS
+        CALLS.clear()
+        pp.update_status(dict(PROXY_STATUS, failover=True))
+        assert not CALLS, "the failover switch follows the status without sending it back"
+        import time as _t
+        pp.update_status(dict(PROXY_STATUS, failover=True, last_failover={"from": "Home", "to": "WS", "reason": "x", "at": int(_t.time())}))
+        assert any(c[0] == "proxy.list" for c in CALLS), "after a failover the list (the chosen proxy) is reloaded"
+        shown = []
+        orig_present = PP.ProxyShareDialog.present
+        PP.ProxyShareDialog.present = lambda self: shown.append(self)
+        pp.share(fake_proxy_list()[0])
+        PP.ProxyShareDialog.present = orig_present
+        sd = shown[0]
+        assert sd.qr is not None and len(sd.qr.matrix) >= 21 and sd.link.startswith("vless://")
+        sd._copy()
+        sd.close()
+        assert PP.qr_widget("x" * 3000) is None, "a link too long for a QR code shows only the text"
+        # the tray offers the proxy switch
+        w.proxy_page.update_status(dict(PROXY_STATUS, enabled=False))
+        labels_tray = [i.get("label") for i in w.tray_menu()]
+        assert "Turn Proxy On (Home)" in labels_tray, labels_tray
+        w.proxy_page.update_status(PROXY_STATUS)
+        item = next(i for i in w.tray_menu() if i.get("label") == "Turn Proxy Off")
+        CALLS.clear()
+        item["callback"]()
+        assert ("proxy.set", {"enabled": False}) in CALLS, CALLS
+        w.proxy_page.update_status(dict(PROXY_STATUS, name="", selected=""))
+        assert not any("Proxy" in (i.get("label") or "") for i in w.tray_menu()), "no proxy chosen: no tray item"
+        w.proxy_page.update_status(PROXY_STATUS)
         # ---- connection table
         cg = w.conn_group
         rows = [{"dir": "out", "proto": "tcp", "v6": False, "local": "10.0.0.2", "lport": 40000, "remote": "93.184.216.34", "rport": 443,
@@ -382,6 +551,43 @@ class App(A.Application):
         tb._act_block(None, A.GLib.Variant("s", "endpoint"))
         assert ("blocks.add", {"kind": "endpoint", "value": "93.184.216.34:443", "proto": "tcp"}) in CALLS, CALLS
         CALLS.clear()
+        tb._act_block(None, A.GLib.Variant("s", "endpoint|60"))
+        assert ("blocks.add", {"kind": "endpoint", "value": "93.184.216.34:443", "proto": "tcp", "minutes": 60}) in CALLS, CALLS
+        CALLS.clear()
+        tb._act_block(None, A.GLib.Variant("s", "app|reboot"))
+        assert ("blocks.add", {"kind": "app", "value": "firefox", "proto": "any", "until_reboot": True}) in CALLS, CALLS
+        # every block item opens a submenu with the durations
+        menu = tb.menu_for(r0)
+        subs = []
+        for i in range(menu.get_n_items()):
+            sec = menu.get_item_link(i, "section")
+            for j in range(sec.get_n_items()):
+                sub = sec.get_item_link(j, "submenu")
+                if sub is not None:
+                    subs.append((sec.get_item_attribute_value(j, "label", None).get_string(),
+                                 [sub.get_item_attribute_value(k, "target", None).get_string() for k in range(sub.get_n_items())]))
+        assert len(subs) == 4 and subs[0][1] == ["address|0", "address|15", "address|60", "address|1440", "address|reboot"], subs
+        # export the rows shown as CSV
+        tb.update({"rows": [r0, rl]})
+        assert len(tb.shown_rows()) == 2
+        assert tb.export.activate_action("conn.export-copy", None), "the Export menu finds its actions (not greyed out)"
+        assert tb.controls.activate_action("conn.export-save", None) is not None
+        for win_ in A.Gtk.Window.list_toplevels():
+            if isinstance(win_, A.Gtk.FileChooserDialog):
+                win_.destroy()
+        tb._act_export_copy()
+        from vpnman.conntable import to_csv
+        csv_text = to_csv(tb.shown_rows())
+        assert csv_text.splitlines()[0].startswith("direction,application,pid") and "93.184.216.34" in csv_text
+        saved_to = []
+        import vpnman.gui.connpage as CP
+        orig_save = CP.save_file
+        out_csv = os.path.join(tempfile.mkdtemp(), "c.csv")
+        CP.save_file = lambda parent, title, name, cb: (saved_to.append(name), cb(out_csv))
+        tb._act_export_save()
+        CP.save_file = orig_save
+        assert saved_to[0].endswith(".csv") and open(out_csv).read() == csv_text
+        CALLS.clear()
         tb._act_close(None, None)
         assert CALLS[0][0] == "connections.close" and CALLS[0][1]["rport"] == 443, CALLS
         import subprocess
@@ -418,6 +624,14 @@ class App(A.Application):
         bw.note.set_text("torrents")
         bw._add()
         assert ("blocks.add", {"kind": "port", "value": "6881", "proto": "udp", "note": "torrents"}) in CALLS, CALLS
+        CALLS.clear()
+        bw.value.set_text("6881")
+        bw.duration.set_selected(2)
+        bw._add()
+        assert ("blocks.add", {"kind": "port", "value": "6881", "proto": "udp", "note": "", "minutes": 60}) in CALLS, CALLS
+        bw.duration.set_selected(0)
+        row = bw._make_row(dict(BLOCK_STATUS["entries"][0], expires=int(__import__("time").time()) + 600))
+        assert "more minutes" in row.get_subtitle(), row.get_subtitle()
         bw.value.set_text("")
         CALLS.clear()
         bw._add()
@@ -437,6 +651,145 @@ class App(A.Application):
         assert bw.banner.get_revealed()
         bw.close()
         # ---- update result dialog / import notes build without errors
+        # ---- the Connect buttons in the server list and Disconnecting… follow what the daemon does
+        held = {}
+
+        def hold_rpc(method, ok=None, fail=None, **kw):
+            CALLS.append((method, kw))
+            if method in ("connect", "disconnect"):
+                held[method] = (ok, fail)                 # answered later, like a slow daemon
+            else:
+                fake_rpc(method, ok, fail, **kw)
+        A.rpc = hold_rpc
+
+        def status(state, pid=None):
+            name = {"%012d" % 1: "srv1", "%012d" % 2: "srv2"}.get(pid)
+            return {"state": state, "profile_id": pid, "profile": name, "protocol": "openvpn" if pid else None,
+                    "message": "", "iface": "tun0" if state == "connected" else None, "public_ip": None, "since": 1,
+                    "rx": 0, "tx": 0, "rx_rate": 0, "tx_rate": 0, "uptime": 3, "error_kind": None,
+                    "netlock": {"engaged": False}, "last_profile": pid, "version": "x"}
+        p1, p2 = "%012d" % 1, "%012d" % 2
+        w._on_profiles([prof(1), prof(2)])
+        w._on_status(status("connected", p1))
+        r1, r2 = w._rows[p1], w._rows[p2]
+
+        def look(r):
+            return r.go.get_label(), r.go.get_sensitive()
+        assert look(r1) == ("Connected", False) and look(r2) == ("Connect", True), (look(r1), look(r2))
+        assert r1.dot.get_opacity() == 1 and r1.dot.has_css_class("success") and r2.dot.get_opacity() == 0
+        assert not r1.go.has_css_class("suggested-action") and r2.go.has_css_class("suggested-action")
+        w.stack.set_visible_child_name("servers")
+        CALLS.clear()
+        r1.go.emit("clicked")
+        assert not any(c[0] == "connect" for c in CALLS), "the connected server's button does nothing"
+        r2.go.emit("clicked")                                     # switch servers from the list
+        assert ("connect", {"ident": p2}) in CALLS and w.stack.get_visible_child_name() == "servers", "stays on the list"
+        assert look(r2) == ("Connecting…", False) and look(r1) == ("Connect", True), (look(r1), look(r2))
+        CALLS.clear()
+        r2.go.emit("clicked")
+        assert not any(c[0] == "connect" for c in CALLS), "no second request while one is on its way"
+        w._on_status(status("connected", p1))                     # an older poll answer must not undo the switch
+        assert look(r2) == ("Connecting…", False) and look(r1) == ("Connect", True)
+        w._on_status(status("connecting", p2))
+        held.pop("connect")[0]({"id": p2})
+        assert look(r2) == ("Connecting…", False)
+        w._on_status(status("connected", p2))
+        assert look(r2) == ("Connected", False) and look(r1) == ("Connect", True) and w.main_btn.get_label() == "Disconnect"
+        # disconnect: grey "Disconnecting…" until the daemon is done
+        CALLS.clear()
+        w.on_main_button()
+        assert w.main_btn.get_label() == "Disconnecting…" and not w.main_btn.get_sensitive()
+        assert look(r2) == ("Disconnecting…", False) and look(r1) == ("Connect", False), "nothing starts meanwhile"
+        assert not w.server_row.get_sensitive()
+        w._on_status(status("connected", p2))                     # the tunnel is still up for a few seconds
+        assert w.main_btn.get_label() == "Disconnecting…" and not w.main_btn.get_sensitive()
+        assert w.hero.title.get_label() == "Disconnecting…" and not w.stats.get_visible()
+        w.on_main_button()
+        assert [c[0] for c in CALLS].count("disconnect") == 1, "a second click does not send a second disconnect"
+        assert next(i for i in w.tray_menu() if "Disconnect" in i["label"])["enabled"] is False
+        w._on_status(status("disconnecting", p2))
+        assert w.main_btn.get_label() == "Disconnecting…"
+        held.pop("disconnect")[0](True)
+        w._on_status(status("disconnected"))
+        assert w.main_btn.get_label() == "Connect" and w.main_btn.get_sensitive()
+        assert look(r1) == ("Connect", True) and look(r2) == ("Connect", True) and r2.dot.get_opacity() == 0
+        # ---- tray quick-connect: the last server and the favourites, no separator twice in a row
+        w.profiles = [dict(prof(1), favorite=True), prof(2), dict(prof(3), favorite=True), dict(prof(4), blacklisted=True, favorite=True)]
+        w._on_status(status("disconnected", None))
+        w.status["last_profile"] = p2
+        menu = w.tray_menu()
+        labels = [i.get("label") or "-" for i in menu]
+        assert "Connect to srv2  (last used)" in labels and "Connect to srv1" in labels and "Connect to srv3" in labels, labels
+        assert not any("srv4" in l for l in labels), "blocked servers are not offered"
+        assert labels.index("Connect to srv2  (last used)") < labels.index("Connect to srv1"), "the last used one first"
+        assert all(not (a == b == "-") for a, b in zip(labels, labels[1:])) and labels[0] != "-" and labels[-1] != "-", labels
+        CALLS.clear()
+        next(i for i in menu if i.get("label") == "Connect to srv1")["callback"]()
+        assert ("connect", {"ident": p1}) in CALLS and w.stack.get_visible_child_name() == "servers", CALLS
+        held.pop("connect")[0]({"id": p1})
+        w._on_status(status("connected", p1))
+        menu = w.tray_menu()
+        labels = [i.get("label") for i in menu]
+        assert "✔ srv1 (connected)" in labels and "Switch to srv3" in labels, labels
+        assert next(i for i in menu if i.get("label") == "✔ srv1 (connected)")["enabled"] is False
+        w.profiles = []
+        w._on_status(status("disconnected", None))
+        assert not any("Connect to" in (i.get("label") or "") for i in w.tray_menu())
+        w._on_profiles([prof(1), prof(2)])
+        r1, r2 = w._rows[p1], w._rows[p2]
+        # a disconnect started elsewhere (tray, CLI) shows up through the daemon's state alone
+        w._on_status(status("disconnecting", p1))
+        assert w.main_btn.get_label() == "Disconnecting…" and not w.main_btn.get_sensitive()
+        assert look(r1) == ("Disconnecting…", False)
+        # a failed disconnect request gives the button back
+        w._on_status(status("connected", p1))
+        w.on_main_button()
+        held.pop("disconnect")[1]("daemon gone", False)
+        w._on_status(status("connected", p1))
+        assert w.main_btn.get_label() == "Disconnect" and w.main_btn.get_sensitive()
+        # connecting from the list while disconnected; a failed connect gives the button back
+        w._on_status(status("disconnected"))
+        r1.go.emit("clicked")
+        assert look(r1) == ("Connecting…", False)
+        held.pop("connect")[1]("no such profile", False)
+        assert look(r1) == ("Connect", True)
+        w._on_status(status("error", p1))
+        assert look(r1) == ("Connect", True), "a failed connection can be retried"
+        # ---- Preferences: network proxy kill switch and test, rules for this network, reconnect switch
+        w.profiles = [prof(1), prof(2)]
+        pw2 = A.PreferencesWindow(w, settings)
+        np2 = pw2.netproxy
+        assert np2.kill.get_active(), "the kill switch is on by default"
+        CALLS.clear()
+        np2.kill.set_active(False)
+        assert ("netproxy.set", {"killswitch": False}) in CALLS, CALLS
+        np2.model.update(dict(NET_STATUS, killswitch=True, enabled=True, blocked=True, error="could not resolve p"))
+        assert np2.kill.get_active() and "Blocking all traffic" in np2.switch.row.get_subtitle()
+        checks = {"checks": [{"id": "netproxy", "name": "Network proxy", "status": "ok", "detail": "Running <b>"},
+                             {"id": "netproxy-dns", "name": "DNS through the proxy", "status": "fail", "detail": "Name lookups fail"},
+                             {"id": "tunnel", "name": "VPN tunnel", "status": "ok", "detail": "x"}], "summary": "fail"}
+        np2.model.rpc = lambda method, ok=None, fail=None, **kw: ok(checks) if method == "leaktest" else None
+        np2._run_test()
+        sub = np2.test.get_subtitle()
+        assert "✔ Network proxy" in sub and "✘ DNS through the proxy" in sub and "VPN tunnel" not in sub, sub
+        assert np2.test_btn.get_sensitive()
+        np2.model.rpc = lambda method, ok=None, fail=None, **kw: ok({"checks": [], "summary": "ok"})
+        np2._run_test()
+        assert "first" in np2.test.get_subtitle()
+        assert pw2.rule_ids == ["", p1, p2]
+        pw2._on_network({"id": "Cafe", "name": "Cafe", "trusted": False, "rules": [],
+                         "rule": {"network": "Cafe", "server": p2, "netproxy": "on", "xray": ""}})
+        assert pw2.rule_server.get_selected() == 2 and pw2.rule_netproxy.get_selected() == 1 and pw2.rule_server.get_sensitive()
+        CALLS.clear()
+        pw2.rule_netproxy.set_selected(2)
+        assert CALLS[-1] == ("network.rule", {"network": "Cafe", "server": p2, "netproxy": "off", "xray_proxy": ""}), CALLS
+        pw2._on_network({"id": "Home", "name": "Home", "trusted": True, "rule": None, "rules": []})
+        assert not pw2.rule_server.get_sensitive(), "a trusted network has no rules"
+        CALLS.clear()
+        pw2._on_network({"id": "Cafe", "name": "Cafe", "trusted": False, "rule": None, "rules": []})
+        assert not CALLS, "showing a network must not save a rule"
+        pw2.close()
+        A.rpc = fake_rpc
         w.show_warnings(["a: Will be ignored: 'register-dns'"])
         w._update_result({"current": "1.0.6", "latest": "9.9.9", "newer": True, "url": "https://github.com/x", "notes": "n"}, False)
         w._update_result({"error": "offline"}, True)

@@ -60,9 +60,26 @@ def _changed(m, key, result):
         m.reapply_dns()
     elif key.startswith("split"):
         m.split_changed()
-    elif key.startswith("proxy"):
+    elif key.startswith("proxy") or key.startswith("netproxy"):
         m.proxy.changed()
-    return result
+    return _masked(result, key)
+
+
+def _masked(value, key=None):
+    """Settings as the front ends see them: the network proxy's passwords stay in the daemon."""
+    key = str(key or "")
+
+    def hide(x):
+        if isinstance(x, dict):
+            return {k: ("********" if v else "") if k == "password" else hide(v) for k, v in x.items()}
+        return x
+    if not key:
+        return dict(value, netproxy=hide(value.get("netproxy"))) if isinstance(value, dict) else value
+    if not key.startswith("netproxy"):
+        return value
+    if key.endswith(".password"):
+        return "********" if value else ""
+    return hide(value)
 
 
 def _remove_one(m, ident):
@@ -98,7 +115,7 @@ METHODS = {
     "netlock.status": lambda m: m.netlock_status(),
     "netlock.enable": lambda m: m.netlock_enable(),
     "netlock.disable": lambda m: m.netlock_disable(),
-    "settings.get": lambda m, key=None: m.settings.get(key),
+    "settings.get": lambda m, key=None: _masked(m.settings.get(key), key),
     "settings.set": lambda m, key, value: _changed(m, key, m.settings.set(key, value)),
     "settings.update": lambda m, tree: (m.settings.update(tree), _changed(m, "dns" if "dns" in tree else "", None),
                                         m.settings.get())[2],
@@ -114,8 +131,14 @@ METHODS = {
     "proxy.select": lambda m, ident: m.proxy.select(ident),
     "proxy.set": lambda m, **kw: m.proxy.configure(**kw),
     "proxy.latency": lambda m, ids=None: m.proxy.latency(ids),
+    "proxy.fastest": lambda m, group=None: m.proxy.fastest(group),
+    "proxy.link": lambda m, ident: m.proxy.link(ident),
+    "proxy.info": lambda m, ident: m.proxy.info(ident),
+    "netproxy.status": lambda m: m.proxy.net_status(),
+    "netproxy.set": lambda m, **kw: m.proxy.net_configure(**kw),
     "blocks.status": lambda m: m.blocks.status(),
-    "blocks.add": lambda m, kind, value, proto="any", note="": m.blocks.add(kind, value, proto, note),
+    "blocks.add": lambda m, kind, value, proto="any", note="", minutes=0, until_reboot=False:
+        m.blocks.add(kind, value, proto, note, minutes, until_reboot),
     "blocks.update": lambda m, ident, enabled=None, note=None: m.blocks.update(ident, enabled, note),
     "blocks.remove": lambda m, ids: m.blocks.remove(ids),
     "blocks.set": lambda m, enabled: m.blocks.set_enabled(enabled),
@@ -124,6 +147,8 @@ METHODS = {
         bool(listening), bool(local), resolve=bool(resolve)),
     "network.status": lambda m: m.network_status(),
     "network.trust": lambda m, name=None, trusted=True: m.network_trust(name, trusted),
+    "network.rule": lambda m, network=None, server="", netproxy="", xray_proxy="":
+        m.network_rule_set(network, server, netproxy, xray_proxy),
     "backup.export": lambda m: m.backup_export(),
     "backup.import": lambda m, data, replace=False, restore_settings=None: m.backup_import(data, replace, restore_settings),
     "history": lambda m, limit=50: m.history.list(limit),
@@ -133,6 +158,7 @@ METHODS = {
     "schedule.set": lambda m, entries=None, enabled=None: m.schedule_set(entries, enabled),
     "logs": lambda m, since=0, limit=1000: dict(zip(("entries", "last"), m.log.since(since, limit))),
     "discover.networkmanager": lambda m: backends.NetworkManager.discover(),
+    "diagnostics": lambda m: __import__("vpnman.diagnostics", fromlist=["build"]).build(m),
     "system": lambda m: {"os": plat.os_family(), "distro": plat.distro()[1], "init": plat.init_system(),
                          "firewall": _fw_name()},
 }

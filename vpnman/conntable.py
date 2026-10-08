@@ -222,6 +222,30 @@ def snapshot(listening=False, local=False, limit=LIMIT, proc="/proc", resolve=Fa
     return {"rows": res, "supported": bool(rows) or fam == "linux", "note": note, "truncated": truncated}
 
 
+CSV_FIELDS = ("direction", "application", "pid", "protocol", "ip_version", "local_address", "local_port",
+              "remote_address", "remote_port", "remote_name", "state")
+
+
+def to_csv(rows):
+    """The rows as CSV text with a header line (spreadsheet friendly; values that look like formulas are quoted
+    with a leading apostrophe so a spreadsheet does not run them)."""
+    import csv
+    import io
+
+    def safe(v):
+        v = "" if v is None else str(v)
+        return "'" + v if v[:1] in ("=", "+", "-", "@") and not re.match(r"^-?\d", v) else v
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(CSV_FIELDS)
+    for r in rows:
+        w.writerow([safe(x) for x in (r.get("dir"), r.get("app"), r.get("pid") or "", r.get("proto"),
+                                      6 if r.get("v6") else 4, r.get("local"), r.get("lport"),
+                                      r.get("remote") if r.get("rport") else "", r.get("rport") or "",
+                                      r.get("rname", ""), r.get("state"))])
+    return buf.getvalue()
+
+
 # ---------------------------------------------------------------------- BSD
 
 def _split_hostport(text):

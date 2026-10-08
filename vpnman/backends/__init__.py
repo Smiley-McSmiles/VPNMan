@@ -29,12 +29,19 @@ def sniff(filename, text):
     return best if best_score >= 50 else None
 
 
+def helpers():
+    """The programs VPNMan runs alongside the protocols (not protocols you can import a profile for)."""
+    from .. import stunnel, xray
+    return [{"id": "stunnel", "label": "stunnel (TLS wrapper)",
+             "description": "Carry OpenVPN over TLS so it looks like HTTPS (enable per OpenVPN profile)",
+             "available": bool(stunnel.binary()), "missing": [] if stunnel.binary() else ["stunnel"]},
+            {"id": "xray", "label": "Xray (proxies)",
+             "description": "VLESS, VMess, Trojan and Shadowsocks proxies (vpnman proxy)",
+             "available": bool(xray.binary()),
+             "missing": [] if xray.binary() else ["xray (sudo ./install.sh --xray-only)"]}]
+
+
 def describe():
-    from .. import stunnel
-    extra = [{"id": "stunnel", "label": "stunnel (TLS wrapper)",
-              "description": "Carry OpenVPN over TLS so it looks like HTTPS (enable per OpenVPN profile)",
-              "available": bool(stunnel.binary()), "missing": [] if stunnel.binary() else ["stunnel"],
-              "mode": "wrapper", "fields": [], "note": ""}]
     return [{"id": b.id, "label": b.label, "description": b.description,
              "available": b.available(), "missing": b.missing(), "mode": b.mode,
              "fields": list(b.fields), "note": b.lock_note}

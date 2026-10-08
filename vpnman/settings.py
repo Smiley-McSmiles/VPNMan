@@ -32,6 +32,7 @@ DEFAULTS = {
         "failover": True,          # try another server when one keeps failing
         "failover_group": True,    # ... preferring the servers in the same group
         "timeout": 60,
+        "reconnect_on_change": True,   # reconnect at once when the computer wakes up or the network (gateway) changes
         "openvpn_args": [],        # extra raw arguments appended to OpenVPN
     },
     "access": {
@@ -43,6 +44,7 @@ DEFAULTS = {
         "untrusted_action": "off", # off | connect  (when joining a network that is not trusted)
         "trusted_action": "off",   # off | disconnect  (when joining a trusted one - only if we connected automatically)
         "profile": "last",         # what to connect to: last | fastest | <profile id or name>
+        "rules": [],               # per network: [{network, server (profile id or ""), netproxy ("", on, off), xray ("", off, <proxy id>)}]
     },
     "schedule": {
         "enabled": True,
@@ -56,7 +58,8 @@ DEFAULTS = {
     "routes": [],                  # [{"ip": "10.0.0.0/8", "action": "out"}]  out = bypass the VPN
     "blocks": {
         "enabled": True,           # enforce the list below
-        "entries": [],             # [{id, kind: address|endpoint|port|app, value, proto, note, enabled, created}]
+        "entries": [],             # [{id, kind: address|endpoint|port|app, value, proto, note, enabled, created,
+                                   #   expires (0: never), boot ("": survives restarts)}]
     },
     "proxy": {
         "enabled": False,          # use the selected proxy (see vpnman proxy)
@@ -67,6 +70,19 @@ DEFAULTS = {
         "http_port": 10809,
         "dns": "1.1.1.1",          # system mode: the resolver that answers queries (asked through the proxy)
         "udp": "block",            # system mode: block | direct - what happens to UDP other than DNS
+        "failover": False,         # switch to the next favourite proxy (else the group) when the server stops answering
+    },
+    "netproxy": {                  # a plain HTTP / SOCKS5 proxy all traffic goes through (after the VPN, if connected)
+        "enabled": False,
+        "http": {"host": "", "port": 8080, "user": "", "password": ""},
+        "https": {"host": "", "port": 0, "user": "", "password": ""},
+        "ftp": {"host": "", "port": 0, "user": "", "password": ""},
+        "socks": {"host": "", "port": 0, "user": "", "password": ""},
+        "ignore": ["localhost", "127.0.0.0/8", "::1"],   # go direct (addresses, networks, domains)
+        "apps": [],                # programs that go direct
+        "dns": "1.1.1.1",          # answers this computer's DNS, asked over TCP through the proxy
+        "udp": "block",            # block | direct - UDP other than DNS (a proxy cannot carry it)
+        "killswitch": True,        # while the proxy cannot work (down, restarting, a wrong address) block all traffic
     },
     "events": {
         "pre_connect": "",
@@ -79,6 +95,7 @@ DEFAULTS = {
     },
     "ui": {
         "notifications": True,
+        "group_order": [],         # server groups in this order (ungrouped servers first, unlisted groups after, by name)
     },
 }
 

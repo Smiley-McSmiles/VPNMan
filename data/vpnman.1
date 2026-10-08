@@ -1,4 +1,4 @@
-.TH VPNMAN 1 "October 2026" "vpnman 1.0.7" "User Commands"
+.TH VPNMAN 1 "October 2026" "vpnman 1.0.8" "User Commands"
 .\" Written for man(7) / mdoc-free roff so it renders on every man implementation (man-db, mandoc, BSD).
 .SH NAME
 vpnman, vpnmand, vpnman\-gtk \- multi\-protocol VPN manager with a kill switch
@@ -67,8 +67,8 @@ All commands accept \fB\-h\fR/\fB\-\-help\fR, which prints the options and examp
 .SS Connecting
 .TP
 .B status \fR[\fB\-\-json\fR]
-Show the state (disconnected, connecting, connected, reconnecting, error), the profile, the interface,
-the public IP, uptime, traffic and rates, and the kill switch. The exit status is 0 when connected and 3
+Show the state (disconnected, connecting, connected, reconnecting, disconnecting, error), the profile, the interface,
+the public IP, uptime, traffic and rates, the kill switch, and the proxy when it is switched on. The exit status is 0 when connected and 3
 otherwise, so \fBvpnman status >/dev/null\fR works as a test in scripts. \fB\-\-json\fR prints the raw status object.
 .TP
 .B connect \fR[\fIPROFILE\fR] [\fB\-\-fastest\fR] [\fB\-\-last\fR] [\fB\-\-no\-wait\fR] [\fB\-\-timeout\fR \fISECONDS\fR]
@@ -168,12 +168,19 @@ connect to it by name).
 .TP
 .B group \fR[\fIlist\fR]
 .TQ
+.B group order \fR[\fIGROUP\fR...] [\fB\-\-reset\fR]
+.TQ
 .B group edit \fIGROUP\fR \fIKEY=VALUE\fR... [\fB\-\-ask\-password\fR]
 List the groups (a profile's group is set with \fBedit PROFILE group=NAME\fR, or comes from the folder it was
 imported from), or change \fBevery server in a group at once\fR. Keys: \fBname\fR (renames the group),
 \fBusername\fR, \fBpassword\fR (or \fB\-\-ask\-password\fR), \fBstunnel=HOST[:PORT]\fR (or \fBoff\fR),
 \fBstunnel_sni\fR and \fBstunnel_verify\fR. Whatever is not named stays as it is. The SSL tunnel is applied to the
 OpenVPN servers of the group only; the others are reported as skipped. \fIGROUP\fR may be a unique part of the name.
+\fBgroup order\fR sets the order the groups are listed in (ungrouped servers first, groups you do not name after the
+others, by name; without names it shows the order, \fB\-\-reset\fR goes back to alphabetical); the app's \(25B2 / \(25BC
+buttons in a group's heading do the same (setting \fBui.group_order\fR). A group can be folded in the app with the
+\(25BE button in its heading: its servers become one "N servers" row, the server in use stays visible and a search shows
+everything again.
 .TP
 .B failover \fIPROFILE\fR [\fISERVER\fR...] [\fB\-\-clear\fR]
 Show or set the servers tried, in order, when \fIPROFILE\fR keeps failing. See
@@ -201,51 +208,99 @@ immediately if connected. See
 .B leaktest \fR[\fB\-\-json\fR]
 Test the live connection: that the tunnel is up, the public IP, that traffic outside the tunnel is really blocked
 while the kill switch is engaged, that the DNS servers sit behind the tunnel and that IPv6 cannot bypass it.
-Prints a mark for each check (ok, warning, fail, info). Exit status 1 if a check fails. Connect first.
+When a proxy is switched on it is checked too: in \fBlocal\fR mode the public IP is also looked up through the local HTTP
+proxy (it must differ from the direct one); in \fBsystem\fR mode the public IP should be the proxy server's address (a
+different one is reported as a warning, because some servers send traffic out from another address); a proxy that is
+switched on but not running fails. In system\-wide mode the kill switch probe carries Xray's socket mark so the redirect
+does not mistake it for proxied traffic.
+Prints a mark for each check (ok, warning, fail, info). Exit status 1 if a check fails. Connect first (or switch the
+proxy on).
 .TP
-.B connections \fR[\fB\-l\fR|\fB\-\-listening\fR] [\fB\-\-local\fR] [\fB\-r\fR|\fB\-\-resolve\fR] [\fB\-w\fR|\fB\-\-watch\fR] [\fB\-\-json\fR]
+.B connections \fR[\fB\-l\fR|\fB\-\-listening\fR] [\fB\-\-local\fR] [\fB\-r\fR|\fB\-\-resolve\fR] [\fB\-w\fR|\fB\-\-watch\fR] [\fB\-\-csv\fR] [\fB\-\-json\fR]
 The network connections of this computer as the daemon sees them: the way (\fBin\fR, \fBout\fR, \fBlisten\fR), the
 application and its pid, the protocol (TCP, UDP, with a 6 for IPv6), the local and remote address and port, and the TCP
 state. A TCP connection is \fBin\fR when a local listener accepted it. Sockets that only wait for connections
 (\fB\-\-listening\fR) and connections that never leave this computer (\fB\-\-local\fR) are hidden unless asked for.
 \fB\-\-resolve\fR shows host names instead of addresses where reverse DNS knows them (the lookups are done in the
 background by the daemon, so names appear a moment later; they are cached for ten minutes and cost DNS queries, which is
-why it is off by default). \fB\-\-watch\fR refreshes every two seconds. Linux reads \fI/proc/net\fR and finds the owner of every socket through
+why it is off by default). \fB\-\-watch\fR refreshes every two seconds. \fB\-\-csv\fR prints CSV with a header line
+(direction, application, pid, protocol, ip_version, local_address, local_port, remote_address, remote_port, remote_name,
+state) for spreadsheets; values that look like formulas get a leading apostrophe. Linux reads \fI/proc/net\fR and finds the owner of every socket through
 \fI/proc/PID/fd\fR; FreeBSD uses \fBsockstat\fR; other BSD systems use \fBnetstat\fR and show no application names.
 The same table is on the Connection page of the application.
 .TP
-.B blocks \fR[\fIlist\fR|\fIadd\fR|\fIremove\fR|\fIenable\fR|\fIdisable\fR|\fIon\fR|\fIoff\fR] [\fIARG\fR...] [\fB\-\-proto\fR \fBany\fR|\fBtcp\fR|\fBudp\fR] [\fB\-\-note\fR \fITEXT\fR] [\fB\-\-json\fR]
+.B blocks \fR[\fIlist\fR|\fIadd\fR|\fIremove\fR|\fIenable\fR|\fIdisable\fR|\fIon\fR|\fIoff\fR] [\fIARG\fR...] [\fB\-\-proto\fR \fBany\fR|\fBtcp\fR|\fBudp\fR] [\fB\-\-note\fR \fITEXT\fR] [\fB\-\-for\fR \fIDURATION\fR] [\fB\-\-until\-reboot\fR] [\fB\-\-json\fR]
 Addresses, ports and programs that may not use the network. See
 .BR "BLOCKED CONNECTIONS" .
 \fBlist\fR (the default) shows the entries with their ids; \fBadd\fR \fIKIND\fR \fIVALUE\fR blocks one (\fIKIND\fR is
 \fBaddress\fR, \fBendpoint\fR, \fBport\fR or \fBapp\fR; \fB\-\-proto\fR applies to endpoints and ports; \fB\-\-note\fR is a
 reminder); \fBremove\fR \fIID\fR... unblocks; \fBenable\fR/\fBdisable\fR \fIID\fR... keep an entry but stop or resume
-enforcing it; \fBon\fR/\fBoff\fR switch the whole list.
+enforcing it; \fBon\fR/\fBoff\fR switch the whole list. A block can be temporary: \fB\-\-for\fR \fIDURATION\fR
+(\fB30m\fR, \fB2h\fR, \fB1d\fR, \fB1h30m\fR, or a number of minutes; at most a year) ends it after that long, and
+\fB\-\-until\-reboot\fR ends it when the computer restarts; together, whichever comes first. The list shows how long each
+temporary entry has left.
 .TP
-.B proxy \fR[\fIlist\fR|\fIadd\fR|\fIrefresh\fR|\fIremove\fR|\fIedit\fR|\fIuse\fR|\fIon\fR|\fIoff\fR|\fIorder\fR|\fImode\fR|\fIset\fR|\fIstatus\fR|\fIping\fR] [\fIARG\fR...]
+.B netproxy \fR[\fIstatus\fR|\fIon\fR|\fIoff\fR|\fIset\fR|\fIclear\fR|\fIignore\fR|\fIapps\fR|\fIdns\fR|\fIudp\fR|\fIkillswitch\fR] [\fIARG\fR...] [\fB\-\-user\fR \fINAME\fR] [\fB\-\-ask\-password\fR] [\fB\-\-json\fR]
+A proxy server all traffic goes through. See
+.BR "NETWORK PROXY" .
+\fBstatus\fR (the default) shows it; \fBon\fR/\fBoff\fR; \fBset\fR \fBhttp\fR|\fBhttps\fR|\fBftp\fR|\fBsocks\fR
+\fIHOST:PORT\fR sets one of the proxies (\fB\-\-user\fR and \fB\-\-ask\-password\fR for one that needs a login);
+\fBclear\fR \fIKIND\fR... removes them; \fBignore\fR \fIHOST\fR... and \fBapps\fR \fINAME\fR... replace the lists of
+hosts and programs that go direct; \fBdns\fR \fIIP\fR and \fBudp\fR \fBblock\fR|\fBdirect\fR; \fBkillswitch\fR
+\fBon\fR|\fBoff\fR (see NETWORK PROXY).
+.TP
+.B proxy \fR[\fIlist\fR|\fIshow\fR|\fIlink\fR|\fIadd\fR|\fIsources\fR|\fIrefresh\fR|\fIremove\fR|\fIedit\fR|\fIuse\fR|\fIon\fR|\fIoff\fR|\fIorder\fR|\fImode\fR|\fIset\fR|\fIstatus\fR|\fIping\fR|\fIfailover\fR] [\fIARG\fR...]
 Proxies served through Xray, alone or together with the VPN. See
 .BR "PROXIES (XRAY)" .
 .RS
 .TP
-.B proxy list \fR[\fB\-l\fR|\fB\-\-latency\fR] [\fB\-\-json\fR]
-The proxies; a dot marks the one in use.
+.B proxy list \fR[\fB\-l\fR|\fB\-\-latency\fR] [\fB\-\-group\fR \fIGROUP\fR] [\fB\-\-json\fR]
+The proxies (or only those of \fIGROUP\fR); a dot marks the one in use.
+.TP
+.B proxy show \fINAME\fR [\fB\-\-json\fR]
+Everything known about one proxy: protocol, server, port, group, subscription, notes, favourite, in use, the
+addresses the server name resolves to (what this computer really connects to) and the transport, TLS name, Host header
+and path (no secrets). When those addresses belong to Cloudflare it says so: such proxies sit behind Cloudflare's CDN or
+run on Cloudflare (Workers), so this computer talks to Cloudflare, and websites may see a Cloudflare address (WARP)
+instead of the server's. The app shows the same as "via Cloudflare" under the proxy's name, and the connection test
+names Cloudflare when it is involved.
+.TP
+.B proxy link \fINAME\fR [\fB\-\-qr\fR]
+Print the proxy's share link, to move it to a phone or another computer; \fB\-\-qr\fR also draws it as a QR code in the
+terminal (dark on a light background). Anyone with the link can use the proxy. Proxies imported from an Xray JSON config
+have no link.
 .TP
 .B proxy add \fISOURCE\fR... [\fB\-\-name\fR \fINAME\fR] [\fB\-\-group\fR \fIGROUP\fR]
 Add proxies. A \fISOURCE\fR is a share link (\fBvless://\fR, \fBvmess://\fR, \fBtrojan://\fR, \fBss://\fR), a file that
-holds links (or an Xray JSON config), or an \fBhttp(s)://\fR subscription address, which is downloaded as you (not by the
+holds links (or an Xray JSON config; \fB\-\fR reads standard input), or an \fBhttp(s)://\fR subscription address, which is downloaded as you (not by the
 daemon) and remembered so that \fBrefresh\fR can update it. \fB\-\-group\fR names the group the proxies go into
 (default: the subscription's host name). A proxy that is already present is not added twice; a line that cannot be
 understood is reported and does not stop the others.
 .TP
+.B proxy sources \fR[\fB\-\-json\fR]
+The subscription addresses, with how many proxies each holds.
+.TP
 .B proxy refresh \fR[\fIURL\fR...]
 Download the subscriptions again (all of them, or the given ones): new servers appear, changed ones are updated, servers
-that vanished from the list are removed.
+that vanished from the list are removed. New servers join the group the subscription's proxies are already in. When the
+proxy in use changed, Xray is restarted with its new settings.
 .TP
-.B proxy remove \fINAME\fR...   proxy edit \fINAME\fR \fIKEY=VALUE\fR...
-Delete proxies, or change \fBname\fR, \fBgroup\fR, \fBnotes\fR or \fBfavorite\fR.
+.B proxy remove \fINAME\fR... | \fB\-\-group\fR \fIGROUP\fR | \fB\-\-all\fR
+Delete the named proxies, every proxy of a group, or all of them. Removing the proxy in use switches the proxy off.
 .TP
-.B proxy use \fINAME\fR
-Choose the proxy to use.
+.B proxy edit \fINAME\fR \fIKEY=VALUE\fR...
+Change \fBname\fR, \fBgroup\fR, \fBnotes\fR or \fBfavorite\fR.
+.TP
+.B proxy use \fINAME\fR   proxy use \-\-fastest \fR[\fB\-\-group\fR \fIGROUP\fR]
+Choose the proxy to use, or the one whose server answers quickest: of \fIGROUP\fR, else of the favourites (when there
+are any), else of all.
+.TP
+.B proxy failover \fR[\fBon\fR|\fBoff\fR]
+Show or set \fBproxy.failover\fR: while the proxy runs (proxy only, VPN then proxy) VPNMan checks its server every 20
+seconds; after three failed checks in a row, or when Xray stops three times within two minutes, it switches to the next
+favourite proxy that answers (in name order, starting after the current one), else to the next proxy of the same group,
+else to any other. Not used in the proxy\-then\-VPN path (the VPN's own reconnect handles that). \fBproxy status\fR shows
+the last switch.
 .TP
 .B proxy on   proxy off
 Switch the proxy on or off.
@@ -256,16 +311,19 @@ How the proxy and the VPN are combined (see PROXIES).
 .B proxy mode local\fR|\fBsystem
 A proxy for applications, or all TCP and DNS of this computer (Linux).
 .TP
-.B proxy set \fIKEY\fR \fIVALUE
-\fBsocks_port\fR, \fBhttp_port\fR, \fBdns\fR, \fBudp\fR (\fBblock\fR or \fBdirect\fR), \fBorder\fR, \fBmode\fR.
+.B proxy set \fR[\fIKEY\fR \fIVALUE\fR]
+\fBsocks_port\fR, \fBhttp_port\fR, \fBdns\fR, \fBudp\fR (\fBblock\fR or \fBdirect\fR), \fBorder\fR, \fBmode\fR. Without
+arguments it prints their current values.
 .TP
-.B proxy status \fR[\fB\-\-json\fR]   \fBproxy ping \fR[\fINAME\fR...]
-Show whether it runs, with the addresses of the local proxies; or measure the connect time to the proxy servers.
+.B proxy status \fR[\fB\-\-json\fR]   \fBproxy ping \fR[\fINAME\fR...] [\fB\-\-json\fR]
+Show whether it runs, with the addresses of the local proxies and the settings; or measure the connect time to the proxy
+servers (16 at a time).
 .RE
 .TP
-.B networks \fR[\fIshow\fR|\fItrust\fR|\fIuntrust\fR] [\fINAME\fR]
-Show the current network and the trusted ones, or mark one as trusted (the current one when no \fINAME\fR is
-given). See
+.B networks \fR[\fIshow\fR|\fItrust\fR|\fIuntrust\fR|\fIrule\fR] [\fINAME\fR] [\fB\-\-server\fR \fIPROFILE\fR] [\fB\-\-netproxy\fR \fBon\fR|\fBoff\fR] [\fB\-\-xray\fR \fIPROXY\fR|\fBoff\fR] [\fB\-\-clear\fR]
+Show the current network, the trusted ones and the rules, or mark one as trusted (the current one when no \fINAME\fR is
+given). \fBrule\fR sets what happens when you join a network: connect to a server, turn the network proxy on or off,
+and/or use (or turn off) an Xray proxy; \fB\-\-clear\fR removes the rule. See
 .BR "TRUSTED NETWORKS" .
 .TP
 .B schedule \fR[\fIlist\fR|\fIadd\fR|\fIremove\fR|\fIenable\fR|\fIdisable\fR|\fIon\fR|\fIoff\fR] [\fIID\fR|\fINAME\fR] [options]
@@ -305,8 +363,16 @@ separated. See
 Ask GitHub for the newest VPNMan release and compare it with the installed one. Runs as you (not through the
 daemon); nothing is downloaded or installed. Exit status 10 means a newer version exists.
 .TP
-.B protocols
-List every supported protocol, whether its programs are installed, and what to install if not.
+.B protocols \fR[\fB\-\-json\fR]
+List every supported protocol, whether its programs are installed, and what to install if not; then the helper programs
+\fBstunnel\fR (OpenVPN over TLS) and \fBxray\fR (proxies).
+.TP
+.B diagnostics \fR[\fB\-o\fR|\fB\-\-output\fR \fIFILE\fR] [\fB\-\-force\fR]
+Print, or save to \fIFILE\fR, a report for bug reports: versions, system and desktop, the tools found and their versions,
+state, profiles (protocol, port and flags only), settings, the firewall tables present and the last 300 log lines.
+Passwords and other secrets are blanked, and user names, profile, proxy and server names, network names, share links, e\-mail
+addresses and public IP addresses (shown as 8.8.x.x) are removed; local addresses stay. The app has \fBSave Diagnostics\fR
+in its main menu. Read the report before you share it.
 .TP
 .B doctor \fR[\fB\-\-fix\fR]
 Report distribution, init system, daemon, firewall, the launcher and icons, tray support and available protocols.
@@ -353,12 +419,19 @@ seconds while the page is open, with a filter box and switches for listening soc
 \fBPop out\fR button opens the same table in a window of its own with a \fBPause\fR button for reading it; right\-click a
 row to \fBcopy\fR its remote or local address, the application or the whole row, to \fBforce\-close\fR the connection, to
 \fBstop\fR or \fBforce\-kill\fR the application (only your own programs) and to \fBblock\fR the remote address, the address
-and port, the remote or local port, or the application; \fBBlocked connections\fR below the table opens the window where
-the blocks are added, switched off and removed); recent connections; DNS servers; start at boot. The server drop\-down follows profile changes immediately.
+and port, the remote or local port, or the application, each for good, for 15 minutes, an hour, a day or until the
+computer restarts; \fBExport\fR copies the rows shown as CSV or saves them to a file; \fBBlocked connections\fR below the
+table opens the window where the blocks are added (with how long they last), switched off and removed); recent connections; DNS servers; the \fBNetwork Proxy\fR switch (see
+.BR "NETWORK PROXY" );
+start at boot. The server drop\-down follows profile changes immediately.
 .TP
 .B Servers
 Two sub\-tabs. \fBVPN Servers\fR: all profiles, with a search box on top, grouped by group name and sorted by favourites, name or latency (\fBTest
 Latency\fR, or automatically every 5/15/30 minutes while the tab is open), and favourite and block buttons.
+Each server's button follows the connection: \fBConnected\fR (greyed out, with a green dot) on the server in use,
+\fBConnecting…\fR while it starts, and \fBConnect\fR on the others \- clicking another server switches to it (the old tunnel
+is shut down completely first) without leaving the list. While a disconnect is under way the buttons, and the
+Connection page's button, show \fBDisconnecting…\fR and cannot be clicked.
 Select several servers with Ctrl+click, Shift+click or Ctrl+A and remove or \fBEdit\fR them together (Delete key,
 or the selection bar). The \fBEdit\fR button next to a group's name renames the group and edits all its servers
 at once; the same dialog, opened from the selection bar, edits just the selected servers. In it you can set the group,
@@ -368,10 +441,12 @@ hand; editing a profile also sets its failover servers.
 .RS
 .PP
 \fBProxy\fR: the proxies (add share links, load a file, or give a subscription address; \fBRefresh Subscriptions\fR
-re\-downloads them), a check box to choose the one in use, latency, multi\-select with Ctrl+click, Shift+click or Ctrl+A to remove several proxies
+re\-downloads them; \fBUse Fastest\fR picks the quickest server), a check box to choose the one in use, latency,
+\fBShare\fR (the share link as a QR code and as text, with a copy button), multi\-select with Ctrl+click, Shift+click or Ctrl+A to remove several proxies
 at once (Delete key, or the selection bar), and above the list the controls: \fBUse the
 proxy\fR (with its live state), \fBPath of your traffic\fR (proxy only, VPN then proxy, proxy then VPN), \fBMode\fR (local proxy or
-system\-wide), the local addresses with copy buttons, and the ports, DNS server and UDP behaviour.
+system\-wide), the local addresses with copy buttons, \fBFail over to another proxy\fR, and the ports, DNS server and UDP
+behaviour. A failover is announced with a notification.
 .RE
 .TP
 .B Network Lock
@@ -389,12 +464,16 @@ The daemon's log, live.
 .PP
 The main menu holds \fBPreferences\fR, \fBExport Backup\fR / \fBRestore Backup\fR, \fBTest connection\fR,
 \fBCheck for Updates\fR, \fBAbout\fR and \fBQuit\fR. Preferences cover reliability (reconnect, retries, failover,
-timeouts), extra OpenVPN arguments, DNS and the connection checks, trusted networks, and interface options:
+timeouts, reconnecting when the network changes), extra OpenVPN arguments, the \fBNetwork Proxy\fR (a switch, \fBBlock traffic if the proxy fails\fR, a \fBTest\fR button, the HTTP, HTTPS and FTP proxies and the SOCKS host,
+each with a URL and a port, the ignored hosts, the programs that skip the proxy, and \fBCopy from the desktop
+settings\fR, which fills them in from GNOME, Cinnamon or KDE Plasma), DNS and the connection checks, trusted networks, and interface options:
 notifications, running in the background (tray), automatic latency tests and the daily update check (off by
 default).
 .PP
 A rejected login opens a prompt for the username and password and reconnects. Closing the window keeps the
-application in the system tray when a tray is available (\fBrun in background\fR); \fBQuit\fR ends it. The GUI
+application in the system tray when a tray is available (\fBrun in background\fR); \fBQuit\fR ends it. The tray menu
+connects and disconnects, offers the server last used and your favourites (\fBConnect to\fR / \fBSwitch to\fR, up to six, blocked
+servers left out), switches the kill switch, and, once a proxy is chosen, switches the proxy on or off. The GUI
 holds no privileges; everything it does goes through the daemon.
 .PP
 All pop\-up windows and dialogs (the connection table window, blocked connections, profile and group editors, preferences, ...)
@@ -500,6 +579,16 @@ hardware address of the gateway. Mark networks you do not need the VPN on (home,
 Then, with \fBnetwork.untrusted_action\fR set to \fBconnect\fR, VPNMan connects as soon as you join any network that is
 not trusted (to \fBnetwork.profile\fR: \fBlast\fR, \fBfastest\fR or a profile), and with \fBnetwork.trusted_action\fR set to
 \fBdisconnect\fR it disconnects again on a trusted one \(em only if it was the one that connected automatically.
+.PP
+\fBPer\-network rules\fR (\fBvpnman networks rule\fR, or Preferences \(-> Networks \(-> Rules for This Network) say what to do
+when you join one particular network: connect to a chosen server, turn the network proxy on or off, and/or switch to an
+Xray proxy (or turn it off). A rule's server wins over \fBnetwork.untrusted_action\fR; trusted networks have no rules; on
+the first look at boot the boot\-time auto\-connect decides. Rules are kept in \fBnetwork.rules\fR.
+.PP
+\fBReconnecting.\fR While connected (or connecting), VPNMan reconnects at once \(em instead of waiting for the VPN program
+to notice \(em when the default gateway or device changes (Wi\-Fi \(<-> Ethernet, another access point's network) and when the
+computer wakes up from suspend (it waits up to 40 seconds for a network first). At most once every 15 seconds; turn it
+off with \fBconnection.reconnect_on_change\fR.
 .SH SSL TUNNEL (STUNNEL)
 OpenVPN over TCP can be wrapped in TLS so that it looks like ordinary HTTPS (useful behind restrictive firewalls).
 VPNMan runs \fBstunnel\fR in client mode on a local port and points OpenVPN at it. Enable it with
@@ -528,10 +617,43 @@ Needs cgroup v2 (the same layout as the app bypass); without it addresses and po
 .PP
 Blocking also \fBcloses the matching connections that are open right now\fR (with \fBss \-K\fR, which needs a kernel built
 with CONFIG_INET_DIAG_DESTROY), because dropped packets alone would let an established TCP connection hang on for minutes.
-Every entry can be switched off without deleting it. Blocking needs Linux with nftables; it is not available on the BSDs.
+Every entry can be switched off without deleting it, and can be temporary: it ends after a set time or when the
+computer restarts (recognised by the kernel's boot id), checked every few seconds and when the daemon starts.
+Blocking needs Linux with nftables; it is not available on the BSDs.
 .PP
 The GUI offers the same from the right\-click menu of the connection table and from the \fBBlocked connections\fR window.
 Blocks apply to everybody on the computer. \fBvpnman cleanup\fR and uninstalling remove the table and the cgroup.
+.SH NETWORK PROXY
+A plain proxy server (HTTP CONNECT or SOCKS5) that \fBall of this computer's traffic\fR goes through \- set in
+Preferences \(-> Connection, with \fBvpnman netproxy\fR, or switched on and off on the Connection page. With no VPN
+connected, programs reach the internet through the proxy; while a VPN is connected, traffic goes through the VPN to the
+proxy (you \(-> VPN \(-> proxy \(-> internet), so websites see the proxy's address. Programs need no proxy settings of
+their own.
+.PP
+It works like the system\-wide proxy mode: the nftables table \fIinet vpnman_proxy\fR redirects every TCP connection and
+DNS query to Xray, which passes it on to the proxy for its destination port \- \fB80\fR to the HTTP proxy, \fB443\fR to
+the HTTPS proxy, \fB21\fR to the FTP proxy, anything else to the SOCKS host (else the HTTPS, HTTP or FTP proxy). DNS is
+asked over TCP through the proxy (an HTTP proxy cannot carry UDP) to \fBnetproxy.dns\fR. Other UDP is dropped unless
+\fBnetproxy.udp\fR is \fBdirect\fR, and IPv6 is dropped (except to ignored IPv6 networks).
+.PP
+\fBIgnored hosts\fR (addresses, networks such as 10.0.0.0/8, and domains: example.com or *.example.com, which include
+their sub\-domains) and the \fBprograms that skip the proxy\fR (kept in the cgroup \fIvpnman\-noproxy\fR; needs cgroup
+v2) go direct, as do the local network when the kill switch allows it, the VPN server and the app bypass. The kill switch
+lets the proxy servers through. A program listed in several places is handled in this order: blocked, app bypass, skip
+the proxy.
+.PP
+\fBKill switch.\fR With \fBnetproxy.killswitch\fR (the default) a proxy that cannot work \(em Xray stopped or restarting, an
+address that does not resolve, no \fBxray\fR program \(em never leaves the network open: the redirect is replaced, in one
+step, by rules that drop everything except loopback, the ignored hosts, the local network (when the kill switch allows
+it), the programs that skip the proxy and DHCP, until the proxy works again. \fBvpnman netproxy\fR and the app say
+when this is happening. Turn it off to let traffic out directly instead. Switching the network proxy off removes the rules.
+.PP
+The connection test (\fBvpnman leaktest\fR, the app's \fBTest connection\fR and the \fBTest\fR button next to the proxy
+settings) checks the network proxy too: that it runs, which address websites see (the proxy server's own, a Cloudflare
+address, or where the server sends traffic out), that name lookups work through it and that IPv6 does not get out around it.
+.PP
+While the network proxy is on, the Xray proxy (\fBvpnman proxy\fR) is paused. Proxy passwords are kept in the settings
+file (readable by root only) and are never shown to the front ends. Needs Linux with nftables, and Xray.
 .SH PROXIES (XRAY)
 VPNMan can use VLESS, VMess, Trojan and Shadowsocks servers (including Reality, WebSocket, gRPC, HTTPUpgrade, XHTTP,
 mKCP and HTTP/2 transports) through \fBXray\fR (https://github.com/XTLS/Xray\-core), a single self\-contained program
@@ -703,6 +825,9 @@ Fail over to another server, and prefer servers of the same group.
 .B connection.timeout \fR(60)
 Seconds to wait for a tunnel to come up.
 .TP
+.B connection.reconnect_on_change \fR(true)
+Reconnect at once when the computer wakes up or the network (gateway) changes.
+.TP
 .B connection.openvpn_args \fR(empty)
 Extra raw arguments appended to the OpenVPN command line.
 .PP
@@ -747,7 +872,8 @@ Enforce the list of blocked connections.
 .TP
 .B blocks.entries \fR(empty)
 The list itself (managed with \fBvpnman blocks\fR and the Blocked connections window): each entry has an id, a kind,
-a value, a protocol, a note, an enabled flag and the time it was added.
+a value, a protocol, a note, an enabled flag, the time it was added, and for temporary entries \fBexpires\fR (a Unix
+time; 0 means never) and \fBboot\fR (the boot id it was made in; empty means it survives restarts).
 .PP
 .B proxy
 .TP
@@ -771,6 +897,31 @@ System\-wide mode: the resolver that answers redirected DNS queries (asked throu
 .TP
 .B proxy.udp \fR(block)
 System\-wide mode: \fBblock\fR drops UDP other than DNS; \fBdirect\fR lets it bypass the proxy.
+.TP
+.B netproxy.enabled \fR(false)
+Send all traffic through the network proxy (see NETWORK PROXY).
+.TP
+.B netproxy.http\fR, \fBnetproxy.https\fR, \fBnetproxy.ftp\fR, \fBnetproxy.socks
+Each {host, port, user, password}; an empty host means not set. Default ports 8080, 0, 0, 0.
+.TP
+.B netproxy.ignore \fR(localhost, 127.0.0.0/8, ::1)
+Hosts that go direct.
+.TP
+.B netproxy.apps \fR(empty)
+Programs that go direct.
+.TP
+.B netproxy.dns \fR(1.1.1.1), \fBnetproxy.udp \fR(block)
+The DNS server asked through the proxy; what happens to other UDP.
+.TP
+.B netproxy.killswitch \fR(true)
+While the proxy cannot work (Xray down or restarting, a wrong or unresolvable address) block all traffic instead of
+letting it out directly (see NETWORK PROXY).
+.TP
+.B network.rules \fR(empty)
+Per\-network rules, each {network, server, netproxy, xray} (see TRUSTED NETWORKS).
+.TP
+.B proxy.failover \fR(false)
+Switch to another proxy when the server stops answering (see \fBvpnman proxy failover\fR).
 .PP
 .B events
 .TP
@@ -791,6 +942,9 @@ The address asked for the public IP (the lookup goes through the tunnel).
 .TP
 .B ui.notifications \fR(true)
 Desktop notifications.
+.TP
+.B ui.group_order \fR(empty)
+Server groups in this order (see \fBvpnman group order\fR).
 .SH EVENT HOOKS
 The commands in \fBevents.pre_connect\fR, \fBevents.connected\fR and \fBevents.disconnected\fR run as root with these
 environment variables set: \fBVPNMAN_EVENT\fR (the hook name), \fBVPNMAN_PROFILE\fR (profile name),
@@ -811,26 +965,29 @@ for a few seconds. The installer adds the user who ran \fBsudo\fR to the \fBvpnm
 .PP
 Stored passwords never leave the daemon: clients only see whether a password exists.
 .SH INSTALLATION
-Install a package (\fB.deb\fR, \fB.rpm\fR, Arch \fB.pkg.tar.xz\fR; recipes for Void, Alpine and OpenBSD are generated
-by \fBpackage.sh\fR), or from the source tarball:
+Install a package (\fB.deb\fR, \fB.rpm\fR, Arch \fB.pkg.tar.xz\fR, Void \fB.xbps\fR; recipes for Alpine and OpenBSD are
+generated by \fBpackage.sh\fR, see \fB./package.sh \-\-help\fR; the packages suggest \fBxray\fR where the distribution
+has it), or from the source tarball:
 .PP
 .nf
 tar xf vpnman-VERSION.tar.gz && cd vpnman-VERSION
-sudo ./install.sh                       # to /usr/local, service enabled for this machine
+sudo ./install.sh                       # to /usr/local, service enabled; asks whether to install Xray
 sudo ./install.sh \-\-prefix /usr         # another prefix (recommended on desktops)
 sudo ./install.sh \-\-install\-deps        # also install dependencies with the native package manager (and Xray)
-sudo ./install.sh \-\-xray\-only           # only download and install Xray, the engine of "vpnman proxy"
+sudo ./install.sh \-\-xray\-only           # only download and install Xray (proxies, Network Proxy)
 \&./install.sh \-\-check                   # only report what is missing
 .fi
 .PP
 \fBinstall.sh\fR options: \fB\-\-prefix DIR\fR; \fB\-\-init SYSTEM\fR (\fIauto\fR, \fIsystemd\fR, \fIsysv\fR, \fIopenrc\fR,
 \fIrunit\fR, \fIopenbsd\fR, \fIfreebsd\fR, \fIall\-linux\fR, \fInone\fR); \fB\-\-no\-post\fR (do not create the group, touch
-caches or enable the service); \fB\-\-no\-system\-links\fR; \fB\-\-install\-deps\fR; \fB\-\-install\-xray\fR; \fB\-\-xray\-only\fR; \fB\-\-check\fR; \fB\-\-uninstall\fR and
+caches or enable the service); \fB\-\-no\-system\-links\fR; \fB\-\-install\-deps\fR; \fB\-\-install\-xray\fR; \fB\-\-xray\-only\fR; \fB\-\-no\-xray\fR; \fB\-\-check\fR; \fB\-\-uninstall\fR and
 \fB\-\-purge\fR. \fB\-\-install\-xray\fR downloads the official Xray release for this machine (Linux, FreeBSD or OpenBSD; it needs curl or
 wget), verifies it against the checksum published next to it (a mismatch aborts, a missing checksum file only warns) and installs the
 single program as \fIPREFIX\fR/bin/xray, replacing an older copy. Xray needs no service of its own, so this works on any init
 system. \fB\-\-xray\-only\fR does just that (as a normal user if \fIPREFIX\fR/bin is writable); \fB\-\-install\-deps\fR does it
-when Xray is missing. \fB\-\-uninstall\fR removes an Xray that this installer put there and leaves any other copy alone.
+when Xray is missing. When Xray is missing, an install run from a terminal \fBasks\fR whether to install it (Enter or
+\fBy\fR installs it); it never asks with \fB\-\-no\-xray\fR, \fB\-\-no\-post\fR (package builds) or without a terminal
+(scripts, \fIcurl | sh\fR). \fB\-\-uninstall\fR removes an Xray that this installer put there and leaves any other copy alone.
 With \fBDESTDIR\fR set it stages files for packaging. It supports apt, dnf, pacman, xbps, apk, zypper,
 pkg_add and pkg for dependencies, installs wrapper scripts that choose a Python interpreter that really has
 PyGObject (so desktop launchers work even when another Python comes first in \fBPATH\fR), copies the launcher and

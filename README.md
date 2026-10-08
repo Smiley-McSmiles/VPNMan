@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.7-blue.svg?style=flat-square" alt="Version 1.0.7"></a>
+  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.8-blue.svg?style=flat-square" alt="Version 1.0.8"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
   <a href="https://gtk.org"><img src="https://img.shields.io/badge/toolkit-GTK4%20%7C%20Libadwaita-red.svg?style=flat-square" alt="GTK4 Libadwaita"></a>
@@ -102,6 +102,66 @@ in **Servers → Proxy** (or `vpnman proxy add ...`), choose one, and pick how i
 the computer into Xray with nftables (IPv6 and other UDP are blocked so nothing goes around it). The kill switch is aware
 of the proxy server. See `man vpnman` (PROXIES) for the details and limits.
 
+### Network proxy
+
+Preferences → Connection → **Network Proxy** (or `vpnman netproxy`, and a switch on the Connection page) sends **all of
+this computer's traffic** through an ordinary HTTP or SOCKS5 proxy, the way GNOME's proxy settings look - HTTP, HTTPS
+and FTP proxy, SOCKS host, ignored hosts - but enforced for every program, not only the ones that read those settings:
+
+* no VPN connected: you → proxy → internet
+* VPN connected: you → VPN → proxy → internet (websites see the proxy)
+
+Port 80 goes to the HTTP proxy, 443 to the HTTPS proxy, 21 to the FTP proxy, everything else to the SOCKS host; DNS is
+asked over TCP through the proxy. Ignored hosts (addresses, networks, `*.example.com`) and a list of programs go
+direct. **Copy from the desktop settings** fills it in from GNOME, Cinnamon or KDE Plasma. Linux (nftables) and Xray.
+
+**Kill switch:** if the proxy cannot work (Xray down or restarting, an address that does not resolve), traffic is
+*blocked* until it does instead of going out directly (`vpnman netproxy killswitch off` to change that). The connection
+test checks the proxy too: which address websites see, DNS and IPv6.
+
+```sh
+vpnman netproxy set http proxy.example.com:3128
+vpnman netproxy set https proxy.example.com:3128
+vpnman netproxy ignore localhost 127.0.0.0/8 ::1 '*.corp.example'
+vpnman netproxy on
+```
+
+#### Installing Xray
+
+An interactive `sudo ./install.sh` asks whether to install Xray when it is missing (`--no-xray` skips the question;
+it is never asked for package builds or without a terminal). `sudo ./install.sh --xray-only` does only that: it
+downloads the official Xray release for your machine, checks its checksum and installs it as `/usr/local/bin/xray`. It works with any init system (systemd, runit, OpenRC, s6, BSD rc), because Xray needs no
+service: VPNMan starts it. The same steps as a standalone script, if you don't want to download VPNMan first (needs
+`bash`, `curl`, `unzip` and `sha256sum`; Linux):
+
+```bash
+#!/usr/bin/env bash
+# Install the latest Xray release as /usr/local/bin/xray (checksum verified). Run as root.
+set -euo pipefail
+case "$(uname -m)" in
+    x86_64|amd64) arch=64 ;;          i?86) arch=32 ;;
+    aarch64|arm64) arch=arm64-v8a ;;  armv7*|armv8l) arch=arm32-v7a ;;
+    armv6*) arch=arm32-v6 ;;          riscv64) arch=riscv64 ;;
+    ppc64le) arch=ppc64le ;;          s390x) arch=s390x ;;
+    loongarch64) arch=loong64 ;;
+    *) echo "no Xray build for $(uname -m)" >&2; exit 1 ;;
+esac
+base=https://github.com/XTLS/Xray-core/releases/latest/download
+asset=Xray-linux-$arch.zip
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+curl -fsSL -o "$tmp/$asset" "$base/$asset"
+curl -fsSL -o "$tmp/$asset.dgst" "$base/$asset.dgst"
+want=$(grep -i '256' "$tmp/$asset.dgst" | grep -oiE '[0-9a-f]{64}' | head -n 1)
+have=$(sha256sum "$tmp/$asset" | cut -d' ' -f1)
+if [ -z "$want" ] || [ "${want,,}" != "$have" ]; then echo "checksum mismatch - not installing" >&2; exit 1; fi
+unzip -q "$tmp/$asset" xray -d "$tmp"
+install -m 755 "$tmp/xray" /usr/local/bin/xray
+xray version | head -n 1
+```
+
+To remove it again: `sudo rm /usr/local/bin/xray` (`./install.sh --uninstall` removes Xray only if `install.sh`
+installed it).
+
 ## Feature set
 
 | Feature | Status |
@@ -123,8 +183,10 @@ of the proxy server. See `man vpnman` (PROXIES) for the details and limits.
 | Import notes: options in a config that do not work here (Windows-only options, missing `up`/`down` scripts) are listed when you import it | ✔ |
 | Update check: *Check for Updates…* in the menu, `vpnman update`, or once a day if you switch it on in Preferences | ✔ |
 | **Proxies through Xray** (VLESS, VMess, Trojan, Shadowsocks; Reality, WebSocket, gRPC, ...): share links, files and subscription URLs; a local SOCKS5/HTTP proxy or system-wide (Linux); proxy only, **VPN → proxy** or **proxy → VPN** (`vpnman proxy`, Servers → Proxy) | ✔ (needs `xray`) |
+| **Network proxy**: all traffic through an HTTP / SOCKS5 proxy, with or without the VPN (after it); per-port HTTP / HTTPS / FTP / SOCKS proxies, ignored hosts, programs that skip it (`vpnman netproxy`, Preferences → Connection) | ✔ (Linux, needs `xray`) |
+| Proxy extras: **Use Fastest**, **failover** to the next favourite proxy when the server stops answering, **Share** a proxy as a link or QR code (`vpnman proxy use --fastest`, `proxy failover on`, `proxy link NAME --qr`); the connection test checks the proxy too | ✔ |
 | **Live connection table**: every connection with its application, port, protocol and direction (Connection page, `vpnman connections`) | ✔ (Linux; FreeBSD) |
-| **Blocked connections**: right-click a connection to copy it, force-close it, stop its program or block its address / port / program; a *Pop out* window for the live table; a window to manage the blocks (`vpnman blocks`) | ✔ (Linux, nftables) |
+| **Blocked connections**: right-click a connection to copy it, force-close it, stop its program or block its address / port / program; a *Pop out* window for the live table; a window to manage the blocks (`vpnman blocks`); blocks can be **temporary** (15 min, 1 h, 1 day, until restart; `--for 2h`, `--until-reboot`); **export** the table as CSV (`vpnman connections --csv`) | ✔ (Linux, nftables) |
 | Edit a whole group or a selection at once (group, login, SSL tunnel server) | ✔ |
 | Backup and restore of all profiles and proxies (with credentials) and settings | ✔ |
 | Shell completions for bash, zsh and fish (profile names included) | ✔ |
@@ -136,7 +198,10 @@ of the proxy server. See `man vpnman` (PROXIES) for the details and limits.
 | Credentials per profile (stored root-only) | ✔ |
 | Desktop notifications | ✔ |
 | Auto-connect at system start (daemon-side: waits for the network, keeps retrying; `last` / `fastest` / a profile) | ✔ |
-| System tray (StatusNotifierItem): status icon, Connect/Disconnect, Network Lock toggle, Show, Quit | ✔ |
+| System tray (StatusNotifierItem): status icon, Connect/Disconnect, quick-connect to the last server and favourites, Network Lock toggle, Proxy on/off, Show, Quit | ✔ |
+| **Reconnects at once** when the computer wakes up or the network changes; **per-network rules** (connect to this server / turn the network proxy on or off on this Wi-Fi) (`vpnman networks rule`) | ✔ |
+| **Group order and folding** in the server list (▲ ▼ ▾ in a group's heading, `vpnman group order`) | ✔ |
+| **Diagnostics report** for bug reports with passwords, names and public addresses removed (`vpnman diagnostics`, main menu → Save Diagnostics) | ✔ |
 | Start the tray app at login (XDG autostart; GNOME, KDE, XFCE, …) | ✔ |
 | Proxy / Tor / SSH / SSL tunnels as transports | ✘ |
 
@@ -225,8 +290,9 @@ install without reinstalling.
 ```sh
 sh install.sh --check              # no root needed: report what is missing on this machine (Python, GTK/libadwaita, VPN tools, firewall, init)
 sudo sh install.sh --install-deps  # optional: pulls dependencies via apt/dnf/pacman/xbps/apk/zypper/pkg_add/pkg
-sudo sh install.sh --xray-only     # optional: downloads Xray (checksum verified) for `vpnman proxy`; no service, any init system
+sudo sh install.sh --xray-only     # optional: downloads Xray (checksum verified) for the proxies; no service, any init system
 sudo sh install.sh                 # installs to /usr/local, sets up + starts the service for your init system
+                                   # (asks whether to install Xray when it is missing; --no-xray to skip)
                                    # (no sudo? use `doas sh install.sh` or `su -c 'sh install.sh'`)
 sudo ./install.sh --prefix /usr --uninstall [--purge]
 ```
@@ -247,9 +313,10 @@ Service control later: `sudo vpnman service enable|disable|start|stop|restart|st
 ### Packages
 
 ```sh
-./package.sh                   # everything this machine can build; a missing tool only skips that target
-./package.sh arch deb          # or pick targets: tar deb rpm arch void alpine openbsd recipes clean
-./package.sh --container rpm   # build the .rpm inside a Fedora container (podman/docker) from ANY distro
+./package.sh                     # everything this machine can build (--all); a missing tool only skips that target
+./package.sh --arch --deb        # or pick: --tar --deb --rpm --arch --void --alpine --openbsd --recipes --clean
+./package.sh --container --rpm   # build the .rpm inside a Fedora container (podman/docker) from ANY distro
+./package.sh --help              # the same options as GPGMan's package.sh (plain names like "deb" work too)
 ```
 
 | Target | Needs | Notes |
@@ -261,11 +328,15 @@ Service control later: `sudo vpnman service enable|disable|start|stop|restart|st
 | `void` | `xbps-create` (Void) | otherwise the template is written to `dist/recipes/void/` |
 | `alpine`, `openbsd` | - | recipes only (`APKBUILD`, port skeleton) in `dist/recipes/` |
 
-With no argument, `package.sh` builds every target it can and ends with a summary of what was built, skipped and failed.
+With no argument, `package.sh` builds every target it can and ends with a summary of what was built, skipped and failed,
+and every run writes `dist/SHA256SUMS` for this version's packages. The packages suggest `xray` (Arch `optdepends`,
+deb/rpm `Suggests`). There is no Flatpak or AppImage on purpose: VPNMan's root service, firewall rules and routing
+cannot run from a sandbox or a self-mounting image, and the tarball with `install.sh` already works on any
+distribution and init system.
 
 GitHub Actions (`.github/workflows`): CI runs the tests and builds every package on each push/PR; pushing a tag
-`vX.Y.Z` (which must match the version in the code - checked by `tools/check_version.py`) publishes a release with all
-packages, `SHA256SUMS` and notes taken from the metainfo file.
+`vX.Y.Z` (which must match the version in the code - checked by `tools/check_version.py`) publishes a release with every
+package `package.sh` built, its `SHA256SUMS` and notes taken from the metainfo file.
 
 ## Usage
 

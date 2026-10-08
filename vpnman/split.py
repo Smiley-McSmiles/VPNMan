@@ -11,7 +11,6 @@ The rule generation and process matching are pure functions so they can be teste
 import ipaddress
 import os
 import threading
-import time
 
 from . import platform as plat
 
@@ -25,6 +24,16 @@ SCAN_INTERVAL = 2.0
 
 
 # ----------------------------------------------------------------- rules (pure)
+
+def outranked(cur, mine):
+    """True when a process sits in a VPNMan cgroup that wins over ``mine`` - so two lists that name the same program
+    do not move it back and forth.  Order: blocked, then the app bypass, then "skip the proxy"."""
+    order = ["vpnman-blocked", CGROUP, CGROUP_VPN, "vpnman-noproxy"]
+    base = (cur or "").rstrip("/").rsplit("/", 1)[-1]
+    if base == mine:
+        return True                          # already there
+    return base in order and mine in order and order.index(base) < order.index(mine)
+
 
 def cgroup_name(mode):
     return CGROUP_VPN if mode == "include" else CGROUP
@@ -358,7 +367,7 @@ class SplitTunnel:
         added = []
         for pid in matching_pids(names, self.proc):
             cur = self._cgroup_of(pid)
-            if cur is None or cur.rstrip("/").endswith("/" + cgroup_name(self.mode)):
+            if cur is None or outranked(cur, cgroup_name(self.mode)):
                 continue
             if self._move(pid, path):
                 self.moved.setdefault(pid, cur)

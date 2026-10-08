@@ -10,6 +10,9 @@ kill switch and the proxy rules.  An entry is one of:
 
 Blocking also closes the matching connections that are open right now (``ss -K``), because dropped packets alone
 would let an established TCP connection hang on for minutes.
+
+An entry can be temporary: ``expires`` (a time) and/or ``boot`` (the boot id it was made in - "until restart").  The
+daemon drops such entries once they run out.
 """
 
 import ipaddress
@@ -27,6 +30,8 @@ CGROUP = "vpnman-blocked"
 KINDS = ("address", "endpoint", "port", "app")
 PROTOS = ("any", "tcp", "udp")
 _APP = re.compile(r"^[A-Za-z0-9._+@-]{1,64}$")
+MAX_MINUTES = 366 * 24 * 60
+_DAEMON_TOKEN = "daemon-%s" % uuid.uuid4().hex[:12]       # "until restart" when the kernel has no boot id
 
 
 class BlockError(ValueError):
@@ -86,10 +91,53 @@ def clean(kind, value, proto="any", note=""):
     return {"kind": kind, "value": value, "proto": proto, "note": str(note or "")[:200]}
 
 
-def new_entry(kind, value, proto="any", note=""):
+def boot_id():
+    """Changes with every boot (Linux); a fallback that changes when the daemon restarts."""
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as fh:
+            return fh.read().strip() or _DAEMON_TOKEN
+    except OSError:
+        return _DAEMON_TOKEN
+
+
+def new_entry(kind, value, proto="any", note="", minutes=0, until_reboot=False):
+    """A validated entry.  ``minutes``: drop it after that long; ``until_reboot``: drop it when the computer restarts."""
     e = clean(kind, value, proto, note)
-    e.update(id=uuid.uuid4().hex[:8], enabled=True, created=int(time.time()))
+    try:
+        minutes = int(minutes or 0)
+    except (TypeError, ValueError):
+        raise BlockError("the duration is not a number of minutes")
+    if not 0 <= minutes <= MAX_MINUTES:
+        raise BlockError("the duration must be between 1 minute and a year")
+    now = int(time.time())
+    e.update(id=uuid.uuid4().hex[:8], enabled=True, created=now, expires=now + minutes * 60 if minutes else 0,
+             boot=boot_id() if until_reboot else "")
     return e
+
+
+def expired(e, now=None, boot=None):
+    if e.get("expires") and e["expires"] <= (now or time.time()):
+        return True
+    return bool(e.get("boot")) and e["boot"] != (boot or boot_id())
+
+
+def lifetime(e, now=None):
+    """'permanent', 'until restart', 'for 14 more minutes'... (for lists)."""
+    left = (e.get("expires") or 0) - (now or time.time())
+    parts = []
+    if e.get("expires"):
+        if left < 2 * 3600:
+            m = max(1, round(left / 60))
+            parts.append("%d more minute%s" % (m, "" if m == 1 else "s"))
+        elif left < 2 * 86400:
+            h = round(left / 3600)
+            parts.append("%d more hour%s" % (h, "" if h == 1 else "s"))
+        else:
+            parts.append("%d more days" % round(left / 86400))
+        parts[0] = "for " + parts[0]
+    if e.get("boot"):
+        parts.append("until restart")
+    return " or ".join(parts) if parts else "permanent"
 
 
 # ------------------------------------------------------------------ rules (pure)
@@ -179,12 +227,16 @@ def close_connection(row):
 # ------------------------------------------------------------------ the service
 
 class AppBlocker(split.SplitTunnel):
-    """Keeps the processes of the blocked programs in a cgroup (the nftables rule drops that cgroup's packets)."""
+    """Keeps the processes of the blocked programs in a cgroup (the nftables rule drops that cgroup's packets).
+    Subclasses keep other lists of programs in cgroups of their own (``cgroup``)."""
+    cgroup = CGROUP
+    thread_name = "block-scan"
+    label = "Blocked programs"
 
     @property
     def path(self):
         root = self.root or split.cgroup_root()
-        return os.path.join(root, CGROUP) if root else None
+        return os.path.join(root, self.cgroup) if root else None
 
     def begin(self):
         with self._lock:
@@ -192,7 +244,7 @@ class AppBlocker(split.SplitTunnel):
             os.makedirs(self.path, exist_ok=True)
             self.active = True
             self._stop = threading.Event()
-            self._thread = threading.Thread(target=self._loop, args=(self._stop,), daemon=True, name="block-scan")
+            self._thread = threading.Thread(target=self._loop, args=(self._stop,), daemon=True, name=self.thread_name)
             self._thread.start()
 
     def stop_locked(self):
@@ -217,7 +269,7 @@ class AppBlocker(split.SplitTunnel):
         added = []
         for pid in split.matching_pids(self.names_fn(), self.proc):
             cur = self._cgroup_of(pid)
-            if cur is None or cur.rstrip("/").endswith("/" + CGROUP):
+            if cur is None or split.outranked(cur, self.cgroup):
                 continue
             if self._move(pid, path):
                 self.moved.setdefault(pid, cur)
@@ -229,12 +281,15 @@ class AppBlocker(split.SplitTunnel):
             try:
                 self.scan_once()
             except Exception as e:  # noqa: BLE001
-                self.log("warn", "Blocked programs: scan failed: %s" % e)
+                self.log("warn", "%s: scan failed: %s" % (self.label, e))
             stop.wait(split.SCAN_INTERVAL)
 
 
+NOPROXY_CGROUP = "vpnman-noproxy"      # programs that skip the network proxy (see proxysvc.ProxyExempt)
+
+
 def cleanup():
-    """Remove the firewall table and the cgroup left by a crashed daemon.  Returns True if something was removed."""
+    """Remove the firewall table and the cgroups left by a crashed daemon.  Returns True if something was removed."""
     removed = False
     nft = plat.which("nft")
     if nft and plat.os_family() == "linux":
@@ -243,14 +298,16 @@ def cleanup():
             plat.run([nft, "delete", "table", "inet", NFT_TABLE])
             removed = True
     root = split.cgroup_root()
-    if root and os.path.isdir(os.path.join(root, CGROUP)):
+    for name in (CGROUP, NOPROXY_CGROUP):
+        if not (root and os.path.isdir(os.path.join(root, name))):
+            continue
         try:
-            with open(os.path.join(root, CGROUP, "cgroup.procs")) as fh:
+            with open(os.path.join(root, name, "cgroup.procs")) as fh:
                 pids = fh.read().split()
             for pid in pids:
                 with open(os.path.join(root, "cgroup.procs"), "w") as out:
                     out.write(pid)
-            os.rmdir(os.path.join(root, CGROUP))
+            os.rmdir(os.path.join(root, name))
             removed = True
         except OSError:
             pass
@@ -291,8 +348,8 @@ class BlockService:
     def _app_names(self):
         return [e["value"] for e in self.cfg()["entries"] if e.get("enabled", True) and e["kind"] == "app"]
 
-    def add(self, kind, value, proto="any", note=""):
-        entry = new_entry(kind, value, proto, note)
+    def add(self, kind, value, proto="any", note="", minutes=0, until_reboot=False):
+        entry = new_entry(kind, value, proto, note, minutes, until_reboot)
         with self.lock:
             entries = self.list()
             for e in entries:
@@ -300,7 +357,8 @@ class BlockService:
                     raise BlockError("already blocked: %s" % self.describe(e))
             entries.append(entry)
             self._save(entries)
-        self.m.log.add("info", "Blocked %s" % self.describe(entry))
+        self.m.log.add("info", "Blocked %s%s" % (self.describe(entry), "" if lifetime(entry) == "permanent"
+                                                 else " (%s)" % lifetime(entry)))
         self.sync()
         entry["closed"] = self.close_matching(entry)
         return entry
@@ -330,6 +388,21 @@ class BlockService:
             self.m.log.add("info", "Unblocked %s" % ", ".join(self.describe(e) for e in gone))
         self.sync()
         return {"removed": [e["id"] for e in gone]}
+
+    def expire(self):
+        """Drop the temporary entries that ran out (called at start and every few seconds).  Returns how many."""
+        with self.lock:
+            entries = self.list()
+            if not any(e.get("expires") or e.get("boot") for e in entries):
+                return 0
+            now, boot = time.time(), boot_id()
+            gone = [e for e in entries if expired(e, now, boot)]
+            if not gone:
+                return 0
+            self._save([e for e in entries if e not in gone])
+        self.m.log.add("info", "Block ended: %s" % ", ".join(self.describe(e) for e in gone))
+        self.sync()
+        return len(gone)
 
     def set_enabled(self, flag):
         self._save(enabled=flag)

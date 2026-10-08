@@ -21,6 +21,7 @@ _vpnman() {
         'connect:connect to a profile'
         'connections:live list of connections - which application, port and protocol'
         'daemon:run the daemon in the foreground (root)'
+        'diagnostics:a report for bug reports, with the private parts removed'
         'disconnect:disconnect'
         'dns:choose the DNS servers used while connected'
         'doctor:check the system (icons, daemon, protocols)'
@@ -39,6 +40,7 @@ _vpnman() {
         'logs:show daemon log'
         'ls:list profiles'
         'menu:interactive menu'
+        'netproxy:a proxy server all traffic goes through (after the VPN while one is connected)'
         'networks:show the current network; trust/untrust it'
         'ping:measure latency to profiles'
         'protocols:list supported protocols and whether their tools are installed'
@@ -67,12 +69,13 @@ _vpnman() {
         autostart) _arguments '--login-app[start the tray app at login (this user)]:value:(on off)' ;;
         backup) _arguments '--replace[import: make this computer match the backup (removes other profiles)]' '--settings[import: also restore the settings (always with --replace)]' '--force[export: overwrite an existing file]' '1:action:(export import)' ;;
         block) _arguments '*:profile:_vpnman_profiles' ;;
-        blocks) _arguments '--proto[add: protocol (endpoint and port entries)]:value:(any tcp udp)' '--note[add: a reminder of why]' '--json[print machine-readable JSON instead of text]' '1:action:(list status add remove rm enable disable on off)' ;;
+        blocks) _arguments '--proto[add: protocol (endpoint and port entries)]:value:(any tcp udp)' '--note[add: a reminder of why]' '--for[add: end the block after 30m, 2h, 1d... (minutes when there is no unit)]' '--until-reboot[add: end the block when the computer restarts]' '--json[print machine-readable JSON instead of text]' '1:action:(list status add remove rm enable disable on off)' ;;
         bypass) _arguments '1:action:(list add remove rm available on off mode)' ;;
         cleanup) _arguments '--force[even if the service is running]' ;;
         connect) _arguments '--fastest[measure all servers and use the one with the lowest latency]' '--last[use the last connected profile (the default without a profile)]' '--no-wait[return immediately instead of waiting for the tunnel]' '--timeout[how long to wait (default 90)]' '*:profile:_vpnman_profiles' ;;
-        connections) _arguments '(--listening -l)'{--listening,-l}'[also show sockets that wait for connections]' '--local[also show connections within this computer (loopback)]' '(--resolve -r)'{--resolve,-r}'[show host names instead of addresses where reverse DNS knows them (sends DNS queries)]' '(--watch -w)'{--watch,-w}'[refresh every 2 seconds]' '--json[print machine-readable JSON instead of text]' ;;
+        connections) _arguments '(--listening -l)'{--listening,-l}'[also show sockets that wait for connections]' '--local[also show connections within this computer (loopback)]' '(--resolve -r)'{--resolve,-r}'[show host names instead of addresses where reverse DNS knows them (sends DNS queries)]' '(--watch -w)'{--watch,-w}'[refresh every 2 seconds]' '--csv[print CSV with a header line (for spreadsheets)]' '--json[print machine-readable JSON instead of text]' ;;
         daemon) _arguments '*:: :' ;;
+        diagnostics) _arguments '(-o --output)'{-o,--output}'[write the report to this file (default: standard output)]' '--force[overwrite an existing file]' ;;
         disconnect) _arguments '*:: :' ;;
         dns) _arguments '*:: :' ;;
         doctor) _arguments '--fix[link launcher/icons into /usr/share and rebuild icon caches (root)]' ;;
@@ -81,7 +84,7 @@ _vpnman() {
         failover) _arguments '--clear[remove the list]' '*:profile:_vpnman_profiles' ;;
         fav) _arguments '*:profile:_vpnman_profiles' ;;
         get) _arguments '*:: :' ;;
-        group) _arguments '--ask-password[prompt for a new password for all of them]' '1:action:(list edit)' ;;
+        group) _arguments '--reset[order: back to alphabetical]' '--ask-password[prompt for a new password for all of them]' '1:action:(list edit order)' ;;
         gui) _arguments '--background[start minimised to the system tray]' ;;
         history) _arguments '(-n --lines)'{-n,--lines}'[how many entries to show (default 20)]' '--json[print machine-readable JSON instead of text]' '--clear[delete the history]' ;;
         import) _arguments '--name[profile name (default: the file name; only with a single file)]' '--protocol[skip detection and use this protocol]:value:(openvpn wireguard amneziawg openconnect openfortivpn ikev2 sstp pptp vpnc tailscale netbird zerotier nebula networkmanager custom)' '--user[username to store with the profile]' '--password[password to store (visible in the process list - prefer --ask-password)]' '--ask-password[prompt for the password instead of putting it on the command line]' '--stunnel[carry OpenVPN over TLS via stunnel (default port 443)]' '--stunnel-sni[TLS server name to present (SNI)]' '--stunnel-ca[CA certificate to verify the stunnel server with]' '--stunnel-verify[how to verify the stunnel server]:value:(none system ca)' ;;
@@ -91,10 +94,11 @@ _vpnman() {
         logs) _arguments '(-f --follow)'{-f,--follow}'[keep running and print new lines]' '(-n --lines)'{-n,--lines}'[how many lines to show first (default 50)]' ;;
         ls) _arguments '(--latency -l)'{--latency,-l}'[measure and show the latency of every server]' '--names[one profile name per line (used by shell completion)]' '--sort[sort order (latency implies --latency)]:value:(name latency group)' '--json[print machine-readable JSON instead of text]' ;;
         menu) _arguments '*:: :' ;;
-        networks) _arguments '1:action:(show trust untrust)' ;;
+        netproxy) _arguments '--user[set: user name for a proxy that needs a login]' '--ask-password[set: ask for the proxy'\''s password]' '--json[print machine-readable JSON instead of text]' '1:action:(status on off set clear ignore apps dns udp killswitch)' ;;
+        networks) _arguments '--server[rule: connect to this server when joining the network]' '--netproxy[rule: turn the network proxy on or off when joining it]:value:(on off)' '--xray[rule: use this Xray proxy (or turn it off) when joining it]' '--clear[rule: remove the rule of the network]' '1:action:(show trust untrust rule)' ;;
         ping) _arguments '*:profile:_vpnman_profiles' ;;
-        protocols) _arguments '*:: :' ;;
-        proxy) _arguments '--name[add: name for a single imported proxy]' '--group[add: group to put the imported proxies in (default: the subscription'\''s host)]' '(--latency -l)'{--latency,-l}'[list: measure every server]' '--json[print machine-readable JSON instead of text]' '1:action:(list add remove rm edit use on off order mode set status ping refresh)' ;;
+        protocols) _arguments '--json[print machine-readable JSON instead of text]' ;;
+        proxy) _arguments '--name[add: name for a single imported proxy]' '--group[add: group to put the imported proxies in (default: the subscription'\''s host); list, remove, use --fastest: only this group]' '--all[remove: every proxy]' '--fastest[use: the proxy with the quickest server]' '--qr[link: also print a QR code]' '(--latency -l)'{--latency,-l}'[list: measure every server]' '--json[print machine-readable JSON instead of text]' '1:action:(list show link add remove rm edit use on off order mode set status ping refresh sources failover)' ;;
         remove) _arguments '*:profile:_vpnman_profiles' ;;
         rm) _arguments '*:profile:_vpnman_profiles' ;;
         routes) _arguments '1:action:(list add remove rm)' ;;

@@ -19,15 +19,19 @@ except (ImportError, ValueError) as exc:  # pragma: no cover
 import json
 
 from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof, updates
+from .caps_lock import attach_caps_lock_hint
 from .connpage import ConnectionsGroup
+from .files import choose_files, save_file
 from .keys import close_keys, restore_scroll
 from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .proxypage import ProxyPage
+from .proxyprefs import NetProxyModel, NetworkProxySwitch, ProxyPreferences
 from .tray import HelperTray, Tray, wants_helper
-from ..settings import DNS_PRESETS, DEFAULTS
+from ..settings import DNS_PRESETS
 from ..ipc import Client, DaemonUnavailable, RpcError
 
 ACTIVE = ("connected", "connecting", "reconnecting")
+BUSY = ACTIVE + ("disconnecting",)              # a tunnel exists or is being torn down: the server cannot be changed here
 
 
 def human(n):
@@ -53,47 +57,6 @@ def rpc(method, ok=None, fail=None, **params):
         except (DaemonUnavailable, RpcError) as e:
             GLib.idle_add(fail or (lambda *_: None), str(e), isinstance(e, DaemonUnavailable))
     threading.Thread(target=work, daemon=True).start()
-
-
-def choose_files(parent, title, callback, multiple=True):
-    if hasattr(Gtk, "FileDialog"):
-        dlg = Gtk.FileDialog(title=title)
-
-        def done(d, res):
-            try:
-                if multiple:
-                    model = d.open_multiple_finish(res)
-                    files = [model.get_item(i).get_path() for i in range(model.get_n_items())]
-                else:
-                    files = [d.open_finish(res).get_path()]
-            except GLib.Error:
-                return
-            callback(files)
-        (dlg.open_multiple if multiple else dlg.open)(parent, None, done)
-    else:  # pragma: no cover - GTK < 4.10
-        dlg = Gtk.FileChooserNative(title=title, transient_for=parent, action=Gtk.FileChooserAction.OPEN,
-                                    select_multiple=multiple)
-        dlg.connect("response", lambda d, r: callback([f.get_path() for f in d.get_files()]) if r == Gtk.ResponseType.ACCEPT else None)
-        dlg.show()
-        parent._native = dlg
-
-
-def save_file(parent, title, name, callback):
-    if hasattr(Gtk, "FileDialog"):
-        dlg = Gtk.FileDialog(title=title, initial_name=name)
-
-        def done(d, res):
-            try:
-                callback(d.save_finish(res).get_path())
-            except GLib.Error:
-                return
-        dlg.save(parent, None, done)
-    else:  # pragma: no cover - GTK < 4.10
-        dlg = Gtk.FileChooserNative(title=title, transient_for=parent, action=Gtk.FileChooserAction.SAVE)
-        dlg.set_current_name(name)
-        dlg.connect("response", lambda d, r: callback(d.get_file().get_path()) if r == Gtk.ResponseType.ACCEPT else None)
-        dlg.show()
-        parent._native = dlg
 
 
 class UserConfig:
@@ -151,7 +114,7 @@ def ensure_icons():
 
 
 TRAY_ICONS = {"connected": "connected", "connecting": "connecting", "reconnecting": "connecting",
-              "error": "error", "disconnected": "disconnected"}
+              "disconnecting": "connecting", "error": "error", "disconnected": "disconnected"}
 
 
 class Hero(Gtk.Box):
@@ -275,6 +238,7 @@ class BatchEditDialog(Adw.Window):
         g = Adw.PreferencesGroup(title="Login")
         self.user = Adw.EntryRow(title="Username")
         self.password = Adw.PasswordEntryRow(title="Password")
+        attach_caps_lock_hint(self.password)
         g.add(self.user)
         g.add(self.password)
         page.add(g)
@@ -392,6 +356,7 @@ class ProfileDialog(Adw.Window):
         self.port = Adw.EntryRow(title="Port")
         self.user = Adw.EntryRow(title="Username")
         self.password = Adw.PasswordEntryRow(title="Password" + (" (empty = keep)" if mode == "edit" else ""))
+        attach_caps_lock_hint(self.password)
         self.opts = Adw.EntryRow(title="Options (key=value, comma separated)")
         self.dns = Adw.EntryRow(title="DNS servers (comma separated)")
         self.notes = Adw.EntryRow(title="Notes")
@@ -618,6 +583,7 @@ class CredentialsPrompt(Adw.MessageDialog):
         self.user = Adw.EntryRow(title="Username")
         self.user.set_text(profile.get("username") or "")
         self.password = Adw.PasswordEntryRow(title="Password")
+        attach_caps_lock_hint(self.password)
         group.add(self.user)
         group.add(self.password)
         self.set_extra_child(group)
@@ -702,6 +668,7 @@ class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title=APP_NAME, default_width=900, default_height=700)
         self.set_size_request(360, 480)
+        self.netproxy = NetProxyModel(lambda *a, **kw: rpc(*a, **kw))        # the network proxy (run by the daemon)
         self.status = None
         self.profiles = []
         self.protocols = []
@@ -715,6 +682,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._quiet = False
         self._daemon_ok = True
         self._last_state = None
+        self._pending = None                     # (profile id, deadline): a connect request on its way
+        self._disconnecting = False              # a disconnect request on its way (the daemon may take seconds)
         self._rows = {}
 
         self.toasts = Adw.ToastOverlay()
@@ -737,6 +706,7 @@ class MainWindow(Adw.ApplicationWindow):
         backup_menu.append("Restore Backup…", "win.backup-import")
         main_menu.append_section(None, backup_menu)
         main_menu.append("Check for Updates…", "win.check-updates")
+        main_menu.append("Save Diagnostics…", "win.diagnostics")
         main_menu.append("About VPNMan", "app.about")
         main_menu.append("Quit", "app.quit")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=main_menu,
@@ -765,7 +735,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         for name, cb in (("import", self.on_import), ("add", self.on_add),
                          ("backup-export", self.on_backup_export), ("backup-import", self.on_backup_import),
-                         ("check-updates", self.on_check_updates)):
+                         ("check-updates", self.on_check_updates), ("diagnostics", self.on_diagnostics)):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", cb)
             self.add_action(act)
@@ -782,21 +752,55 @@ class MainWindow(Adw.ApplicationWindow):
             return True
         return False
 
+    def tray_servers(self):
+        """The servers the tray offers to connect to: the last one used, then up to five favourites."""
+        last = (self.status or {}).get("last_profile")
+        by_id = {p["id"]: p for p in self.profiles if not p.get("blacklisted")}
+        out = [by_id[last]] if last in by_id else []
+        out += [p for p in self.profiles if p.get("favorite") and p["id"] in by_id and p["id"] != last][:5]
+        return out
+
     def tray_menu(self):
         st = self.status or {}
         state = st.get("state", "disconnected")
         active = state in ACTIVE
+        leaving = self._disconnecting or state == "disconnecting"
         label = {"connected": "Connected to %s" % st.get("profile"), "connecting": "Connecting…",
-                 "reconnecting": "Reconnecting…", "error": "Connection failed"}.get(state, "Not connected")
+                 "reconnecting": "Reconnecting…", "disconnecting": "Disconnecting…",
+                 "error": "Connection failed"}.get(state, "Not connected")
         locked = (st.get("netlock") or {}).get("engaged")
-        return [
-            {"label": label, "enabled": False},
+        items = [
+            {"label": "Disconnecting…" if leaving else label, "enabled": False},
             {"separator": True},
-            {"label": "Disconnect" if active else "Connect", "enabled": self._daemon_ok,
-             "callback": self.on_main_button},
-            {"label": "Turn Network Lock %s" % ("Off" if locked else "On"), "enabled": self._daemon_ok,
-             "callback": lambda: rpc("netlock.disable" if locked else "netlock.enable",
-                                     lambda *_: self.refresh(), self._fail)},
+            {"label": "Disconnecting…" if leaving else "Disconnect" if active else "Connect",
+             "enabled": self._daemon_ok and not leaving, "callback": self.on_main_button},
+        ]
+        servers = self.tray_servers()
+        if servers:
+            items.append({"separator": True})
+            live = st.get("profile_id") if state in ACTIVE else None
+            last = st.get("last_profile")
+            for p in servers:
+                name = p["name"] if len(p["name"]) <= 38 else p["name"][:37] + "…"
+                if p["id"] == live:
+                    items.append({"label": "✔ %s (%s)" % (name, "connected" if state == "connected" else "connecting"),
+                                  "enabled": False})
+                else:
+                    items.append({"label": "%s %s%s" % ("Switch to" if live else "Connect to", name,
+                                                       "  (last used)" if p["id"] == last else ""),
+                                  "enabled": self._daemon_ok and not leaving,
+                                  "callback": lambda pid=p["id"]: self.connect_to(pid, stay=True)})
+        items += [{"separator": True},
+                  {"label": "Turn Network Lock %s" % ("Off" if locked else "On"), "enabled": self._daemon_ok,
+                   "callback": lambda: rpc("netlock.disable" if locked else "netlock.enable",
+                                           lambda *_: self.refresh(), self._fail)}]
+        px = self.proxy_page.status or {}
+        if px.get("name"):                          # a proxy is chosen: offer to switch it on or off
+            on = bool(px.get("enabled"))
+            items.append({"label": "Turn Proxy Off" if on else "Turn Proxy On (%s)" % px["name"],
+                          "enabled": self._daemon_ok and bool(px.get("installed", True)),
+                          "callback": lambda: rpc("proxy.set", self._on_proxy_status, self._fail, enabled=not on)})
+        return items + [
             {"separator": True},
             {"label": "Show VPNMan", "callback": lambda: self.present()},
             {"label": "Quit", "callback": lambda: self.get_application().quit()},
@@ -808,9 +812,10 @@ class MainWindow(Adw.ApplicationWindow):
         if not tray:
             return
         state = st["state"]
-        key = (state, st["netlock"]["engaged"], st.get("profile"))
+        key = (state, st["netlock"]["engaged"], st.get("profile"), self._disconnecting,
+               tuple(p["id"] for p in self.tray_servers()))
         tip = {"connected": "Connected to %s" % st.get("profile"), "disconnected": "Not connected",
-               "connecting": "Connecting…", "reconnecting": "Reconnecting…",
+               "connecting": "Connecting…", "reconnecting": "Reconnecting…", "disconnecting": "Disconnecting…",
                "error": "Connection failed"}.get(state, state)
         if st["netlock"]["engaged"]:
             tip += " · Network Lock on"
@@ -883,6 +888,13 @@ class MainWindow(Adw.ApplicationWindow):
         self.dns_custom.connect("apply", lambda r: self._save_dns(True, self._parse_ips(r.get_text())))
         dns.add(self.dns_custom)
         groups.append(dns)
+
+        netproxy = Adw.PreferencesGroup(title="Network Proxy",
+                                        description="Send all traffic through a proxy server (after the VPN while one "
+                                                    "is connected). Set the servers in Preferences → Connection.")
+        self.netproxy_switch = NetworkProxySwitch(self.netproxy, fail=lambda msg: self.toast(msg))
+        netproxy.add(self.netproxy_switch.row)
+        groups.append(netproxy)
 
         start = Adw.PreferencesGroup(title="Startup", description="Handled by the background service, so it works "
                                      "right after boot, before anyone logs in. It waits for the network and keeps trying.")
@@ -1004,7 +1016,7 @@ class MainWindow(Adw.ApplicationWindow):
     def _build_vpn_servers(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.search = Gtk.SearchEntry(placeholder_text="Search servers")
-        self.search.connect("search-changed", lambda *_: self.listbox.invalidate_filter())
+        self.search.connect("search-changed", lambda *_: (self._apply_collapse(), self.listbox.invalidate_headers()))
         top = Gtk.Box(spacing=6)
         self.search.set_hexpand(True)
         self.sort_modes = [("favourites", "Favourites first"), ("name", "Name"), ("latency", "Fastest first")]
@@ -1086,6 +1098,8 @@ class MainWindow(Adw.ApplicationWindow):
         return box
 
     def _filter(self, row):
+        if getattr(row, "folded", False):
+            return False
         q = self.search.get_text().lower()
         return not q or q in row.profile["name"].lower() or q in row.profile["protocol"] or \
             q in (row.profile.get("server") or "").lower()
@@ -1093,9 +1107,92 @@ class MainWindow(Adw.ApplicationWindow):
     def sort_mode(self):
         return self.sort_modes[self.sort_drop.get_selected()][0]
 
+    def group_order(self):
+        return [g.lower() for g in (self.settings.get("ui") or {}).get("group_order") or []]
+
+    def _group_key(self, group):
+        """Ungrouped servers first, then the groups in the saved order, then the others by name."""
+        if not group:
+            return (-1, "")
+        order, g = self.group_order(), group.lower()
+        return (order.index(g) if g in order else len(order), g)
+
+    def shown_groups(self):
+        """The groups as listed now, top to bottom."""
+        return sorted({p.get("group") for p in self.profiles if p.get("group")}, key=self._group_key)
+
+    def _move_group(self, group, delta):
+        groups = self.shown_groups()
+        i = groups.index(group)
+        j = i + delta
+        if not 0 <= j < len(groups):
+            return
+        groups[i], groups[j] = groups[j], groups[i]
+        tree = {"ui": {"group_order": groups}}
+        self.settings.setdefault("ui", {})["group_order"] = groups        # the list follows at once
+        self.listbox.invalidate_sort()
+        self.listbox.invalidate_headers()
+        rpc("settings.update", None, self._fail, tree=tree)
+
+    def collapsed_groups(self):
+        app = self.get_application()
+        return {g.lower() for g in (app.userconfig.get("collapsed_groups") or [])} if app else set()
+
+    def _toggle_group(self, group):
+        app = self.get_application()
+        cur = self.collapsed_groups()
+        cur ^= {group.lower()}
+        if app:
+            app.userconfig.set("collapsed_groups", sorted(cur))
+        self._apply_collapse()
+        self.listbox.invalidate_headers()
+
+    def _apply_collapse(self):
+        """Fold the servers of collapsed groups into one "N servers" row under the group's heading.  The server in use
+        stays visible, and a search shows everything again."""
+        q = self.search.get_text().strip()
+        collapsed = set() if q else self.collapsed_groups()
+        live = (self.status or {}).get("profile_id") if (self.status or {}).get("state") in BUSY else None
+        self._collapse_key = (frozenset(collapsed), live)
+        hidden = {}
+        for row in sorted(self._rows.values(), key=self._sort_key):
+            g = (row.profile.get("group") or "").lower()
+            row.folded = False
+            self._summarize(row, None)
+            if g and g in collapsed and row.profile["id"] != live:
+                hidden.setdefault(g, []).append(row)
+        for g, rows in hidden.items():
+            rows[0].folded = False
+            self._summarize(rows[0], len(rows))
+            for r in rows[1:]:
+                r.folded = True
+        self.listbox.invalidate_filter()
+
+    @staticmethod
+    def _summarize(row, count):
+        """``count`` servers folded into this row (None: show the server itself again)."""
+        if count is None:
+            if getattr(row, "orig", None):
+                row.set_title(row.orig[0])
+                row.set_subtitle(row.orig[1])
+                row.orig = None
+            for w in row.parts:
+                w.set_visible(True)
+            row.dot.set_visible(True)
+            row.set_selectable(True)
+            return
+        if not getattr(row, "orig", None):
+            row.orig = (row.get_title(), row.get_subtitle())
+        row.set_title("%d server%s" % (count, "" if count == 1 else "s"))
+        row.set_subtitle("Folded - use ▸ in the heading to show them")
+        for w in row.parts:
+            w.set_visible(False)
+        row.dot.set_visible(False)
+        row.set_selectable(False)
+
     def _sort_key(self, row):
         p = row.profile
-        group = (p.get("group") or "").lower()          # ungrouped servers first, then each group together
+        group = self._group_key(p.get("group"))
         name = p["name"].lower()
         mode = self.sort_mode()
         if mode == "name":
@@ -1120,9 +1217,24 @@ class MainWindow(Adw.ApplicationWindow):
             btn = Gtk.Button(label="Edit…", valign=Gtk.Align.CENTER, tooltip_text="Rename this group or edit all its servers")
             btn.add_css_class("flat")
             btn.connect("clicked", lambda *_, g=group: self._edit_group(g))
+            folded = group.lower() in self.collapsed_groups() and not self.search.get_text().strip()
+            fold = Gtk.Button(label="▸" if folded else "▾", valign=Gtk.Align.CENTER, margin_start=6, width_request=34,
+                              tooltip_text="Show the servers of this group" if folded else "Fold the servers of this group")
+            fold.add_css_class("flat")
+            fold.connect("clicked", lambda *_, g=group: self._toggle_group(g))
             box = Gtk.Box(spacing=6, margin_top=10, margin_bottom=4)
+            box.append(fold)
             box.append(lbl)
             box.append(btn)
+            box.append(Gtk.Box(hexpand=True))
+            groups = self.shown_groups()
+            for text, delta, tip in (("▲", -1, "Move this group up"), ("▼", 1, "Move this group down")):
+                mv = Gtk.Button(label=text, valign=Gtk.Align.CENTER, tooltip_text=tip)
+                mv.add_css_class("flat")
+                mv.set_sensitive(group in groups and 0 <= groups.index(group) + delta < len(groups))
+                mv.connect("clicked", lambda *_, g=group, d=delta: self._move_group(g, d))
+                box.append(mv)
+            lbl.set_margin_start(0)
             row.set_header(box)
         else:
             row.set_header(None)
@@ -1172,11 +1284,55 @@ class MainWindow(Adw.ApplicationWindow):
         pop.set_child(pb)
         menu.set_popover(pop)
         row.add_suffix(menu)
-        go = Gtk.Button(label="Connect", valign=Gtk.Align.CENTER)
+        go = Gtk.Button(label="Connect", valign=Gtk.Align.CENTER, width_request=118)
         go.add_css_class("suggested-action")
-        go.connect("clicked", lambda *_: self.connect_to(p["id"]))
+        go.connect("clicked", lambda *_: self.connect_to(p["id"], stay=True))
+        row.go = go
         row.add_suffix(go)
+        row.dot = Gtk.Label(label="●", opacity=0)        # the server in use; always there so the names line up
+        row.add_prefix(row.dot)
+        row.parts, row.folded, row.orig = [lat, fav, menu, go], False, None     # what a folded group row hides
+        self._sync_row(row)
         return row
+
+    def row_state(self, pid):
+        """(label, clickable) of a server's Connect button: it mirrors what the daemon is doing with that server."""
+        st = self.status or {}
+        state, live = st.get("state"), st.get("profile_id")
+        pend = self._pending if self._pending and time.monotonic() < self._pending[1] else None
+        if self._disconnecting or state == "disconnecting":
+            # nothing can start until the old tunnel is gone; the server being left says so
+            return ("Disconnecting…" if pid == live else "Connect"), False
+        if pend:
+            if pend[0] == pid:
+                return "Connecting…", False
+            if pid == live:
+                return "Connect", True                     # the server being switched away from
+        if pid == live:
+            if state == "connected":
+                return "Connected", False
+            if state in ("connecting", "reconnecting"):
+                return ("Connecting…" if state == "connecting" else "Reconnecting…"), False
+        return "Connect", True
+
+    def _sync_row(self, row):
+        label, clickable = self.row_state(row.profile["id"])
+        if row.go.get_label() != label:
+            row.go.set_label(label)
+        row.go.set_sensitive(clickable and self._daemon_ok)
+        (row.go.add_css_class if clickable else row.go.remove_css_class)("suggested-action")
+        row.dot.set_opacity(1 if not clickable and label != "Connect" else 0)
+        for cls, on in (("success", label == "Connected"), ("warning", label != "Connected")):
+            (row.dot.add_css_class if on else row.dot.remove_css_class)(cls)
+        row.dot.set_tooltip_text(label.rstrip("…"))
+
+    def _sync_rows(self):
+        for row in self._rows.values():
+            self._sync_row(row)
+        live = (self.status or {}).get("profile_id") if (self.status or {}).get("state") in BUSY else None
+        if getattr(self, "_collapse_key", None) != (frozenset(self.collapsed_groups() if not self.search.get_text().strip() else ()),
+                                                    live):
+            self._apply_collapse()                        # the server in use moved: it must stay visible
 
     def _edit(self, p):
         ProfileDialog(self, "edit", self.protocols, profile=p, on_done=lambda: self.refresh(full=True)).present()
@@ -1362,7 +1518,7 @@ class MainWindow(Adw.ApplicationWindow):
                 self.toast("VPNMan %s is the latest version" % res["current"])
         else:
             d = Adw.MessageDialog(transient_for=self, heading="VPNMan %s is available" % res["latest"],
-                                  body=GLib.markup_escape_text("You have %s.\n\n%s" % (res["current"], res["notes"][:600])))
+                                  body="You have %s." % res["current"])
             d.add_response("later", "Later")
             d.add_response("open", "View Release")
             d.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
@@ -1442,6 +1598,20 @@ class MainWindow(Adw.ApplicationWindow):
             self, "Save backup", "vpnman-backup-%s.tar.gz" % time.strftime("%Y%m%d"), chosen))
         d.present()
 
+    def on_diagnostics(self, *_):
+        """Save a report for bug reports (private parts removed by the daemon)."""
+        def chosen(path):
+            def write(text):
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "w") as fh:
+                        fh.write(text)
+                    self.toast("Diagnostics saved - read it before you share it")
+                except OSError as e:
+                    self.toast("Could not save the report: %s" % e)
+            rpc("diagnostics", write, self._fail)
+        save_file(self, "Save diagnostics", "vpnman-diagnostics-%s.txt" % time.strftime("%Y%m%d-%H%M"), chosen)
+
     def on_backup_import(self, *_):
         def picked(files):
             try:
@@ -1489,17 +1659,29 @@ class MainWindow(Adw.ApplicationWindow):
             ms = self.latency.get(pid)
             row.lat.set_label("%.0f ms" % ms if ms else ("timeout" if pid in self.latency else ""))
 
-    def connect_to(self, pid):
+    def connect_to(self, pid, stay=False):
         """Connect (or switch) to a server.  The daemon replaces a live tunnel itself; here we only make sure that a
         second click while the first request is in flight does not start a second one, and that the polling
-        refresh does not snap the selection back to the old server in the meantime."""
-        pend = getattr(self, "_pending", None)
+        refresh does not snap the selection back to the old server in the meantime.  ``stay``: the click came
+        from the server list, which shows the progress itself (no jump to the Connection page)."""
+        pend = self._pending
         if pend and pend[0] == pid and time.monotonic() < pend[1]:
             return
+        if self._disconnecting:
+            self.toast("Wait until the VPN is disconnected")
+            return
+        st = self.status or {}
+        if st.get("profile_id") == pid and st.get("state") in ACTIVE:
+            return                                         # already connected (or connecting) to it
         self.sel_id = pid
         self._user_pick = None
         self._pending = (pid, time.monotonic() + 90)
-        self.stack.set_visible_child_name("overview")
+        self._sync_rows()
+        if stay:
+            name = next((p["name"] for p in self.profiles if p["id"] == pid), "")
+            self.toast(("Switching to %s…" if st.get("state") in ACTIVE else "Connecting to %s…") % name)
+        else:
+            self.stack.set_visible_child_name("overview")
 
         def settled(*_):
             self._pending = None
@@ -1507,13 +1689,30 @@ class MainWindow(Adw.ApplicationWindow):
 
         def failed(msg, down=False):
             self._pending = None
+            self._sync_rows()
             self._fail(msg, down)
         rpc("connect", settled, failed, ident=pid)
 
     def on_main_button(self, *_):
         st = self.status or {}
+        if self._disconnecting or st.get("state") == "disconnecting":
+            return
         if st.get("state") in ACTIVE:
-            rpc("disconnect", lambda *_: self.refresh(), self._fail)
+            self._disconnecting = True
+            self._pending = None                           # a connect still on its way is cancelled by this, too
+            self._show_main_button()
+            self._sync_rows()
+            self._update_tray(st)
+
+            def done(*_):
+                self._disconnecting = False
+                self.refresh()
+
+            def failed(msg, down=False):
+                self._disconnecting = False
+                self._fail(msg, down)
+                self.refresh()
+            rpc("disconnect", done, failed)
         elif not self.profiles:
             self.stack.set_visible_child_name("servers")
             self.toast("Import a profile first")
@@ -1559,7 +1758,7 @@ class MainWindow(Adw.ApplicationWindow):
         hand while nothing is connecting; the last server that was connected; the first one."""
         ids = [p["id"] for p in self.profiles]
         st = self.status or {}
-        pend = getattr(self, "_pending", None)
+        pend = self._pending
         if pend and time.monotonic() < pend[1] and pend[0] in ids:
             return pend[0]
         if st.get("state") in ACTIVE and st.get("profile_id") in ids:
@@ -1598,8 +1797,21 @@ class MainWindow(Adw.ApplicationWindow):
         self._poll_extras()
         return True
 
+    def _on_proxy_status(self, st):
+        self.proxy_page.update_status(st)
+        self.netproxy.update(st.get("net"))
+        key = (st.get("name"), st.get("enabled"), st.get("installed"))
+        if key != getattr(self, "_tray_proxy_key", None):
+            self._tray_proxy_key = key
+            tray = getattr(self.get_application(), "tray", None)
+            if tray:
+                tray.update_menu()
+
     def _poll_extras(self):
         """Things that are only worth asking the daemon for while their page is on screen."""
+        if self._ticks % 10 == 0 and self._daemon_ok:
+            # the tray's proxy item and failover notices need the proxy state even when the window is hidden
+            rpc("proxy.status", self._on_proxy_status, None)
         if not self.is_visible():
             return
         page = self.stack.get_visible_child_name()
@@ -1608,7 +1820,7 @@ class MainWindow(Adw.ApplicationWindow):
             if self._ticks % 20 == 0:
                 self.conn_group.refresh_blocked()
         elif page == "servers" and self.srv_tabs.get_visible_child_name() == "proxy" and self._ticks % 3 == 0:
-            rpc("proxy.status", self.proxy_page.update_status, None)
+            rpc("proxy.status", self._on_proxy_status, None)
 
     def _auto_latency(self):
         """Optional: re-test server latency every N minutes while the Servers tab is on screen."""
@@ -1629,6 +1841,7 @@ class MainWindow(Adw.ApplicationWindow):
             rpc("split.status", self.bypass_page.update, None)
         if full:
             self.proxy_page.reload()
+            self.netproxy.refresh()
             self.conn_group.refresh_blocked()
             rpc("profiles.list", self._on_profiles, None)
             rpc("settings.get", self._on_settings, None)
@@ -1665,6 +1878,7 @@ class MainWindow(Adw.ApplicationWindow):
                 self.listbox.select_row(row)
         self._update_latency()
         self.srv_stack.set_visible_child_name("list" if profiles else "empty")
+        self._apply_collapse()
         restore_scroll(adj, pos)                      # the rebuilt list must not throw the user back to the top
         self._sync_auto()
 
@@ -1692,17 +1906,19 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_status(self, st):
         self._set_daemon(True)
         self._ensure_loaded()
-        old = self.status
         self.status = st
         state = st["state"]
-        active = state in ACTIVE
         self._quiet = True
         self.lock_switch.set_active(st["netlock"]["engaged"])
         self.lock_now.set_active(st["netlock"]["engaged"])
         self._quiet = False
-        self.server_row.set_sensitive(not active)
+        self.server_row.set_sensitive(state not in BUSY and not self._disconnecting)
         self._sync_selector()
-        if state == "connected":
+        if state == "disconnecting" or self._disconnecting:
+            self.hero.set_icon_name("network-vpn-acquiring-symbolic")
+            self.hero.set_title("Disconnecting…")
+            self.hero.set_description(st.get("profile") or "")
+        elif state == "connected":
             self.hero.set_icon_name("network-vpn-symbolic")
             self.hero.set_title("Connected")
             self.hero.set_description("%s · %s" % (st["profile"], st["protocol"]))
@@ -1719,11 +1935,11 @@ class MainWindow(Adw.ApplicationWindow):
             self.hero.set_title("Not Connected")
             self.hero.set_description("Your traffic is not protected." if not st["netlock"]["engaged"]
                                       else "Network lock is engaged - traffic is blocked.")
-        self.main_btn.set_label("Disconnect" if active else "Connect")
-        for cls, on in (("suggested-action", not active), ("destructive-action", active)):
-            (self.main_btn.add_css_class if on else self.main_btn.remove_css_class)(cls)
-        self.stats.set_visible(state == "connected")
-        self.graph_group.set_visible(state == "connected")
+        self._show_main_button()
+        self._sync_rows()
+        shown = state == "connected" and not self._disconnecting
+        self.stats.set_visible(shown)
+        self.graph_group.set_visible(shown)
         if state == "connected":
             self.graph.push(st.get("rx_rate", 0), st.get("tx_rate", 0))
         else:
@@ -1743,6 +1959,19 @@ class MainWindow(Adw.ApplicationWindow):
                 rpc("history", self.history_group.update, None, limit=8)       # a session just started or ended
                 self._notify(state, st)
             self._last_state = state
+
+    def _show_main_button(self):
+        """Connect / Disconnect, or a greyed-out "Disconnecting…" while the tunnel is being torn down."""
+        state = (self.status or {}).get("state")
+        if self._disconnecting or state == "disconnecting":
+            label, active, clickable = "Disconnecting…", False, False
+        else:
+            active = state in ACTIVE
+            label, clickable = ("Disconnect" if active else "Connect"), self._daemon_ok
+        self.main_btn.set_label(label)
+        self.main_btn.set_sensitive(clickable)
+        for cls, on in (("suggested-action", clickable and not active), ("destructive-action", clickable and active)):
+            (self.main_btn.add_css_class if on else self.main_btn.remove_css_class)(cls)
 
     def _ask_credentials(self, st):
         prof = next((p for p in self.profiles if p["id"] == st.get("profile_id")), None)
@@ -1784,10 +2013,15 @@ class PreferencesWindow(Adw.PreferencesWindow):
                            "When one keeps failing: its failover list, then its group, then favourites"))
         g.add(self._switch("connection.failover_group", "Prefer servers in the same group"))
         g.add(self._spin("connection.timeout", "Connection timeout (s)", 10, 300))
+        g.add(self._switch("connection.reconnect_on_change", "Reconnect when the network changes",
+                           "Reconnect at once after the computer wakes up or you switch Wi-Fi / Ethernet"))
         page.add(g)
         g = Adw.PreferencesGroup(title="OpenVPN")
         g.add(self._entry("connection.openvpn_args", "Extra arguments", "comma separated"))
         page.add(g)
+        model = getattr(parent, "netproxy", None) or NetProxyModel(lambda *a, **kw: rpc(*a, **kw))
+        self.netproxy = ProxyPreferences(page, model, toast=lambda t: self.add_toast(Adw.Toast(title=t, timeout=4)))
+        self.connect("close-request", lambda *_: (self.netproxy.flush(), False)[1])
         self.add(page)
 
         page = Adw.PreferencesPage(title="DNS & Checks", icon_name="network-wired-symbolic")
@@ -1820,6 +2054,21 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self.net_combo(g, "network.profile", "Connect to",
                        [("last", "Last used server"), ("fastest", "Fastest server")]
                        + [(p["id"], p["name"]) for p in parent.profiles])
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Rules for This Network",
+                                 description="What to do when you join the network you are on now. A server rule wins over "
+                                             "the automation above. Trusted networks have no rules.")
+        self.rule_server = Adw.ComboRow(title="Connect to", model=Gtk.StringList.new(
+            ["Don't change"] + [p["name"] for p in parent.profiles]))
+        self.rule_ids = [""] + [p["id"] for p in parent.profiles]
+        self.rule_netproxy = Adw.ComboRow(title="Network Proxy", model=Gtk.StringList.new(["Don't change", "Turn on", "Turn off"]))
+        self.rule_xray = Adw.ComboRow(title="Proxy (Xray)", model=Gtk.StringList.new(
+            ["Don't change", "Turn off"] + [p["name"] for p in getattr(parent.proxy_page, "proxies", [])]))
+        self.rule_xray_ids = ["", "off"] + [p["id"] for p in getattr(parent.proxy_page, "proxies", [])]
+        for r in (self.rule_server, self.rule_netproxy, self.rule_xray):
+            r.connect("notify::selected", self._save_rule)
+            g.add(r)
+        self.rule_quiet = False
         page.add(g)
         self.add(page)
         rpc("network.status", self._on_network, None)
@@ -1890,8 +2139,25 @@ class PreferencesWindow(Adw.PreferencesWindow):
         group.add(row)
         return row
 
+    def _save_rule(self, *_):
+        st = getattr(self, "_net", {})
+        if self.rule_quiet or not st.get("id"):
+            return
+        rpc("network.rule", self._on_network, lambda m, *_: self.add_toast(Adw.Toast(title=m)),
+            network=st["id"], server=self.rule_ids[max(0, self.rule_server.get_selected())],
+            netproxy=["", "on", "off"][max(0, self.rule_netproxy.get_selected())],
+            xray_proxy=self.rule_xray_ids[max(0, self.rule_xray.get_selected())])
+
     def _on_network(self, st):
         self._net = st
+        rule = st.get("rule") or {}
+        self.rule_quiet = True
+        self.rule_server.set_selected(self.rule_ids.index(rule.get("server", "")) if rule.get("server", "") in self.rule_ids else 0)
+        self.rule_netproxy.set_selected({"": 0, "on": 1, "off": 2}.get(rule.get("netproxy", ""), 0))
+        self.rule_xray.set_selected(self.rule_xray_ids.index(rule.get("xray", "")) if rule.get("xray", "") in self.rule_xray_ids else 0)
+        for r in (self.rule_server, self.rule_netproxy, self.rule_xray):
+            r.set_sensitive(bool(st.get("id")) and not st.get("trusted"))
+        self.rule_quiet = False
         if st.get("id"):
             self.net_row.set_subtitle(GLib.markup_escape_text("%s%s" % (st["name"], " - trusted" if st["trusted"] else "")))
             self.net_btn.set_label("Stop Trusting" if st["trusted"] else "Trust This Network")

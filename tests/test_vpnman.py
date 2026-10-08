@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import sys
 import stat
@@ -488,6 +489,66 @@ class XrayInstallTests(unittest.TestCase):
         return subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", "/usr", *args],
                               env=dict(os.environ, DESTDIR=dest, VPNMAN_XRAY_BASE=base), capture_output=True, text=True)
 
+    def run_in_terminal(self, base, dest, answer, *args):
+        """install.sh with a pseudo-terminal for stdin/stdout (as when a person runs it) answering ``answer``."""
+        import pty
+        import select
+        import subprocess
+        mfd, sfd = pty.openpty()
+        p = subprocess.Popen(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", "/usr", "--init", "none", *args],
+                             stdin=sfd, stdout=sfd, stderr=sfd,
+                             env=dict(os.environ, DESTDIR=dest, VPNMAN_XRAY_BASE=base, PATH=self.clean_path()))
+        os.close(sfd)
+        out, sent, end = b"", False, time.time() + 120
+        while time.time() < end:
+            r, _, _ = select.select([mfd], [], [], 0.2)
+            if r:
+                try:
+                    chunk = os.read(mfd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+                if not sent and b"[Y/n]" in out:
+                    os.write(mfd, answer.encode() + b"\n")
+                    sent = True
+            elif p.poll() is not None:
+                break
+        p.wait(30)
+        os.close(mfd)
+        return p.returncode, out.decode(errors="replace")
+
+    @staticmethod
+    def clean_path():
+        """PATH without the fake programs other tests put there (a fake xray would hide the question)."""
+        return os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep)
+                               if d and not os.path.abspath(d).startswith(os.path.abspath(TMP)))
+
+    def test_an_interactive_install_offers_xray(self):
+        import shutil
+        if shutil.which("xray", path=self.clean_path() + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin"):
+            self.skipTest("xray is installed on this machine, so there is nothing to offer")
+        asset = self.asset()
+        data, digest = self.zipped()
+        base = self.serve({asset + ".zip": data, asset + ".zip.dgst": ("SHA2-256= %s\n" % digest).encode()})
+        dest = tempfile.mkdtemp(dir=TMP)
+        rc, out = self.run_in_terminal(base, dest, "y")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Xray is not installed", out)
+        self.assertTrue(os.access(os.path.join(dest, "usr/bin/xray"), os.X_OK), out)
+        dest2 = tempfile.mkdtemp(dir=TMP)
+        rc, out = self.run_in_terminal(base, dest2, "n")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Skipped", out)
+        self.assertFalse(os.path.exists(os.path.join(dest2, "usr/bin/xray")))
+        for args in (("--no-xray",), ("--no-post",)):                   # never asked: opted out, or a package build
+            rc, out = self.run_in_terminal(base, tempfile.mkdtemp(dir=TMP), "y", *args)
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("[Y/n]", out, args)
+        r = self.run_install(base, tempfile.mkdtemp(dir=TMP), "--init", "none")   # no terminal: never asked
+        self.assertNotIn("[Y/n]", r.stdout)
+
     def test_downloads_verifies_and_installs(self):
         asset = self.asset()
         data, digest = self.zipped()
@@ -856,6 +917,73 @@ class NetworkTests(unittest.TestCase):
         m.network_tick(self.net("tunnel", dev="tun0", gw="10.8.0.1"))      # def1-less redirect: default is the tunnel
         self.assertEqual(len(seen), n)
 
+    def _profile(self, m, name="lab"):
+        from vpnman.profiles import new_profile
+        p = new_profile(name, "openvpn")
+        m.store.save(p)
+        return p
+
+    def test_per_network_rules(self):
+        m = self._mgr(untrusted_action="connect", profile="fastest", trusted=["Home"])
+        p = self._profile(m)
+        net_calls = []
+        m.proxy.net_configure = lambda **kw: net_calls.append(kw)
+        m._net = self.net("Cafe")
+        st = m.network_rule_set(None, server="lab", netproxy="on")
+        self.assertEqual(st["rule"], {"network": "Cafe", "server": p["id"], "netproxy": "on", "xray": ""})
+        m.network_tick(self.net("Cafe"))
+        self.assertEqual(m.calls, [("connect", p["id"], False, False)], "the rule's server wins over 'fastest'")
+        self.assertEqual(net_calls, [{"enabled": True}])
+        m._status.update(state="connected", profile_id=p["id"])
+        m.calls.clear()
+        m.network_tick(self.net("Other"))                          # a network without a rule: the generic action
+        self.assertEqual(m.calls, [])                              # (already connected)
+        m.network_tick(self.net("Cafe"))                           # back on the Cafe network
+        self.assertEqual([c for c in m.calls if c[0] == "connect"], [], "already on the rule's server: nothing to do")
+        m.network_tick(self.net("Home"))                           # trusted: rules do not apply
+        self.assertEqual(len(net_calls), 2)
+        m.network_rule_set("Cafe", netproxy="off")                 # replaces the rule
+        self.assertEqual(len(m.settings.get("network.rules")), 1)
+        m.network_rule_set("Cafe")                                 # nothing asked: the rule is removed
+        self.assertEqual(m.settings.get("network.rules"), [])
+        for bad in ({"netproxy": "maybe"}, {"server": "no-such-profile"}):
+            with self.assertRaises(Exception):
+                m.network_rule_set("Cafe", **bad)
+
+    def test_reconnects_after_a_network_change_and_after_waking_up(self):
+        from vpnman import manager as mg, network as nw
+        m = self._mgr()
+        p = self._profile(m)
+        m._status.update(state="connected", profile_id=p["id"], profile="lab")
+
+        def settle():
+            end = time.time() + 3
+            while time.time() < end and not any(c[0] == "connect" for c in m.calls):
+                time.sleep(0.05)
+        m.network_tick(self.net("A", dev="eno1"))                  # first look
+        m.network_tick(self.net("A", dev="wlan0", gw="10.1.1.1"))  # the gateway and device changed under the tunnel
+        settle()
+        self.assertEqual([c for c in m.calls if c[0] == "connect"], [("connect", p["id"], False, False)])
+        m.calls.clear()
+        self.assertFalse(m.reconnect_if_up("again"), "at most once every 15 seconds")
+        m._reconnected_at = -1e9
+        m.settings.update({"connection": {"reconnect_on_change": False}})
+        self.assertFalse(m.reconnect_if_up("x"))
+        m.settings.update({"connection": {"reconnect_on_change": True}})
+        m._status.update(state="disconnected")
+        self.assertFalse(m.reconnect_if_up("x"), "nothing to reconnect")
+        # waking up: the monitor loop notices the long gap
+        m._status.update(state="connected")
+        real = nw.current
+        nw.current = lambda: {"device": "wlan0"}
+        try:
+            self.assertTrue(m.reconnect_if_up("the computer woke up", wait_for_network=True))
+            settle()
+        finally:
+            nw.current = real
+        self.assertEqual([c for c in m.calls if c[0] == "connect"], [("connect", p["id"], False, False)])
+        self.assertGreater(mg.RESUME_GAP, 3, "the loop wakes every 3 s")
+
     def test_trust_toggle_and_listing(self):
         m = self._mgr()
         m._net = self.net("Home")
@@ -1002,6 +1130,37 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)             # 3 = skipped
         self.assertTrue(os.path.isfile(os.path.join(self.ROOT, "dist", "recipes", "alpine", "APKBUILD")))
         self.assertEqual(self._pkg("no-such-target").returncode, 2)
+
+    def test_gpgman_style_options_checksums_and_summary(self):
+        import hashlib
+        r = self._pkg("--help")
+        self.assertEqual(r.returncode, 0)
+        for opt in ("--all", "--tar", "--deb", "--rpm", "--arch", "--void", "--alpine", "--openbsd", "--container",
+                    "--clean", "--help"):
+            self.assertIn(opt, r.stdout)
+        self.assertIn("Flatpak", r.stdout, "the help says why there is no Flatpak/AppImage")
+        r = self._pkg("--arch", "--tar")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Packaging complete", r.stdout)
+        dist = os.path.join(self.ROOT, "dist")
+        lines = open(os.path.join(dist, "SHA256SUMS")).read().splitlines()
+        v = __import__("vpnman").__version__
+        names = [l.split("  ", 1)[1] for l in lines]
+        self.assertIn("vpnman-%s.tar.gz" % v, names)
+        self.assertTrue(all(v in n for n in names), "only this version's files are listed")
+        for line in lines:
+            digest, name = line.split("  ", 1)
+            self.assertEqual(hashlib.sha256(open(os.path.join(dist, name), "rb").read()).hexdigest(), digest, name)
+        self.assertEqual(self._pkg("--no-such-target").returncode, 2)
+
+    def test_packages_suggest_xray(self):
+        self._pkg("recipes")
+        rec = os.path.join(self.ROOT, "dist", "recipes")
+        self.assertIn("xray: proxies", open(os.path.join(rec, "arch", "PKGBUILD")).read())
+        self.assertIn("xray", open(os.path.join(rec, "vpnman.spec")).read().split("Suggests:", 1)[1].splitlines()[0])
+        pkg = open(os.path.join(self.ROOT, "package.sh")).read()
+        self.assertIn("Suggests: xray", pkg)
+        self.assertIn("--optdepend 'xray: proxies and the Network Proxy'", pkg)
 
     def test_void_template_has_no_duplicate_lines(self):
         self._pkg("recipes")
@@ -1363,6 +1522,171 @@ class XrayUnitTests(unittest.TestCase):
             self.assertNotIn("198.51.100.4", text)
 
 
+class QrTests(unittest.TestCase):
+    """The matrices were checked cell for cell against the 'qrcode' package (all 40 versions, levels L and M) and
+    decoded with OpenCV; these hashes keep them from drifting."""
+    LINK = ("vless://11111111-2222-3333-4444-555555555555@203.0.113.7:443?security=reality&sni=example.com&pbk=PUB"
+            "&sid=ab&type=tcp&flow=xtls-rprx-vision#Home")
+
+    @staticmethod
+    def _hash(m):
+        import hashlib
+        return hashlib.sha256("".join("1" if c else "0" for r in m for c in r).encode()).hexdigest()[:16]
+
+    def test_known_matrices(self):
+        from vpnman import qr
+        for text, size, digest in ((self.LINK, 49, "5dd9202303e025ee"), ("hello", 21, "99ccedcf0d82e92a"),
+                                   ("x" * 1000, 121, "a84b7fbe72da0dff")):
+            m = qr.encode(text)
+            self.assertEqual((len(m), self._hash(m)), (size, digest), text[:20])
+
+    def test_finder_patterns_and_limits(self):
+        from vpnman import qr
+        m = qr.encode("hello")
+        for x0, y0 in ((0, 0), (14, 0), (0, 14)):
+            self.assertTrue(all(m[y0][x0 + i] for i in range(7)) and all(m[y0 + i][x0] for i in range(7)))
+            self.assertFalse(m[y0 + 1][x0 + 1])
+            self.assertTrue(m[y0 + 3][x0 + 3])
+        self.assertTrue(m[21 - 8][8], "the dark module")
+        self.assertEqual(len(qr.encode("y" * 2300)), 177, "too long for level M: falls back to L, version 40")
+        with self.assertRaises(qr.TooLong):
+            qr.encode("z" * 3000)
+        text = qr.to_text(m, quiet=2)
+        self.assertEqual(len(text.splitlines()), (21 + 4 + 1) // 2)
+        self.assertIn("\033[30;47m", text)
+
+
+class SystemProxyTests(unittest.TestCase):
+    """Reading the desktop's proxy settings (Copy from the desktop settings) and the host/port helpers."""
+
+    def test_hosts_and_ports(self):
+        from vpnman.gui import sysproxy as sp
+        self.assertEqual([sp.clean_host(x) for x in ("http://proxy.example:3128/", "proxy.example", " 10.0.0.1:8080 ",
+                                                     "socks5://[2001:db8::1]:1080", "::1", "")],
+                         ["proxy.example", "proxy.example", "10.0.0.1", "2001:db8::1", "::1", ""])
+        self.assertEqual([sp.port_in(x) for x in ("http://h:3128", "h:8080/", "h", "::1", "h:99999")],
+                         [3128, 8080, None, None, None])
+        self.assertEqual(sp.split_hosts("localhost, 127.0.0.0/8 ::1,,"), ["localhost", "127.0.0.0/8", "::1"])
+
+    def test_kde_settings(self):
+        from vpnman.gui import sysproxy as sp
+        store = {"ProxyType": "1", "httpProxy": "http://127.0.0.1 10809", "socksProxy": "socks://127.0.0.1 10808",
+                 "NoProxyFor": "localhost,::1"}
+        k = sp.KdeProxy(read_tool="kr", run=lambda cmd: store.get(cmd[6], "") + "\n")
+        got = k.read()
+        self.assertEqual((got["mode"], got["http"], got["socks"], got["https"], got["ignore"]),
+                         ("manual", ("127.0.0.1", 10809), ("127.0.0.1", 10808), ("", 0), ["localhost", "::1"]))
+        self.assertEqual(sp.KdeProxy.parse("http://proxy:3128"), ("proxy", 3128))
+        store["ProxyType"] = "3"
+        self.assertEqual(k.read()["mode"], "auto", "WPAD counts as automatic")
+
+
+class TemporaryBlockTests(unittest.TestCase):
+    def test_durations_and_expiry(self):
+        from vpnman import blocks
+        now = time.time()
+        e = blocks.new_entry("address", "203.0.113.9", minutes=15)
+        self.assertAlmostEqual(e["expires"], now + 900, delta=5)
+        self.assertEqual(e["boot"], "")
+        self.assertFalse(blocks.expired(e, now))
+        self.assertTrue(blocks.expired(e, now + 901))
+        self.assertIn("more minutes", blocks.lifetime(e, now))
+        self.assertEqual(blocks.lifetime(dict(e, expires=int(now) + 3 * 3600), now), "for 3 more hours")
+        r = blocks.new_entry("port", "6881", "udp", until_reboot=True)
+        self.assertEqual((r["expires"], r["boot"]), (0, blocks.boot_id()))
+        self.assertFalse(blocks.expired(r))
+        self.assertTrue(blocks.expired(r, boot="another-boot"))
+        self.assertEqual(blocks.lifetime(r), "until restart")
+        self.assertEqual(blocks.lifetime(blocks.new_entry("app", "steam")), "permanent")
+        for bad in (-1, "soon", blocks.MAX_MINUTES + 1):
+            with self.assertRaises(blocks.BlockError):
+                blocks.new_entry("address", "203.0.113.9", minutes=bad)
+
+    def test_cli_durations(self):
+        from vpnman import cli
+        self.assertEqual([cli.parse_minutes(x) for x in ("90", "30m", "2h", "1d", "1h30m", " 2H ")], [90, 30, 120, 1440, 90, 120])
+        for bad in ("soon", "2x", "1h soon", ""):
+            with self.assertRaises(ipc.RpcError):
+                cli.parse_minutes(bad)
+
+
+class ProxyLeakTests(unittest.TestCase):
+    PX = {"enabled": True, "running": True, "name": "Home", "order": "proxy_only", "mode": "local", "carrier": False,
+          "error": "", "http": 10809, "socks": 10808, "server_ips": ["203.0.113.7"]}
+
+    def test_proxy_checks(self):
+        from vpnman import leaktest as lt
+        self.assertIsNone(lt.proxy_check(None, "1.2.3.4", None))
+        self.assertIsNone(lt.proxy_check(dict(self.PX, enabled=False), "1.2.3.4", None))
+        self.assertEqual(lt.proxy_check(dict(self.PX, running=False, error="boom"), None, None)["status"], "fail")
+        self.assertEqual(lt.proxy_check(dict(self.PX, running=False, order="vpn_proxy"), None, None)["status"], "info")
+        ok = lt.proxy_check(self.PX, "198.51.100.1", lambda: "203.0.113.7")
+        self.assertEqual(ok["status"], "ok")
+        self.assertIn("203.0.113.7", ok["detail"])
+        self.assertEqual(lt.proxy_check(self.PX, "198.51.100.1", lambda: "198.51.100.1")["status"], "warn")
+
+        def broken():
+            raise OSError("connection refused")
+        self.assertEqual(lt.proxy_check(self.PX, "198.51.100.1", broken)["status"], "fail")
+        system = dict(self.PX, mode="system")
+        self.assertEqual(lt.proxy_check(system, "203.0.113.7", None)["status"], "ok")
+        self.assertEqual(lt.proxy_check(system, "192.0.2.50", None)["status"], "warn")
+        self.assertEqual(lt.proxy_check(dict(self.PX, carrier=True, order="proxy_vpn"), None, None)["status"], "ok")
+
+    def test_ip_answers_and_cloudflare(self):
+        from vpnman import leaktest as lt
+        self.assertEqual(lt.parse_ip_answer('{"ip":"198.51.100.4"}'), "198.51.100.4")
+        self.assertEqual(lt.parse_ip_answer("2001:db8::7\n"), "2001:db8::7")
+        for junk in ("<html><body style='color:#ffffff'>Error 1.2.3.4</body></html>", '{"ip":"nope"}', "", None):
+            self.assertIsNone(lt.parse_ip_answer(junk), junk)
+        self.assertTrue(lt.is_cloudflare("104.21.89.88") and lt.is_cloudflare("172.67.1.1")
+                        and lt.is_cloudflare("2606:4700::6810:1"))
+        self.assertFalse(lt.is_cloudflare("203.0.113.7") or lt.is_cloudflare("8.8.8.8") or lt.is_cloudflare("x"))
+        cf = dict(self.PX, mode="system", server_ips=["104.21.89.88"])
+        r = lt.proxy_check(cf, "198.51.100.1", None)
+        self.assertEqual(r["status"], "ok", "behind Cloudflare the exit address is not the server address")
+        self.assertIn("Cloudflare", r["detail"])
+        r = lt.proxy_check(dict(self.PX, mode="system"), "104.28.1.1", None)
+        self.assertIn("Cloudflare", r["detail"])
+        r = lt.proxy_check(dict(self.PX, server_ips=["104.21.89.88"]), "198.51.100.1", lambda: "104.21.89.88")
+        self.assertIn("Cloudflare", r["detail"])
+
+    def test_network_proxy_checks(self):
+        from vpnman import leaktest as lt
+        base = {"enabled": True, "active": True, "blocked": False, "killswitch": True, "error": "",
+                "servers": {"http": "203.0.113.30"}}
+        self.assertEqual(lt.netproxy_check(None, "1.2.3.4", lambda: True, False), [])
+        self.assertEqual(lt.netproxy_check(dict(base, enabled=False), "1.2.3.4", lambda: True, False), [])
+        r = {c["id"]: c for c in lt.netproxy_check(base, "203.0.113.30", lambda: True, False)}
+        self.assertEqual([r[k]["status"] for k in ("netproxy", "netproxy-ip", "netproxy-dns", "netproxy-ipv6")],
+                         ["ok", "ok", "ok", "ok"])
+        r = {c["id"]: c for c in lt.netproxy_check(base, "104.21.89.88", lambda: False, True)}
+        self.assertIn("Cloudflare", r["netproxy-ip"]["detail"])
+        self.assertEqual((r["netproxy-dns"]["status"], r["netproxy-ipv6"]["status"]), ("fail", "fail"))
+        self.assertEqual(lt.netproxy_check(base, "198.51.100.77", lambda: True, False)[1]["status"], "info")
+        blocked = lt.netproxy_check(dict(base, active=False, blocked=True, error="could not resolve p"), None, None, None)
+        self.assertEqual((len(blocked), blocked[0]["status"]), (1, "fail"))
+        self.assertIn("kill switch is blocking", blocked[0]["detail"])
+        off = lt.netproxy_check(dict(base, active=False, killswitch=False, error="boom"), None, None, None)
+        self.assertIn("goes out directly", off[0]["detail"])
+        self.assertIn("kill switch is off", lt.netproxy_check(dict(base, killswitch=False), None, lambda: True, False)[0]["detail"])
+
+    def test_csv_export(self):
+        from vpnman import conntable
+        rows = [{"dir": "out", "proto": "tcp", "v6": False, "local": "10.0.0.2", "lport": 40000, "remote": "93.184.216.34",
+                 "rport": 443, "state": "ESTABLISHED", "pid": 7, "app": "firefox", "rname": "example.net"},
+                {"dir": "listen", "proto": "udp", "v6": True, "local": "::", "lport": 5353, "remote": "::", "rport": 0,
+                 "state": "", "pid": 0, "app": "=cmd|' /C calc'!A0"}]
+        import csv
+        import io
+        got = list(csv.reader(io.StringIO(conntable.to_csv(rows))))
+        self.assertEqual(got[0], list(conntable.CSV_FIELDS))
+        self.assertEqual(got[1], ["out", "firefox", "7", "tcp", "4", "10.0.0.2", "40000", "93.184.216.34", "443",
+                                  "example.net", "ESTABLISHED"])
+        self.assertEqual(got[2][1][0], "'", "a value that looks like a formula is defused")
+        self.assertEqual((got[2][7], got[2][8]), ("", ""), "a listening socket has no remote side")
+
+
 class ConnTableTests(unittest.TestCase):
     TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 111 1 0 100 0 0 10 0
@@ -1555,6 +1879,37 @@ exit 0
                 return st
             time.sleep(0.1)
         self.fail("never reached %s, last=%s" % (state, self.c.call("status")))
+
+    def test_disconnect_reports_disconnecting_while_the_tunnel_goes_down(self):
+        self.c.call("profiles.import", name="slowdown", text=OVPN.replace("auth-user-pass\n", ""), filename="slowdown.ovpn",
+                    files={})
+        try:
+            self.c.call("connect", ident="slowdown")
+            self.wait("connected")
+            real = self.mgr._cancel
+            seen = []
+
+            def slow_cancel(*a, **kw):          # a tunnel that takes a while to stop (as real ones do)
+                seen.append(self.c.call("status"))
+                time.sleep(1.0)
+                return real(*a, **kw)
+            self.mgr._cancel = slow_cancel
+            try:
+                t = threading.Thread(target=lambda: self.c.call("disconnect"))
+                t.start()
+                st = self.wait("disconnecting", secs=3)
+                self.assertEqual(st["profile"], "slowdown", "the server being left is named")
+                time.sleep(0.4)
+                self.assertEqual(self.c.call("status")["state"], "disconnecting", "no flicker back to connected")
+                t.join(10)
+            finally:
+                self.mgr._cancel = real
+            self.assertEqual(seen[0]["state"], "disconnecting")
+            self.assertEqual(self.c.call("status")["state"], "disconnected")
+            self.c.call("disconnect")                    # a second disconnect is harmless and quiet
+            self.assertEqual(self.c.call("status")["state"], "disconnected")
+        finally:
+            self.c.call("profiles.remove", ident="slowdown")
 
     def test_full_lifecycle(self):
         self.assertEqual(self.c.call("ping"), "pong")
@@ -1966,6 +2321,248 @@ AAAA
         self._proxy_reset()
         self.assertEqual(self.c.call("proxy.list"), [])
 
+    def _cli(self, *argv, stdin=None):
+        import contextlib
+        import io
+        from vpnman import cli
+        out, err = io.StringIO(), io.StringIO()
+        old = sys.stdin
+        sys.stdin = io.StringIO(stdin) if stdin is not None else old
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = cli.main(list(argv))
+        finally:
+            sys.stdin = old
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_proxy_cli_show_sources_bulk_remove_and_stdin(self):
+        self._proxy_reset()
+        rc, out, _ = self._cli("proxy", "add", "-", "--group", "piped", stdin=self.LINK + "\n" + self.LINK2 + "\n")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("2 new", out)
+        rc, out, _ = self._cli("proxy", "show", "Home")
+        self.assertEqual(rc, 0)
+        self.assertIn("203.0.113.7", out)
+        self.assertIn("piped", out)
+        rc, out, _ = self._cli("proxy", "list", "--group", "PIPED", "--json")
+        self.assertEqual(len(json.loads(out)), 2)
+        sub = "https://sub.example/cli"
+        self.c.call("proxy.import", text=self.LINK.replace("203.0.113.7", "203.0.113.20"), source=sub, group="mine")
+        rc, out, _ = self._cli("proxy", "sources", "--json")
+        self.assertEqual(json.loads(out), [{"source": sub, "count": 1}])
+        # a refresh (no group given) puts new servers in the group the subscription already uses
+        self.c.call("proxy.import", source=sub, text=self.LINK.replace("203.0.113.7", "203.0.113.20") + "\n" +
+                    self.LINK.replace("203.0.113.7", "203.0.113.21").replace("#Home", "#New"))
+        self.assertEqual({p["group"] for p in self.c.call("proxy.list") if p.get("source") == sub}, {"mine"})
+        rc, out, _ = self._cli("proxy", "set")
+        self.assertIn("socks_port", out)
+        rc, out, _ = self._cli("proxy", "remove", "--group", "piped")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.c.call("proxy.list")), 2)
+        self.assertEqual(self._cli("proxy", "remove")[0], 1)                 # nothing named: refused
+        rc, out, _ = self._cli("proxy", "remove", "--all")
+        self.assertEqual((rc, self.c.call("proxy.list")), (0, []))
+        rc, out, _ = self._cli("status", "--json")
+        self.assertIn("proxy", json.loads(out))
+
+    def test_refreshing_the_proxy_in_use_restarts_xray(self):
+        self._proxy_reset()
+        sub = "https://sub.example/live"
+        self.c.call("proxy.import", text=self.LINK, source=sub)
+        self.c.call("proxy.select", ident="Home")
+        self.c.call("proxy.set", enabled=True, socks_port=18818, http_port=18819)
+        self._wait_proxy(True)
+        self.assertEqual(self._xray_cfg()["outbounds"][0]["streamSettings"]["realitySettings"]["serverName"], "example.com")
+        os.unlink(TMP + "/xray.config.copy")
+        self.c.call("proxy.import", text=self.LINK.replace("sni=example.com", "sni=other.example"), source=sub)
+        self.assertEqual(self._xray_cfg()["outbounds"][0]["streamSettings"]["realitySettings"]["serverName"], "other.example")
+        self._proxy_reset()
+        self.c.call("proxy.set", socks_port=10808, http_port=10809)
+
+    def _proxy_names(self):
+        return {p["name"]: p for p in self.c.call("proxy.list")}
+
+    def test_proxy_fastest_link_and_cli(self):
+        self._proxy_reset()
+        self.c.call("proxy.import", text="\n".join(self.LINK.replace("203.0.113.7", "203.0.113.%d" % i)
+                                                   .replace("#Home", "#P%d" % i) for i in (11, 12, 13)), group="g")
+        speeds = {"203.0.113.11": 80.0, "203.0.113.12": 20.0, "203.0.113.13": None}
+        svc = self.mgr.proxy
+        real = svc.probe
+        svc.probe = lambda ip, port, timeout=3: speeds.get(ip)
+        try:
+            p = self.c.call("proxy.fastest")
+            self.assertEqual((p["name"], p["latency"]), ("P12", 20.0))
+            self.assertTrue(self._proxy_names()["P12"]["selected"])
+            self.c.call("proxy.update", ident=self._proxy_names()["P11"]["id"], changes={"favorite": True})
+            self.assertEqual(self.c.call("proxy.fastest")["name"], "P11", "favourites first")
+            self.assertEqual(self.c.call("proxy.fastest", group="g")["name"], "P12")
+            rc, out, _ = self._cli("proxy", "use", "--fastest", "--group", "g")
+            self.assertEqual(rc, 0)
+            self.assertIn("P12", out)
+            speeds.clear()
+            with self.assertRaises(ipc.RpcError):
+                self.c.call("proxy.fastest")
+        finally:
+            svc.probe = real
+        info = self.c.call("proxy.info", ident="P12")
+        self.assertEqual((info["address"], info["ips"], info["cloudflare"], info["network"], info["security"], info["sni"]),
+                         ("203.0.113.12", ["203.0.113.12"], False, "tcp", "reality", "example.com"))
+        self.assertNotIn("11111111", json.dumps(info), "no secrets in the info")
+        rc, out, _ = self._cli("proxy", "show", "P12")
+        self.assertRegex(out, r"Connects to:\S*\s+203\.0\.113\.12")
+        link = self.c.call("proxy.link", ident="P12")
+        self.assertTrue(link["link"].startswith("vless://") and "203.0.113.12" in link["link"])
+        rc, out, _ = self._cli("proxy", "link", "P12", "--qr")
+        self.assertEqual(rc, 0)
+        self.assertIn("\u2588", out)
+        self.assertEqual(out.strip().splitlines()[-1], link["link"])
+        rc, out, _ = self._cli("proxy", "failover", "on")
+        self.assertIn("on", out)
+        self.assertTrue(self.c.call("proxy.status")["failover"])
+        self.c.call("proxy.set", failover=False)
+        self._proxy_reset()
+
+    def test_proxy_fails_over_to_the_next_favourite(self):
+        self._proxy_reset()
+        from vpnman import proxysvc
+        self.c.call("proxy.import", text="\n".join(self.LINK.replace("203.0.113.7", "203.0.113.%d" % i)
+                                                   .replace("#Home", "#F%d" % i) for i in (21, 22, 23)))
+        names = self._proxy_names()
+        for n in ("F21", "F23"):
+            self.c.call("proxy.update", ident=names[n]["id"], changes={"favorite": True})
+        self.c.call("proxy.select", ident="F21")
+        self.c.call("proxy.set", enabled=True, failover=True, socks_port=18828, http_port=18829)
+        self._wait_proxy(True)
+        svc = self.mgr.proxy
+        real = svc.probe
+        alive = {"203.0.113.22", "203.0.113.23"}
+        svc.probe = lambda ip, port, timeout=3: 5.0 if ip in alive else None
+        try:
+            for _ in range(proxysvc.HEALTH_FAILS - 1):
+                svc._health_at = 0
+                svc.watch()
+            self.assertTrue(self._proxy_names()["F21"]["selected"], "not before %d failed checks" % proxysvc.HEALTH_FAILS)
+            svc._health_at = 0
+            svc.watch()
+            self.assertTrue(self._proxy_names()["F23"]["selected"], "F22 is no favourite: the next favourite wins")
+            st = self.c.call("proxy.status")
+            self.assertEqual((st["last_failover"]["from"], st["last_failover"]["to"]), ("F21", "F23"))
+            self.assertEqual(self._xray_cfg()["outbounds"][0]["settings"]["vnext"][0]["address"], "203.0.113.23")
+            alive.clear()                                  # nobody answers: stay put
+            for _ in range(proxysvc.HEALTH_FAILS):
+                svc._health_at = 0
+                svc.watch()
+            self.assertTrue(self._proxy_names()["F23"]["selected"])
+        finally:
+            svc.probe = real
+        order = [p["name"] for p in svc.failover_order(svc.store.find(self._proxy_names()["F22"]["id"]))]
+        self.assertEqual(order, ["F23", "F21"], "from a non-favourite: the favourites, after it in name order")
+        self.c.call("proxy.set", failover=False)
+        self._proxy_reset()
+        self.c.call("proxy.set", socks_port=10808, http_port=10809)
+
+    def test_temporary_blocks_end_by_themselves(self):
+        from vpnman import blocks
+        real = blocks.supported
+        blocks.supported = lambda: (False, "the tests never touch the firewall")
+        try:
+            e = self.c.call("blocks.add", kind="port", value="6881", proto="udp", minutes=30)
+            r = self.c.call("blocks.add", kind="address", value="198.51.100.7", until_reboot=True)
+            self.assertGreater(e["expires"], time.time() + 1700)
+            self.assertEqual(self.mgr.blocks.expire(), 0)
+            entries = self.mgr.blocks.list()
+            for x in entries:
+                if x["id"] == e["id"]:
+                    x["expires"] = int(time.time()) - 1
+                if x["id"] == r["id"]:
+                    x["boot"] = "an-earlier-boot"
+            self.mgr.blocks._save(entries)
+            self.assertEqual(self.mgr.blocks.expire(), 2)
+            self.assertEqual(self.c.call("blocks.status")["entries"], [])
+            rc, out, _ = self._cli("blocks", "add", "app", "steam", "--for", "1h30m")
+            self.assertEqual(rc, 0)
+            self.assertIn("for 90 more minutes", out)
+            rc, out, _ = self._cli("blocks")
+            self.assertIn("90 more minutes", out)
+            self.assertEqual(self._cli("blocks", "add", "app", "x", "--for", "soon")[0], 1)
+            self.c.call("blocks.remove", ids=[x["id"] for x in self.c.call("blocks.status")["entries"]])
+            rc, out, _ = self._cli("connections", "--csv", "--listening")
+            self.assertEqual(rc, 0)
+            self.assertTrue(out.startswith("direction,application,pid"))
+        finally:
+            blocks.supported = real
+
+    def test_group_order_and_network_rules_from_the_command_line(self):
+        ids = []
+        for name, group in (("a1", "Alpha"), ("b1", "Beta"), ("g1", "Gamma")):
+            p = self.c.call("profiles.import", name=name, filename=name + ".ovpn", files={},
+                            text=OVPN.replace("auth-user-pass\n", ""))
+            self.c.call("profiles.update", ident=p["id"], changes={"group": group})
+            ids.append(p["id"])
+        try:
+            rc, out, _ = self._cli("group", "order")
+            self.assertIn("Alpha, Beta, Gamma", out)
+            rc, out, _ = self._cli("group", "order", "gam", "Alpha")
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(self.c.call("settings.get", key="ui")["group_order"], ["Gamma", "Alpha"])
+            rc, out, _ = self._cli("group", "order")
+            self.assertIn("Gamma, Alpha, Beta", out, "unlisted groups follow, by name")
+            self.assertEqual(self._cli("group", "order", "nosuch")[0], 1)
+            self.assertEqual(self._cli("group", "order", "--reset")[0], 0)
+            self.assertEqual(self.c.call("settings.get", key="ui")["group_order"], [])
+            # per-network rules
+            rc, out, _ = self._cli("networks", "rule", "Cafe", "--server", "b1", "--netproxy", "on")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("connect to the chosen server", out)
+            rc, out, _ = self._cli("networks")
+            self.assertIn("Cafe", out)
+            self.assertIn("connect to b1", out)
+            self.assertEqual(self.c.call("network.status")["rules"][0]["server"], ids[1])
+            self.assertEqual(self._cli("networks", "rule", "Cafe", "--server", "nosuch")[0], 1)
+            rc, out, _ = self._cli("networks", "rule", "Cafe", "--clear")
+            self.assertIn("removed", out)
+            self.assertEqual(self.c.call("network.status")["rules"], [])
+        finally:
+            for i in ids:
+                self.c.call("profiles.remove", ident=i)
+
+    def test_diagnostics_report_hides_the_private_parts(self):
+        from vpnman import diagnostics as dg
+        self.assertEqual(dg.redact("8.8.4.4 10.0.0.2 2606:4700::1111 fe80::1 u@example.org", {"Corp": "<p>"}),
+                         "8.8.x.x 10.0.0.2 2606:4700::x fe80::1 <email>")
+        p = self.c.call("profiles.import", name="Corp-Secret", filename="c.ovpn", files={},
+                        text=OVPN.replace("vpn.example.net", "vpn.topsecret-host.example").replace("auth-user-pass\n", ""))
+        self.c.call("profiles.update", ident=p["id"], changes={"username": "hunter-the-user", "password": "pa55w0rd-secret"})
+        self.c.call("netproxy.set", http={"host": "203.0.113.30", "port": 3128, "user": "prx-user", "password": "prx-secret"})
+        self.c.call("netproxy.set", enabled=False)
+        self.mgr.log.add("info", "connecting Corp-Secret at vpn.topsecret-host.example as hunter-the-user from 8.8.4.4")
+        try:
+            text = self.c.call("diagnostics")
+            for secret in ("Corp-Secret", "topsecret-host", "hunter-the-user", "pa55w0rd", "prx-secret", "prx-user", "8.8.4.4"):
+                self.assertNotIn(secret, text, secret)
+            for want in ("VPNMan %s" % __import__("vpnman").__version__, "== Profiles ==", "1 profiles: openvpn" if False else "openvpn",
+                         "== Recent log", "<profile-", "8.8.x.x"):
+                self.assertIn(want, text, want)
+            out = os.path.join(tempfile.mkdtemp(dir=TMP), "r.txt")
+            rc, o, _ = self._cli("diagnostics", "-o", out)
+            self.assertEqual(rc, 0, o)
+            self.assertEqual(self._cli("diagnostics", "-o", out)[0], 1, "an existing file is not overwritten")
+            self.assertIn("VPNMan", open(out).read())
+        finally:
+            self.c.call("profiles.remove", ident=p["id"])
+            self.c.call("netproxy.set", http={"host": "", "port": 0, "user": "", "password": ""})
+
+    def test_proxy_latency_probes_in_parallel(self):
+        self._proxy_reset()
+        self.c.call("proxy.import", text="\n".join(self.LINK.replace("203.0.113.7", "127.0.0.%d" % i).replace("#Home", "#P%d" % i)
+                                                   for i in range(2, 8)))
+        t0 = time.time()
+        lat = self.c.call("proxy.latency")
+        self.assertEqual(len(lat), 6)
+        self.assertLess(time.time() - t0, 6)        # one by one this could take 6 x 3 s
+        self._proxy_reset()
+
     def test_proxy_only_runs_and_stops(self):
         self._proxy_reset()
         self.c.call("proxy.import", text=self.LINK)
@@ -2075,6 +2672,149 @@ AAAA
         finally:
             xr.apply_ruleset, xr.remove_ruleset = real
             self._proxy_reset()
+
+    def test_network_proxy_carries_everything_and_pauses_the_xray_proxy(self):
+        from vpnman import xray as xr
+        applied = []
+        real = (xr.apply_ruleset, xr.remove_ruleset)
+        xr.apply_ruleset = lambda text: applied.append(text)
+        xr.remove_ruleset = lambda: applied.append("REMOVED")
+        off = {k: {"host": "", "port": 0, "user": "", "password": ""} for k in ("http", "https", "ftp", "socks")}
+        try:
+            self._proxy_reset()
+            st = self.c.call("netproxy.set", enabled=True)
+            self.assertFalse(st["active"])
+            self.assertIn("no proxy server", st["error"])
+            for bad in ({"http": {"host": "bad host!", "port": 1}}, {"http": {"host": "p.example", "port": 0}},
+                        {"socks": {"host": "p", "port": 70000}}, {"apps": ["no/slash"]}, {"dns": "x"}, {"udp": "maybe"},
+                        {"nonsense": 1}):
+                with self.assertRaises(ipc.RpcError, msg=bad):
+                    self.c.call("netproxy.set", **bad)
+            st = self.c.call("netproxy.set", http={"host": "203.0.113.30", "port": 3128},
+                             socks={"host": "203.0.113.31", "port": 1080, "user": "me", "password": "secret"},
+                             ignore=["localhost", "10.1.0.0/16", "*.corp.example", "2001:db8::/32"], udp="block")
+            self.assertTrue(st["active"], st)
+            self.assertEqual((st["socks"]["password"], st["socks"]["has_password"]), ("", True), "no password out")
+            self.assertEqual(self.c.call("settings.get", key="netproxy")["socks"]["password"], "********")
+            self.assertNotIn("secret", json.dumps(self.c.call("settings.get")))
+            cfg = self._xray_cfg()
+            outs = {o["tag"]: o for o in cfg["outbounds"]}
+            self.assertEqual(outs["up-http"]["protocol"], "http")
+            self.assertEqual(outs["up-socks"]["settings"]["servers"][0]["users"], [{"user": "me", "pass": "secret"}])
+            rules = cfg["routing"]["rules"]
+            self.assertIn({"type": "field", "inboundTag": ["redirect-in"], "port": "80", "outboundTag": "up-http"}, rules)
+            self.assertEqual(rules[-1]["outboundTag"], "up-socks", "anything else: the SOCKS proxy")
+            self.assertTrue(any("domain:corp.example" in r.get("domain", []) and r["outboundTag"] == "direct" for r in rules))
+            self.assertEqual(cfg["dns"]["servers"], ["tcp://1.1.1.1:53"])
+            rs = applied[-1]
+            self.assertIn("10.1.0.0/16", rs)
+            self.assertIn("203.0.113.30", rs, "the proxy servers themselves are not redirected")
+            self.assertIn("ip6 daddr { 2001:db8::/32 } accept", rs)
+            self.assertEqual(self.mgr.proxy.lock_ips(), {"203.0.113.30", "203.0.113.31"}, "the kill switch lets them through")
+            # the password survives an edit that sends back the masked value
+            self.c.call("netproxy.set", socks={"host": "203.0.113.31", "port": 1080, "user": "me", "password": "********"})
+            self.assertEqual(self.mgr.settings.get("netproxy")["socks"]["password"], "secret")
+            # the Xray proxy waits while the network proxy is on
+            self.c.call("proxy.import", text=self.LINK)
+            self.c.call("proxy.select", ident="Home")
+            px = self.c.call("proxy.set", enabled=True)
+            self.assertFalse(px["running"])
+            self.assertIn("Network Proxy", px["error"])
+            self.assertTrue(px["net"]["active"])
+            rc, out, _ = self._cli("netproxy")
+            self.assertIn("ACTIVE", out)
+            self.assertIn("SOCKS  me@203.0.113.31:1080", out)
+            rc, out, _ = self._cli("netproxy", "set", "https", "http://proxy.example.net:8443")
+            self.assertEqual((rc, self.mgr.settings.get("netproxy")["https"]["host"]), (0, "proxy.example.net"))
+            self._cli("netproxy", "clear", "https")
+            self.assertEqual(self._cli("netproxy", "set", "https", "noport")[0], 1)
+            # the kill switch: a proxy that cannot start leaves a block-everything rule set, never an open network
+            self.assertTrue(st["killswitch"] if (st := self.c.call("netproxy.status")) else False)
+            st = self.c.call("netproxy.set", http={"host": "nonexistent.invalid", "port": 3128})
+            self.assertFalse(st["active"])
+            self.assertTrue(st["blocked"], st)
+            self.assertIn("could not resolve", st["error"])
+            self.assertIn("guard_out", applied[-1])
+            self.assertNotIn("redirect", applied[-1])
+            self.assertTrue(applied[-1].rstrip().endswith("}") and "    drop" in applied[-1])
+            rc, out, _ = self._cli("netproxy")
+            self.assertIn("BLOCKING all traffic", out)
+            self.assertIn("kill switch: on", out)
+            st = self.c.call("netproxy.set", killswitch=False)
+            self.assertEqual(applied[-1], "REMOVED", "with the kill switch off a failing proxy leaves no rules")
+            self.assertFalse(st["blocked"])
+            rc, out, _ = self._cli("netproxy", "killswitch", "on")
+            self.assertIn("Kill switch is on", out)
+            self.assertTrue(self.c.call("netproxy.status")["blocked"])
+            self.c.call("netproxy.set", http={"host": "203.0.113.30", "port": 3128})
+            self.assertTrue(self.c.call("netproxy.status")["active"], "fixing the address brings it back")
+            self.assertFalse(self.c.call("netproxy.status")["blocked"])
+            self.assertIn("redirect to :", applied[-1], "the redirect rules are back")
+            # switching it off hands Xray back to the proxy
+            st = self.c.call("netproxy.set", enabled=False)
+            self.assertFalse(st["active"])
+            self.assertTrue(self._wait_proxy(True)["running"])
+        finally:
+            self.c.call("netproxy.set", enabled=False, ignore=["localhost", "127.0.0.0/8", "::1"], apps=[], **off)
+            xr.apply_ruleset, xr.remove_ruleset = real
+            self._proxy_reset()
+
+
+def _real_xray():
+    exe = os.environ.get("VPNMAN_REAL_XRAY") or __import__("shutil").which("xray")
+    if exe:
+        try:
+            if b"Xray" in __import__("subprocess").run([exe, "version"], capture_output=True, timeout=10).stdout:
+                return exe
+        except (OSError, Exception):  # noqa: BLE001
+            pass
+    return None
+
+
+class RealXrayTests(unittest.TestCase):
+    """With a real xray (on PATH, or VPNMAN_REAL_XRAY): every configuration VPNMan writes must be accepted by it, and
+    - as root, with nftables and unshare - the network proxy must really carry traffic (tests/netns_check.py)."""
+
+    def setUp(self):
+        self.xray = _real_xray()
+        if not self.xray:
+            self.skipTest("no real xray (set VPNMAN_REAL_XRAY)")
+
+    def _accepts(self, conf):
+        import subprocess
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "c.json")
+        with open(path, "w") as fh:
+            json.dump(conf, fh)
+        r = subprocess.run([self.xray, "run", "-test", "-c", path], capture_output=True, text=True, timeout=30)
+        self.assertIn("Configuration OK", r.stdout + r.stderr, (r.stdout + r.stderr)[-2000:])
+
+    def test_every_configuration_is_valid(self):
+        key = "hPdNm1NU4tHuaKBzUfdxm3meZ9bu9RF7sZkmu--JAlI"           # a real x25519 public key (REALITY checks it)
+        links = [EndToEnd.LINK.replace("pbk=PUB", "pbk=" + key), EndToEnd.LINK2,
+                 "vless://11111111-2222-3333-4444-555555555555@cdn.example.com:443?security=tls&type=ws&host=h.example.com"
+                 "&path=%2Fws&sni=h.example.com#WS",
+                 "ss://" + base64.urlsafe_b64encode(b"aes-256-gcm:pw").decode().rstrip("=") + "@203.0.113.9:8388#SS"]
+        for link in links:
+            ob = _xray.pin_address(_xray.parse_link(link)["outbound"], "203.0.113.50")
+            self._accepts(_xray.build_config(ob, socks=18808, http=18809))
+            self._accepts(_xray.build_config(ob, redirect=18810, dns=18811, mark=_xray.MARK, socks=18808, http=18809))
+            self._accepts(_xray.build_config(ob, forward=(18812, "198.51.100.4", 1194)))
+        self._accepts(_xray.netproxy_config({"http": ("203.0.113.30", 3128, "", ""),
+                                             "socks": ("203.0.113.31", 1080, "me", "pw")},
+                                            redirect=18810, dns=18811, mark=_xray.MARK,
+                                            direct_nets=["10.0.0.0/8", "2001:db8::/32"], direct_domains=["corp.example"]))
+
+    def test_network_proxy_in_a_private_network_namespace(self):
+        import shutil
+        import subprocess
+        if os.geteuid() != 0 or not shutil.which("unshare") or not shutil.which("nft"):
+            self.skipTest("needs root, unshare and nft")
+        r = subprocess.run(["unshare", "-n", sys.executable, os.path.join(os.path.dirname(__file__), "netns_check.py"),
+                            self.xray], capture_output=True, text=True, timeout=120)
+        if "Operation not permitted" in r.stderr and "NETNS-OK" not in r.stdout:
+            self.skipTest("network namespaces are not allowed here")
+        self.assertIn("NETNS-OK", r.stdout, (r.stdout + r.stderr)[-3000:])
 
 
 class ScheduleTests(unittest.TestCase):
@@ -2628,6 +3368,10 @@ class ServersGuiTests(unittest.TestCase):
     def test_ctrl_and_shift_click_selection(self):
         r = self._run("select_check.py", need=("xdotool",))
         self.assertIn("SELECT-OK", r.stdout, r.stdout + r.stderr[-1500:])
+
+    def test_password_fields_warn_about_caps_lock(self):
+        r = self._run("capslock_check.py", need=("xdotool",))
+        self.assertIn("CAPSLOCK-OK", r.stdout, r.stdout + r.stderr[-1500:])
 
 
 class PagesGuiTests(unittest.TestCase):

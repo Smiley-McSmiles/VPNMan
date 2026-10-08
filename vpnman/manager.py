@@ -19,11 +19,14 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, backup, blocks, conntable, dns, history, leaktest, netlock, network, paths, proxysvc, schedule, split, stunnel, xray
+from . import __version__, backends, backup, blocks, dns, history, leaktest, netlock, network, paths, proxysvc, schedule, split, stunnel, xray
 from . import platform as plat
 from .backends.base import CredentialsRequired
 from .profiles import ProfileError, ProfileStore, public_view
 from .settings import Settings
+
+
+RESUME_GAP = 20          # seconds: the monitor loop wakes every 3 s, so a longer gap means the computer slept
 
 
 class ConnectError(Exception):
@@ -119,6 +122,8 @@ class Manager:
         self._hist_cur = None     # the tunnel that is up right now: {profile, protocol, start, rx, tx}
         self._net = None          # last seen network (network.current())
         self._net_key = None
+        self._reconnected_at = -1e9
+        self._net_prev = None
         self._net_owned = False   # the current connection was started by the trusted-network rules
         self._net_stop = threading.Event()
         self._routes_added = []   # networks routed around the tunnel right now (mutated in place on network change)
@@ -241,6 +246,7 @@ class Manager:
         self.proxy.runner.kill_stale()
         if plat.os_family() == "linux":
             blocks.cleanup()
+        self.blocks.expire()
         self.blocks.sync()
         self.scheduler.start()
         self._start_network_monitor()
@@ -364,9 +370,18 @@ class Manager:
 
     def disconnect(self, release_lock=True):
         with self._oplock:
-            self._cancel()
             with self._mlock:
                 was = self._status["state"]
+                old_stop = self._stop
+                if was != "disconnected":
+                    # Tearing a tunnel down can take seconds: say so, and start a new generation so the old
+                    # connection thread's last status updates cannot overwrite it ("connected" flickering back).
+                    self._stop = threading.Event()
+                    self._status = dict(self._blank_status(), state="disconnecting", message="Disconnecting",
+                                        profile_id=self._status.get("profile_id"),
+                                        profile=self._status.get("profile"), protocol=self._status.get("protocol"))
+            self._cancel(old_stop)
+            with self._mlock:
                 self._status = self._blank_status()
             if release_lock:
                 try:
@@ -1000,17 +1015,55 @@ class Manager:
         threading.Thread(target=self._net_loop, args=(self._net_stop,), daemon=True, name="net-monitor").start()
 
     def _net_loop(self, stop):
+        last = time.time()
         while not stop.is_set():
-            try:
-                self.network_tick()
-                self.proxy.watch()
-            except Exception as e:  # noqa: BLE001
-                self.log.add("debug", "network monitor: %s" % e)
+            for name, job in (("network", self.network_tick), ("proxy", self.proxy.watch),
+                              ("blocks", self.blocks.expire)):
+                try:
+                    job()
+                except Exception as e:  # noqa: BLE001  (one failing job must not starve the others)
+                    self.log.add("debug", "%s monitor: %s" % (name, e))
+            now = time.time()
+            if now - last > RESUME_GAP:                 # this loop wakes every 3 s: a long gap is a suspend (or a stall)
+                self.log.add("info", "The computer woke up (after %d s)" % (now - last))
+                self.reconnect_if_up("the computer woke up", wait_for_network=True)
+            last = now
             stop.wait(3)
+
+    def reconnect_if_up(self, reason, wait_for_network=False):
+        """The tunnel (or its attempt) belongs to a network that is gone or asleep: start it again at once instead of
+        waiting for the VPN program to notice.  Runs in the background; at most once every 15 seconds."""
+        if not self.settings.get("connection.reconnect_on_change"):
+            return False
+        with self._mlock:
+            st = dict(self._status)
+        if st.get("state") not in ("connected", "connecting", "reconnecting") or not st.get("profile_id"):
+            return False
+        if time.monotonic() - self._reconnected_at < 15:
+            return False
+        self._reconnected_at = time.monotonic()
+
+        def work():
+            try:
+                if wait_for_network:                    # Wi-Fi needs a few seconds after waking up
+                    end = time.monotonic() + 40
+                    while time.monotonic() < end and not (network.current().get("device")):
+                        time.sleep(1.5)
+                with self._mlock:
+                    now = dict(self._status)
+                if now.get("profile_id") != st["profile_id"] or now.get("state") == "disconnected":
+                    return                              # the user changed or ended the connection meanwhile
+                self.log.add("info", "Reconnecting to %s because %s" % (st.get("profile"), reason))
+                self.connect(st["profile_id"])
+            except Exception as e:  # noqa: BLE001
+                self.log.add("warn", "Reconnect after %s failed: %s" % (reason, e))
+        threading.Thread(target=work, daemon=True, name="net-reconnect").start()
+        return True
 
     def network_status(self):
         cur = self._net or network.current()
-        return dict(cur, trusted=network.is_trusted(cur["id"], self.settings.get("network.trusted")))
+        return dict(cur, trusted=network.is_trusted(cur["id"], self.settings.get("network.trusted")),
+                    rule=self.network_rule(cur["id"]), rules=list(self.settings.get("network.rules") or []))
 
     def network_tick(self, cur=None):
         """One look at the network.  Acts only when something changed (gateway, device or network name)."""
@@ -1029,8 +1082,12 @@ class Manager:
             return                              # the tunnel became the default route: not a new network
         if not first:
             self.log.add("info", "Network changed: %s via %s" % (cur["name"] or "unknown", cur["device"]))
+        prev = self._net_prev
+        self._net_prev = (cur["gateway"], cur["device"])
         self._follow_network(cur)
         self._network_rules(cur, first)
+        if not first and prev and prev != (cur["gateway"], cur["device"]):
+            self.reconnect_if_up("the network changed")
 
     def _follow_network(self, cur):
         """Rebuild what was built against the old gateway: the app bypass and the bypass routes."""
@@ -1045,6 +1102,61 @@ class Manager:
         elif self.lock_engaged and not ctx:
             self._split_sync()
 
+    def network_rule(self, net_id):
+        for r in self.settings.get("network.rules") or []:
+            if net_id and str(r.get("network", "")).lower() == str(net_id).lower():
+                return r
+        return None
+
+    def network_rule_set(self, network_id, server="", netproxy="", xray_proxy=""):
+        """Remember what to do on one network: connect to ``server`` (a profile), switch the network proxy
+        (``netproxy``: "", "on", "off") and/or use one of the Xray proxies (``xray_proxy``: "", "off", a proxy)."""
+        net = network_id or (self._net or network.current())["id"]
+        if not net:
+            raise ProfileError("no network detected - join one first")
+        if netproxy not in ("", "on", "off"):
+            raise ProfileError("netproxy must be on, off or empty")
+        sid = self.store.find(server)["id"] if server else ""
+        xid = ""
+        if xray_proxy:
+            xid = "off" if xray_proxy == "off" else self.proxy.store.find(xray_proxy)["id"]
+        rules = [r for r in self.settings.get("network.rules") or [] if str(r.get("network", "")).lower() != net.lower()]
+        if sid or netproxy or xid:
+            rules.append({"network": net, "server": sid, "netproxy": netproxy, "xray": xid})
+        self.settings.update({"network": {"rules": rules}})
+        return self.network_status()
+
+    def _apply_rule(self, rule, cur):
+        """What this network's rule asks for.  Returns True when it chose the server (the generic untrusted-network
+        action must then stay out of the way)."""
+        if rule.get("netproxy") in ("on", "off"):
+            try:
+                self.proxy.net_configure(enabled=rule["netproxy"] == "on")
+                self.log.add("info", "Network '%s': network proxy %s" % (cur["name"], rule["netproxy"]))
+            except ProfileError as e:
+                self.log.add("warn", "Network '%s': cannot switch the network proxy: %s" % (cur["name"], e))
+        if rule.get("xray"):
+            try:
+                if rule["xray"] == "off":
+                    self.proxy.configure(enabled=False)
+                else:
+                    self.proxy.configure(selected=rule["xray"], enabled=True)
+                self.log.add("info", "Network '%s': proxy %s" % (cur["name"], "off" if rule["xray"] == "off" else "chosen"))
+            except (ProfileError, KeyError) as e:
+                self.log.add("warn", "Network '%s': cannot set the proxy: %s" % (cur["name"], e))
+        if rule.get("server"):
+            if self._status.get("profile_id") == rule["server"] and self._status.get("state") in (
+                    "connecting", "connected", "reconnecting"):
+                return True
+            try:
+                self.log.add("info", "Network '%s': connecting to the server chosen for it" % cur["name"])
+                self.connect(rule["server"])
+                self._net_owned = True
+            except Exception as e:  # noqa: BLE001
+                self.log.add("error", "Network '%s': could not connect: %s" % (cur["name"], e))
+            return True
+        return False
+
     def _network_rules(self, cur, first):
         cfg = self.settings.get("network")
         if not cur["id"] or (first and self.settings.get("connection.autoconnect") != "off"):
@@ -1052,6 +1164,9 @@ class Manager:
         trusted = network.is_trusted(cur["id"], cfg["trusted"])
         active = self._status.get("state") in ("connecting", "connected", "reconnecting")
         prof = cfg.get("profile") or "last"
+        rule = None if trusted else self.network_rule(cur["id"])
+        if rule and self._apply_rule(rule, cur):
+            return
         if not trusted and cfg["untrusted_action"] == "connect" and not active:
             self.log.add("info", "Untrusted network '%s' - connecting the VPN" % cur["name"])
             try:
@@ -1105,10 +1220,13 @@ class Manager:
             req = urllib.request.Request(url, headers={"User-Agent": "vpnman/" + __version__})
             with urllib.request.urlopen(req, timeout=10, context=ssl.create_default_context()) as r:
                 body = r.read(2048).decode("utf-8", "replace")
-            m = re.search(r'"ip"\s*:\s*"([^"]+)"', body) or re.search(r"(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]{6,})", body)
-            if m and not stop.is_set() and stop is self._stop:
-                self._set(public_ip=m.group(1))
-                self.log.add("info", "Public IP is now %s" % m.group(1))
+            ip = leaktest.parse_ip_answer(body)
+            if not ip:
+                self.log.add("warn", "Public IP check: %s did not answer with an address" % url)
+            elif not stop.is_set() and stop is self._stop:
+                self._set(public_ip=ip)
+                self.log.add("info", "Public IP is now %s%s" % (ip, " (a Cloudflare address)" if leaktest.is_cloudflare(ip)
+                                                                else ""))
         except Exception as e:  # noqa: BLE001
             self.log.add("warn", "Public IP check failed: %s" % e)
 
@@ -1240,7 +1358,11 @@ class Manager:
     def leak_test(self):
         """Self-test of the live connection (tunnel, public IP, kill switch, DNS, IPv6)."""
         st = self.status()
-        return leaktest.run(st, self.settings, bool(self.settings.get("netlock.block_ipv6")))
+        px = self.proxy.status()
+        sel = self.proxy.selected()
+        px["server_ips"] = ([px["server_ip"]] if px.get("server_ip") else []) + \
+            [i for i in (self.proxy.ips(sel, live=False) if sel else []) if i != px.get("server_ip")]
+        return leaktest.run(st, self.settings, bool(self.settings.get("netlock.block_ipv6")), proxy=px)
 
     def remove_profiles(self, idents):
         """Delete several profiles; a live connection to one of them is dropped first.  Never stops half-way:

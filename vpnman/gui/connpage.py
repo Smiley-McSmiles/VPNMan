@@ -10,6 +10,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
+from ..blocks import lifetime  # noqa: E402
+from ..conntable import to_csv  # noqa: E402
+from .files import save_file  # noqa: E402
 from .keys import close_keys  # noqa: E402
 
 WAY = {"in": "In", "out": "Out", "listen": "Listening"}
@@ -22,6 +25,10 @@ COLUMNS = (
     ("State", 110, False, lambda r: r["state"] or "–"),
 )
 KIND_LABELS = {"address": "Address", "endpoint": "Address and port", "port": "Port", "app": "Application"}
+# how long a block lasts: (label, menu target suffix, rpc arguments)
+DURATIONS = (("Until I unblock it", "0", {}), ("For 15 minutes", "15", {"minutes": 15}),
+             ("For 1 hour", "60", {"minutes": 60}), ("For 1 day", "1440", {"minutes": 1440}),
+             ("Until the computer restarts", "reboot", {"until_reboot": True}))
 
 
 class ConnRow(GObject.Object):
@@ -54,7 +61,11 @@ class ConnectionsTable(Gtk.Box):
         self.search = Gtk.SearchEntry(placeholder_text="Filter", width_chars=14)
         self.search.connect("search-changed", lambda *_: self.refilter())
         self.controls = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER)
-        for w in (self.search, self.listening, self.local, self.resolve):
+        export = Gio.Menu()
+        export.append("Copy as CSV", "conn.export-copy")
+        export.append("Save as CSV…", "conn.export-save")
+        self.export = Gtk.MenuButton(label="Export", menu_model=export, tooltip_text="The rows shown, as CSV")
+        for w in (self.search, self.listening, self.local, self.resolve, self.export):
             self.controls.append(w)
         self.filter = Gtk.CustomFilter.new(self._match)
         self.filtered = Gtk.FilterListModel(model=self.store, filter=self.filter)
@@ -223,6 +234,14 @@ class ConnectionsTable(Gtk.Box):
             self._item(blk, "Block local port %d (%s)" % (r["lport"], proto), "block", "local_port")
         if r["app"]:
             self._item(blk, "Block application “%s”" % r["app"], "block", "app")
+        for i in range(blk.get_n_items()):            # every block offers how long it lasts
+            label = blk.get_item_attribute_value(i, "label", None).get_string()
+            what = blk.get_item_attribute_value(i, "target", None).get_string()
+            sub = Gio.Menu()
+            for text, suffix, _kw in DURATIONS:
+                self._item(sub, text, "block", "%s|%s" % (what, suffix))
+            blk.remove(i)
+            blk.insert_submenu(i, label, sub)
         if blk.get_n_items():
             menu.append_section(None, blk)
         return menu
@@ -230,11 +249,16 @@ class ConnectionsTable(Gtk.Box):
     def _build_actions(self):
         group = Gio.SimpleActionGroup()
         for name, ptype, cb in (("copy", "s", self._act_copy), ("close", None, self._act_close),
-                                ("stop", "s", self._act_stop), ("block", "s", self._act_block)):
+                                ("stop", "s", self._act_stop), ("block", "s", self._act_block),
+                                ("export-copy", None, self._act_export_copy),
+                                ("export-save", None, self._act_export_save)):
             act = Gio.SimpleAction.new(name, GLib.VariantType.new(ptype) if ptype else None)
             act.connect("activate", cb)
             group.add_action(act)
         self.insert_action_group("conn", group)
+        # the Export button sits in the controls row, which is not inside this widget: it needs the actions too,
+        # or its menu items are greyed out
+        self.controls.insert_action_group("conn", group)
 
     # ---- actions
     @staticmethod
@@ -315,15 +339,45 @@ class ConnectionsTable(Gtk.Box):
         r = self._row
         if r is None:
             return
-        kind, value, proto = self.block_spec(r, param.get_string())
+        what, _, dur = param.get_string().partition("|")
+        kind, value, proto = self.block_spec(r, what)
+        extra = next((kw for _t, suffix, kw in DURATIONS if suffix == dur), {})
 
         def done(e):
             n = e.get("closed", 0)
-            self.host.toast("Blocked %s%s" % (value, " – closed %d open connection%s" % (n, "" if n == 1 else "s") if n else ""))
+            how = lifetime(e)
+            self.host.toast("Blocked %s%s%s" % (value, "" if how == "permanent" else " " + how,
+                                                " – closed %d open connection%s" % (n, "" if n == 1 else "s") if n else ""))
             if hasattr(self.host, "blocks_changed"):
                 self.host.blocks_changed()
         self.rpc("blocks.add", done, lambda msg, *_: self.host.toast("Could not block: %s" % msg),
-                 kind=kind, value=value, proto=proto)
+                 kind=kind, value=value, proto=proto, **extra)
+
+    # ---- export
+    def shown_rows(self):
+        return [self.filtered.get_item(i).data for i in range(self.filtered.get_n_items())]
+
+    def _act_export_copy(self, *_):
+        rows = self.shown_rows()
+        disp = Gdk.Display.get_default()
+        if disp:
+            disp.get_clipboard().set(to_csv(rows))
+            self.host.toast("Copied %d row%s as CSV" % (len(rows), "" if len(rows) == 1 else "s"))
+
+    def _act_export_save(self, *_):
+        rows = self.shown_rows()
+        win = self.get_root() if isinstance(self.get_root(), Gtk.Window) else None
+
+        def saved(path):
+            if not path:
+                return
+            try:
+                with open(path, "w", newline="") as fh:
+                    fh.write(to_csv(rows))
+                self.host.toast("Saved %d row%s to %s" % (len(rows), "" if len(rows) == 1 else "s", os.path.basename(path)))
+            except OSError as e:
+                self.host.toast("Could not save: %s" % e.strerror)
+        save_file(win, "Save Connections", time.strftime("connections-%Y%m%d-%H%M%S.csv"), saved)
 
 
 class ConnectionsGroup(Adw.PreferencesGroup):
@@ -472,8 +526,9 @@ class BlockedWindow(Adw.Window):
         self.value = Adw.EntryRow(title="")
         self.value.connect("entry-activated", lambda *_: self._add())
         self.proto = Adw.ComboRow(title="Protocol", model=Gtk.StringList.new(["Any", "TCP", "UDP"]))
+        self.duration = Adw.ComboRow(title="How long", model=Gtk.StringList.new([d[0] for d in DURATIONS]))
         self.note = Adw.EntryRow(title="Note (optional)")
-        for r in (self.kind, self.value, self.proto, self.note):
+        for r in (self.kind, self.value, self.proto, self.duration, self.note):
             add.add(r)
         self.add_btn = Gtk.Button(label="Block", halign=Gtk.Align.END, margin_top=6)
         self.add_btn.add_css_class("suggested-action")
@@ -567,6 +622,8 @@ class BlockedWindow(Adw.Window):
         if e.get("note"):
             bits.append(e["note"])
         bits.append("added %s" % time.strftime("%Y-%m-%d %H:%M", time.localtime(e.get("created", 0))))
+        if lifetime(e) != "permanent":
+            bits.append(lifetime(e))
         row = Adw.ActionRow(title=GLib.markup_escape_text(e["value"]), subtitle=GLib.markup_escape_text(" · ".join(bits)))
         row.entry = e
         row.set_activatable(False)
@@ -615,7 +672,7 @@ class BlockedWindow(Adw.Window):
             self.reload()
             self.group.refresh_blocked()
         self.rpc("blocks.add", done, lambda msg, *_: self.toast(msg), kind=kind, value=value, proto=proto,
-                 note=self.note.get_text().strip())
+                 note=self.note.get_text().strip(), **DURATIONS[max(0, self.duration.get_selected())][2])
 
     def selected_ids(self):
         return [r.entry["id"] for r in self.listbox.get_selected_rows()]
