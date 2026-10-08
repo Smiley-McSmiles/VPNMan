@@ -39,6 +39,7 @@ _vpnman() {
         'logs:show daemon log'
         'ls:list profiles'
         'menu:interactive menu'
+        'netproxy:a proxy server all traffic goes through (after the VPN while one is connected)'
         'networks:show the current network; trust/untrust it'
         'ping:measure latency to profiles'
         'protocols:list supported protocols and whether their tools are installed'
@@ -91,6 +92,7 @@ _vpnman() {
         logs) _arguments '(-f --follow)'{-f,--follow}'[keep running and print new lines]' '(-n --lines)'{-n,--lines}'[how many lines to show first (default 50)]' ;;
         ls) _arguments '(--latency -l)'{--latency,-l}'[measure and show the latency of every server]' '--names[one profile name per line (used by shell completion)]' '--sort[sort order (latency implies --latency)]:value:(name latency group)' '--json[print machine-readable JSON instead of text]' ;;
         menu) _arguments '*:: :' ;;
+        netproxy) _arguments '--user[set: user name for a proxy that needs a login]' '--ask-password[set: ask for the proxy'\''s password]' '--json[print machine-readable JSON instead of text]' '1:action:(status on off set clear ignore apps dns udp)' ;;
         networks) _arguments '1:action:(show trust untrust)' ;;
         ping) _arguments '*:profile:_vpnman_profiles' ;;
         protocols) _arguments '--json[print machine-readable JSON instead of text]' ;;

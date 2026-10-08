@@ -60,6 +60,12 @@ def format_status(st):
     lines.append("%s %s%s" % (bold("Network lock:"), green("ENGAGED") if nl["engaged"] else dim("off"),
                               " (%s)" % nl["backend"] if nl["engaged"] and nl["backend"] else ""))
     px = st.get("proxy")
+    net = (px or {}).get("net") or {}
+    if net.get("enabled"):
+        servers = ", ".join("%s %s:%s" % (k.upper(), net[k]["host"], net[k]["port"])
+                            for k in ("http", "https", "ftp", "socks") if net.get(k, {}).get("host"))
+        lines.append("%s %s %s%s" % (bold("Net proxy:  "), green("ACTIVE") if net.get("active") else yellow("on"),
+                                     servers or "-", red("  " + net["error"]) if net.get("error") else ""))
     if px and (px["enabled"] or px["running"]):
         lines.append("%s %s via %s (%s, %s)%s" % (bold("Proxy:      "), green("RUNNING") if px["running"] else yellow("on"),
                                                  px["name"] or "-", px["order"], px["mode"],
@@ -785,6 +791,74 @@ class Cli:
         if len(hits) == 1:
             return hits[0]["id"]
         raise RpcError("no such proxy: %s" % text if not hits else "'%s' is ambiguous: %s" % (text, ", ".join(h["name"] for h in hits[:6])))
+
+    def cmd_netproxy(self, a):
+        """vpnman netproxy [status|on|off|set KIND HOST:PORT|clear KIND|ignore HOST...|apps NAME...|dns IP|udp MODE]"""
+        act, items = a.action or "status", a.items
+        kinds = ("http", "https", "ftp", "socks")
+        if act == "status":
+            st = self.call("netproxy.status")
+            if a.json:
+                print(json.dumps(st, indent=2))
+                return 0
+            state = green("ACTIVE") if st["active"] else (yellow("on, not running") if st["enabled"] else dim("off"))
+            print("%s %s" % (bold("Network proxy:"), state))
+            for k in kinds:
+                e = st[k]
+                if e.get("host"):
+                    print("  %-6s %s%s:%s%s" % (k.upper(), e["user"] + "@" if e.get("user") else "", e["host"], e["port"],
+                                                dim("  (with password)") if e.get("has_password") else ""))
+            if not any(st[k].get("host") for k in kinds):
+                print(dim("  no proxy server set - e.g.: vpnman netproxy set http proxy.example.com:3128"))
+            print("  ignored: %s" % (", ".join(st["ignore"]) or "-"))
+            print("  programs that skip it: %s" % (", ".join(st["apps"]) or "-"))
+            print(dim("  dns %s (over TCP through the proxy), other UDP: %s" % (st["dns"], st["udp"])))
+            if st["error"]:
+                print(red("  %s" % st["error"]))
+            if not st["supported"]:
+                print(yellow("  needs Linux with nftables"))
+            if not st["installed"]:
+                print(yellow("  xray is not installed - install it with: sudo ./install.sh --xray-only"))
+            return 0
+        if act in ("on", "off"):
+            st = self.call("netproxy.set", enabled=act == "on")
+            print("Network proxy %s.%s" % (act, " (%s)" % st["error"] if act == "on" and st["error"] else ""))
+            return 0
+        if act == "set":
+            if len(items) != 2 or items[0] not in kinds:
+                raise RpcError("usage: vpnman netproxy set http|https|ftp|socks HOST:PORT [--user NAME] [--ask-password]")
+            from .gui.sysproxy import clean_host, port_in
+            host, port = clean_host(items[1]), port_in(items[1])
+            if not host or not port:
+                raise RpcError("give HOST:PORT, for example proxy.example.com:3128")
+            e = {"host": host, "port": port, "user": a.user or ""}
+            if a.ask_password:
+                e["password"] = getpass.getpass("Password for %s@%s: " % (a.user or "", host))
+            elif not a.user:
+                e["password"] = ""
+            self.call("netproxy.set", **{items[0]: e})
+            print("%s proxy: %s:%d" % (items[0].upper(), host, port))
+            return 0
+        if act == "clear":
+            if not items or any(k not in kinds for k in items):
+                raise RpcError("usage: vpnman netproxy clear http|https|ftp|socks...")
+            self.call("netproxy.set", **{k: {"host": "", "port": 0, "user": "", "password": ""} for k in items})
+            print("Cleared.")
+            return 0
+        if act in ("ignore", "apps"):
+            from .gui.sysproxy import split_hosts
+            vals = split_hosts(" ".join(items))
+            st = self.call("netproxy.set", **{act: vals})
+            print("%s: %s" % ("Ignored hosts" if act == "ignore" else "Programs that skip the proxy",
+                              ", ".join(st[act]) or "none"))
+            return 0
+        if act in ("dns", "udp"):
+            if len(items) != 1:
+                raise RpcError("usage: vpnman netproxy %s VALUE" % act)
+            self.call("netproxy.set", **{act: items[0]})
+            print("%s = %s" % (act, items[0]))
+            return 0
+        raise RpcError("unknown action %r (status, on, off, set, clear, ignore, apps, dns, udp)" % act)
 
     def cmd_blocks(self, a):
         from . import blocks
@@ -1584,6 +1658,29 @@ def build_parser():
     s.add_argument("--fastest", action="store_true", help="use: the proxy with the quickest server")
     s.add_argument("--qr", action="store_true", help="link: also print a QR code")
     s.add_argument("--latency", "-l", action="store_true", help="list: measure every server")
+    s.add_argument("--json", action="store_true", help=JSON)
+    s = add("netproxy", "a proxy server all traffic goes through (after the VPN while one is connected)",
+            "Send this computer's traffic through an HTTP or SOCKS5 proxy (Linux, nftables; the engine is xray). With\n"
+            "no VPN, programs reach the internet through the proxy; while a VPN is connected, through the VPN to the\n"
+            "proxy. Destination port 80 uses the HTTP proxy, 443 the HTTPS proxy, 21 the FTP proxy, anything else the\n"
+            "SOCKS proxy (else the HTTPS, HTTP or FTP one). DNS is asked over TCP through the proxy; other UDP is\n"
+            "blocked unless 'udp direct'; IPv6 is blocked. While it is on, the Xray proxy (vpnman proxy) is paused.\n\n"
+            "  status                      the settings and whether it runs (default)\n"
+            "  on | off\n"
+            "  set KIND HOST:PORT          KIND is http, https, ftp or socks (--user NAME, --ask-password)\n"
+            "  clear KIND...               remove a proxy server\n"
+            "  ignore HOST...              hosts that go direct: addresses, networks, domains (replaces the list)\n"
+            "  apps NAME...                programs that go direct (replaces the list; needs cgroup v2)\n"
+            "  dns IP                      the DNS server asked through the proxy (default 1.1.1.1)\n"
+            "  udp block|direct            UDP other than DNS: drop it, or let it out directly",
+            ["vpnman netproxy set http proxy.example.com:3128", "vpnman netproxy set https proxy.example.com:3128",
+             "vpnman netproxy set socks 10.0.0.5:1080 --user me --ask-password", "vpnman netproxy on",
+             "vpnman netproxy ignore localhost 127.0.0.0/8 ::1 '*.corp.example'", "vpnman netproxy apps steam"])
+    s.add_argument("action", nargs="?", choices=["status", "on", "off", "set", "clear", "ignore", "apps", "dns", "udp"],
+                   help="default: status")
+    s.add_argument("items", nargs="*", metavar="ARG", help="see the actions above")
+    s.add_argument("--user", help="set: user name for a proxy that needs a login")
+    s.add_argument("--ask-password", action="store_true", help="set: ask for the proxy's password")
     s.add_argument("--json", action="store_true", help=JSON)
     s = add("blocks", "addresses, ports and programs that may not use the network",
             "Block connections with the firewall (Linux, nftables). The list is kept across restarts. Blocking also\n"

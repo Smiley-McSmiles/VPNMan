@@ -102,6 +102,26 @@ in **Servers → Proxy** (or `vpnman proxy add ...`), choose one, and pick how i
 the computer into Xray with nftables (IPv6 and other UDP are blocked so nothing goes around it). The kill switch is aware
 of the proxy server. See `man vpnman` (PROXIES) for the details and limits.
 
+### Network proxy
+
+Preferences → Connection → **Network Proxy** (or `vpnman netproxy`, and a switch on the Connection page) sends **all of
+this computer's traffic** through an ordinary HTTP or SOCKS5 proxy, the way GNOME's proxy settings look - HTTP, HTTPS
+and FTP proxy, SOCKS host, ignored hosts - but enforced for every program, not only the ones that read those settings:
+
+* no VPN connected: you → proxy → internet
+* VPN connected: you → VPN → proxy → internet (websites see the proxy)
+
+Port 80 goes to the HTTP proxy, 443 to the HTTPS proxy, 21 to the FTP proxy, everything else to the SOCKS host; DNS is
+asked over TCP through the proxy. Ignored hosts (addresses, networks, `*.example.com`) and a list of programs go
+direct. **Copy from the desktop settings** fills it in from GNOME, Cinnamon or KDE Plasma. Linux (nftables) and Xray.
+
+```sh
+vpnman netproxy set http proxy.example.com:3128
+vpnman netproxy set https proxy.example.com:3128
+vpnman netproxy ignore localhost 127.0.0.0/8 ::1 '*.corp.example'
+vpnman netproxy on
+```
+
 #### Installing Xray
 
 `sudo ./install.sh --xray-only` downloads the official Xray release for your machine, checks its checksum and installs
@@ -158,6 +178,7 @@ installed it).
 | Import notes: options in a config that do not work here (Windows-only options, missing `up`/`down` scripts) are listed when you import it | ✔ |
 | Update check: *Check for Updates…* in the menu, `vpnman update`, or once a day if you switch it on in Preferences | ✔ |
 | **Proxies through Xray** (VLESS, VMess, Trojan, Shadowsocks; Reality, WebSocket, gRPC, ...): share links, files and subscription URLs; a local SOCKS5/HTTP proxy or system-wide (Linux); proxy only, **VPN → proxy** or **proxy → VPN** (`vpnman proxy`, Servers → Proxy) | ✔ (needs `xray`) |
+| **Network proxy**: all traffic through an HTTP / SOCKS5 proxy, with or without the VPN (after it); per-port HTTP / HTTPS / FTP / SOCKS proxies, ignored hosts, programs that skip it (`vpnman netproxy`, Preferences → Connection) | ✔ (Linux, needs `xray`) |
 | Proxy extras: **Use Fastest**, **failover** to the next favourite proxy when the server stops answering, **Share** a proxy as a link or QR code (`vpnman proxy use --fastest`, `proxy failover on`, `proxy link NAME --qr`); the connection test checks the proxy too | ✔ |
 | **Live connection table**: every connection with its application, port, protocol and direction (Connection page, `vpnman connections`) | ✔ (Linux; FreeBSD) |
 | **Blocked connections**: right-click a connection to copy it, force-close it, stop its program or block its address / port / program; a *Pop out* window for the live table; a window to manage the blocks (`vpnman blocks`); blocks can be **temporary** (15 min, 1 h, 1 day, until restart; `--for 2h`, `--until-reboot`); **export** the table as CSV (`vpnman connections --csv`) | ✔ (Linux, nftables) |

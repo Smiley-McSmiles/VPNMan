@@ -5,7 +5,7 @@ _vpnman() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     cmd="${COMP_WORDS[1]}"
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=( $(compgen -W "about add autostart backup block blocks bypass cleanup connect connections daemon disconnect dns doctor down edit failover fav get group gui history import leaktest list lock logs ls menu networks ping protocols proxy remove rm routes schedule service set shell split status unblock unfav up update --version --help" -- "$cur") )
+        COMPREPLY=( $(compgen -W "about add autostart backup block blocks bypass cleanup connect connections daemon disconnect dns doctor down edit failover fav get group gui history import leaktest list lock logs ls menu netproxy networks ping protocols proxy remove rm routes schedule service set shell split status unblock unfav up update --version --help" -- "$cur") )
         return
     fi
     case "$cmd" in
@@ -124,6 +124,10 @@ _vpnman() {
         menu)
             opts=""
             choices=""
+            names=0 ;;
+        netproxy)
+            opts="--user --ask-password --json"
+            choices="status on off set clear ignore apps dns udp"
             names=0 ;;
         networks)
             opts=""

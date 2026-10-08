@@ -227,12 +227,16 @@ def close_connection(row):
 # ------------------------------------------------------------------ the service
 
 class AppBlocker(split.SplitTunnel):
-    """Keeps the processes of the blocked programs in a cgroup (the nftables rule drops that cgroup's packets)."""
+    """Keeps the processes of the blocked programs in a cgroup (the nftables rule drops that cgroup's packets).
+    Subclasses keep other lists of programs in cgroups of their own (``cgroup``)."""
+    cgroup = CGROUP
+    thread_name = "block-scan"
+    label = "Blocked programs"
 
     @property
     def path(self):
         root = self.root or split.cgroup_root()
-        return os.path.join(root, CGROUP) if root else None
+        return os.path.join(root, self.cgroup) if root else None
 
     def begin(self):
         with self._lock:
@@ -240,7 +244,7 @@ class AppBlocker(split.SplitTunnel):
             os.makedirs(self.path, exist_ok=True)
             self.active = True
             self._stop = threading.Event()
-            self._thread = threading.Thread(target=self._loop, args=(self._stop,), daemon=True, name="block-scan")
+            self._thread = threading.Thread(target=self._loop, args=(self._stop,), daemon=True, name=self.thread_name)
             self._thread.start()
 
     def stop_locked(self):
@@ -265,7 +269,7 @@ class AppBlocker(split.SplitTunnel):
         added = []
         for pid in split.matching_pids(self.names_fn(), self.proc):
             cur = self._cgroup_of(pid)
-            if cur is None or cur.rstrip("/").endswith("/" + CGROUP):
+            if cur is None or split.outranked(cur, self.cgroup):
                 continue
             if self._move(pid, path):
                 self.moved.setdefault(pid, cur)
@@ -277,12 +281,15 @@ class AppBlocker(split.SplitTunnel):
             try:
                 self.scan_once()
             except Exception as e:  # noqa: BLE001
-                self.log("warn", "Blocked programs: scan failed: %s" % e)
+                self.log("warn", "%s: scan failed: %s" % (self.label, e))
             stop.wait(split.SCAN_INTERVAL)
 
 
+NOPROXY_CGROUP = "vpnman-noproxy"      # programs that skip the network proxy (see proxysvc.ProxyExempt)
+
+
 def cleanup():
-    """Remove the firewall table and the cgroup left by a crashed daemon.  Returns True if something was removed."""
+    """Remove the firewall table and the cgroups left by a crashed daemon.  Returns True if something was removed."""
     removed = False
     nft = plat.which("nft")
     if nft and plat.os_family() == "linux":
@@ -291,14 +298,16 @@ def cleanup():
             plat.run([nft, "delete", "table", "inet", NFT_TABLE])
             removed = True
     root = split.cgroup_root()
-    if root and os.path.isdir(os.path.join(root, CGROUP)):
+    for name in (CGROUP, NOPROXY_CGROUP):
+        if not (root and os.path.isdir(os.path.join(root, name))):
+            continue
         try:
-            with open(os.path.join(root, CGROUP, "cgroup.procs")) as fh:
+            with open(os.path.join(root, name, "cgroup.procs")) as fh:
                 pids = fh.read().split()
             for pid in pids:
                 with open(os.path.join(root, "cgroup.procs"), "w") as out:
                     out.write(pid)
-            os.rmdir(os.path.join(root, CGROUP))
+            os.rmdir(os.path.join(root, name))
             removed = True
         except OSError:
             pass

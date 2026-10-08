@@ -70,6 +70,17 @@ DEFAULTS = {
         "udp": "block",            # system mode: block | direct - what happens to UDP other than DNS
         "failover": False,         # switch to the next favourite proxy (else the group) when the server stops answering
     },
+    "netproxy": {                  # a plain HTTP / SOCKS5 proxy all traffic goes through (after the VPN, if connected)
+        "enabled": False,
+        "http": {"host": "", "port": 8080, "user": "", "password": ""},
+        "https": {"host": "", "port": 0, "user": "", "password": ""},
+        "ftp": {"host": "", "port": 0, "user": "", "password": ""},
+        "socks": {"host": "", "port": 0, "user": "", "password": ""},
+        "ignore": ["localhost", "127.0.0.0/8", "::1"],   # go direct (addresses, networks, domains)
+        "apps": [],                # programs that go direct
+        "dns": "1.1.1.1",          # answers this computer's DNS, asked over TCP through the proxy
+        "udp": "block",            # block | direct - UDP other than DNS (a proxy cannot carry it)
+    },
     "events": {
         "pre_connect": "",
         "connected": "",

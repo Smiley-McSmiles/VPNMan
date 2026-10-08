@@ -60,9 +60,26 @@ def _changed(m, key, result):
         m.reapply_dns()
     elif key.startswith("split"):
         m.split_changed()
-    elif key.startswith("proxy"):
+    elif key.startswith("proxy") or key.startswith("netproxy"):
         m.proxy.changed()
-    return result
+    return _masked(result, key)
+
+
+def _masked(value, key=None):
+    """Settings as the front ends see them: the network proxy's passwords stay in the daemon."""
+    key = str(key or "")
+
+    def hide(x):
+        if isinstance(x, dict):
+            return {k: ("********" if v else "") if k == "password" else hide(v) for k, v in x.items()}
+        return x
+    if not key:
+        return dict(value, netproxy=hide(value.get("netproxy"))) if isinstance(value, dict) else value
+    if not key.startswith("netproxy"):
+        return value
+    if key.endswith(".password"):
+        return "********" if value else ""
+    return hide(value)
 
 
 def _remove_one(m, ident):
@@ -98,7 +115,7 @@ METHODS = {
     "netlock.status": lambda m: m.netlock_status(),
     "netlock.enable": lambda m: m.netlock_enable(),
     "netlock.disable": lambda m: m.netlock_disable(),
-    "settings.get": lambda m, key=None: m.settings.get(key),
+    "settings.get": lambda m, key=None: _masked(m.settings.get(key), key),
     "settings.set": lambda m, key, value: _changed(m, key, m.settings.set(key, value)),
     "settings.update": lambda m, tree: (m.settings.update(tree), _changed(m, "dns" if "dns" in tree else "", None),
                                         m.settings.get())[2],
@@ -117,6 +134,8 @@ METHODS = {
     "proxy.fastest": lambda m, group=None: m.proxy.fastest(group),
     "proxy.link": lambda m, ident: m.proxy.link(ident),
     "proxy.info": lambda m, ident: m.proxy.info(ident),
+    "netproxy.status": lambda m: m.proxy.net_status(),
+    "netproxy.set": lambda m, **kw: m.proxy.net_configure(**kw),
     "blocks.status": lambda m: m.blocks.status(),
     "blocks.add": lambda m, kind, value, proto="any", note="", minutes=0, until_reboot=False:
         m.blocks.add(kind, value, proto, note, minutes, until_reboot),

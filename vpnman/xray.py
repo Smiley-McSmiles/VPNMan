@@ -412,18 +412,98 @@ def build_config(outbound, *, socks=None, http=None, forward=None, redirect=None
                                    "outboundTag": "proxy"}]}}
 
 
+# ------------------------------------------------------------------ network proxy (plain HTTP / SOCKS5 upstreams)
+
+NET_KINDS = ("http", "https", "ftp", "socks")
+NET_PORTS = {"http": "80", "https": "443", "ftp": "21"}       # which destination port uses which proxy
+
+
+def split_ignore(hosts):
+    """Ignored hosts -> (IPv4 networks, IPv6 networks, domains).  '*.example.com' and 'example.com' both become the
+    domain example.com and its sub-domains."""
+    v4, v6, domains = [], [], []
+    for h in hosts or []:
+        h = str(h).strip()
+        if not h:
+            continue
+        try:
+            net = ipaddress.ip_network(h, strict=False)
+            (v6 if net.version == 6 else v4).append(str(net))
+            continue
+        except ValueError:
+            pass
+        d = h.lstrip("*").lstrip(".").lower()
+        if re.match(r"^[a-z0-9.-]{1,253}$", d) and "." in d or d == "localhost":
+            domains.append(d)
+    return v4, v6, domains
+
+
+def upstream_outbound(kind, address, port, user="", password=""):
+    """An Xray outbound to a plain proxy: HTTP CONNECT for http/https/ftp, SOCKS5 for socks."""
+    server = {"address": address, "port": int(port)}
+    if user:
+        server["users"] = [{"user": user, "pass": password or ""}]
+    return {"tag": "up-%s" % kind, "protocol": "socks" if kind == "socks" else "http", "settings": {"servers": [server]}}
+
+
+def netproxy_config(upstreams, *, redirect, dns, mark=None, dns_server="1.1.1.1", direct_nets=(), direct_domains=(),
+                    loglevel="warning"):
+    """Xray configuration of the network proxy: TCP redirected by the firewall goes to the proxy for its destination
+    port (80 -> HTTP, 443 -> HTTPS, 21 -> FTP; everything else -> SOCKS, else HTTPS, else HTTP, else FTP), ignored
+    hosts go direct, and redirected DNS is answered by Xray's resolver asking ``dns_server`` over TCP through the
+    proxy (an HTTP proxy cannot carry UDP).  ``upstreams``: {kind: (address, port, user, password)}."""
+    if not upstreams:
+        raise ProxyError("no proxy server is set")
+    sniff = {"enabled": True, "destOverride": ["http", "tls"], "routeOnly": True}
+    inbounds = [{"tag": "redirect-in", "listen": "127.0.0.1", "port": int(redirect), "protocol": "dokodemo-door",
+                 "settings": {"network": "tcp", "followRedirect": True},
+                 "streamSettings": {"sockopt": {"tproxy": "redirect"}}, "sniffing": sniff},
+                {"tag": "dns-in", "listen": "127.0.0.1", "port": int(dns), "protocol": "dokodemo-door",
+                 "settings": {"address": dns_server, "port": 53, "network": "tcp,udp"}}]
+    outbounds = []
+    for kind in NET_KINDS:
+        if kind in upstreams:
+            ob = upstream_outbound(kind, *upstreams[kind])
+            if mark:
+                ob["streamSettings"] = {"sockopt": {"mark": mark}}
+            outbounds.append(ob)
+    fallback = next("up-" + k for k in ("socks", "https", "http", "ftp") if k in upstreams)
+    direct = {"tag": "direct", "protocol": "freedom", "settings": {}}
+    dns_out = {"tag": "dns-out", "protocol": "dns"}
+    if mark:
+        direct["streamSettings"] = {"sockopt": {"mark": mark}}
+        dns_out["streamSettings"] = {"sockopt": {"mark": mark}}
+    outbounds += [direct, dns_out]
+    rules = [{"type": "field", "inboundTag": ["dns-in"], "outboundTag": "dns-out"},
+             {"type": "field", "inboundTag": ["dns-internal"], "outboundTag": fallback}]
+    if direct_domains:
+        rules.append({"type": "field", "inboundTag": ["redirect-in"], "outboundTag": "direct",
+                      "domain": ["domain:%s" % d for d in direct_domains]})
+    if direct_nets:
+        rules.append({"type": "field", "inboundTag": ["redirect-in"], "outboundTag": "direct", "ip": list(direct_nets)})
+    for kind, port in NET_PORTS.items():
+        if kind in upstreams:
+            rules.append({"type": "field", "inboundTag": ["redirect-in"], "port": port, "outboundTag": "up-" + kind})
+    rules.append({"type": "field", "inboundTag": ["redirect-in"], "outboundTag": fallback})
+    return {"log": {"loglevel": loglevel},
+            "dns": {"servers": ["tcp://%s:53" % dns_server], "queryStrategy": "UseIPv4", "tag": "dns-internal"},
+            "inbounds": inbounds, "outbounds": outbounds,
+            "routing": {"domainStrategy": "AsIs", "rules": rules}}
+
+
 # ------------------------------------------------------------------ system-wide mode (nftables)
 
 LAN4 = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4"]
 
 
-def redirect_ruleset(tcp_port, dns_port, *, exclude=(), allow_lan=True, split_mark=0, udp="block"):
+def redirect_ruleset(tcp_port, dns_port, *, exclude=(), allow_lan=True, split_mark=0, udp="block", skip_cgroup="",
+                     allow6=()):
     """nftables ruleset that sends this machine's TCP connections and DNS queries to the Xray listeners.
 
     Skipped (they keep their normal route): Xray's own connections (the socket mark), loopback, the networks in
     ``exclude`` (the VPN server, bypass routes), the local network when ``allow_lan``, and applications of the app
-    bypass (``split_mark``).  IPv6 and - with ``udp == "block"`` - all other UDP are dropped so nothing can leave
-    around the proxy.  Priorities sit just before the kill switch (-100) so the redirected packets reach loopback
+    bypass (``split_mark``) and the programs in the cgroup ``skip_cgroup``.  IPv6 (except the networks in ``allow6``)
+    and - with ``udp == "block"`` - all other UDP are dropped so nothing can leave around the proxy.  Priorities sit just before the kill switch (-100) so the redirected packets reach loopback
     before it looks at them."""
     skip = ["127.0.0.0/8"] + (LAN4 if allow_lan else []) + [str(ipaddress.ip_network(e, strict=False))
                                                               for e in exclude if ":" not in str(e)]
@@ -434,6 +514,8 @@ def redirect_ruleset(tcp_port, dns_port, *, exclude=(), allow_lan=True, split_ma
              "    type nat hook output priority -110; policy accept;"]
     for m in marks:
         lines.append("    meta mark %s return" % m)
+    if skip_cgroup:
+        lines.append('    socket cgroupv2 level 1 "%s" return' % skip_cgroup)
     lines += ["    ip daddr { %s } return" % ", ".join(skip),
               "    meta nfproto ipv4 udp dport 53 redirect to :%d" % dns_port,
               "    meta nfproto ipv4 tcp dport 53 redirect to :%d" % dns_port,
@@ -443,9 +525,14 @@ def redirect_ruleset(tcp_port, dns_port, *, exclude=(), allow_lan=True, split_ma
               "    type filter hook output priority -105; policy accept;"]
     for m in marks:
         lines.append("    meta mark %s accept" % m)
+    if skip_cgroup:
+        lines.append('    socket cgroupv2 level 1 "%s" accept' % skip_cgroup)
     lines += ['    oifname "lo" accept',
-              "    ip daddr { %s } accept" % ", ".join(skip),
-              "    udp dport { 67, 68 } accept",                  # DHCP keeps working (lease renewals)
+              "    ip daddr { %s } accept" % ", ".join(skip)]
+    six = sorted({str(ipaddress.ip_network(n, strict=False)) for n in allow6})
+    if six:
+        lines.append("    ip6 daddr { %s } accept" % ", ".join(six))
+    lines += ["    udp dport { 67, 68 } accept",                 # DHCP keeps working (lease renewals)
               "    meta nfproto ipv6 drop"]
     if udp == "block":
         lines.append("    meta l4proto udp drop")

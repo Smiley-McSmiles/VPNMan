@@ -24,6 +24,7 @@ from .files import choose_files, save_file
 from .keys import close_keys, restore_scroll
 from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .proxypage import ProxyPage
+from .proxyprefs import NetProxyModel, NetworkProxySwitch, ProxyPreferences
 from .tray import HelperTray, Tray, wants_helper
 from ..settings import DNS_PRESETS
 from ..ipc import Client, DaemonUnavailable, RpcError
@@ -663,6 +664,7 @@ class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title=APP_NAME, default_width=900, default_height=700)
         self.set_size_request(360, 480)
+        self.netproxy = NetProxyModel(lambda *a, **kw: rpc(*a, **kw))        # the network proxy (run by the daemon)
         self.status = None
         self.profiles = []
         self.protocols = []
@@ -856,6 +858,13 @@ class MainWindow(Adw.ApplicationWindow):
         self.dns_custom.connect("apply", lambda r: self._save_dns(True, self._parse_ips(r.get_text())))
         dns.add(self.dns_custom)
         groups.append(dns)
+
+        netproxy = Adw.PreferencesGroup(title="Network Proxy",
+                                        description="Send all traffic through a proxy server (after the VPN while one "
+                                                    "is connected). Set the servers in Preferences → Connection.")
+        self.netproxy_switch = NetworkProxySwitch(self.netproxy, fail=lambda msg: self.toast(msg))
+        netproxy.add(self.netproxy_switch.row)
+        groups.append(netproxy)
 
         start = Adw.PreferencesGroup(title="Startup", description="Handled by the background service, so it works "
                                      "right after boot, before anyone logs in. It waits for the network and keeps trying.")
@@ -1641,6 +1650,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_proxy_status(self, st):
         self.proxy_page.update_status(st)
+        self.netproxy.update(st.get("net"))
         key = (st.get("name"), st.get("enabled"), st.get("installed"))
         if key != getattr(self, "_tray_proxy_key", None):
             self._tray_proxy_key = key
@@ -1682,6 +1692,7 @@ class MainWindow(Adw.ApplicationWindow):
             rpc("split.status", self.bypass_page.update, None)
         if full:
             self.proxy_page.reload()
+            self.netproxy.refresh()
             self.conn_group.refresh_blocked()
             rpc("profiles.list", self._on_profiles, None)
             rpc("settings.get", self._on_settings, None)
@@ -1856,6 +1867,9 @@ class PreferencesWindow(Adw.PreferencesWindow):
         g = Adw.PreferencesGroup(title="OpenVPN")
         g.add(self._entry("connection.openvpn_args", "Extra arguments", "comma separated"))
         page.add(g)
+        model = getattr(parent, "netproxy", None) or NetProxyModel(lambda *a, **kw: rpc(*a, **kw))
+        self.netproxy = ProxyPreferences(page, model, toast=lambda t: self.add_toast(Adw.Toast(title=t, timeout=4)))
+        self.connect("close-request", lambda *_: (self.netproxy.flush(), False)[1])
         self.add(page)
 
         page = Adw.PreferencesPage(title="DNS & Checks", icon_name="network-wired-symbolic")

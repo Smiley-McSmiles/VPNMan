@@ -1,7 +1,31 @@
 """Run under xvfb: the new dialogs and pages build and behave - credentials prompt, connection test, traffic graph,
 history, bypass addresses and mode, networks preferences, server groups and sorting."""
-import os, sys, tempfile
+import os, subprocess, sys, tempfile
 os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp()
+# GNOME's proxy settings (a copy of the org.gnome.system.proxy schema), in memory: "Copy from the desktop settings"
+_SCHEMAS = tempfile.mkdtemp()
+with open(os.path.join(_SCHEMAS, "org.gnome.system.proxy.gschema.xml"), "w") as _fh:
+    _fh.write("""<schemalist>
+  <enum id="org.gnome.desktop.GDesktopProxyMode"><value nick="none" value="0"/><value nick="manual" value="1"/>
+    <value nick="auto" value="2"/></enum>
+  <schema id="org.gnome.system.proxy" path="/system/proxy/">
+    <child name="http" schema="org.gnome.system.proxy.http"/><child name="https" schema="org.gnome.system.proxy.https"/>
+    <child name="ftp" schema="org.gnome.system.proxy.ftp"/><child name="socks" schema="org.gnome.system.proxy.socks"/>
+    <key name="mode" enum="org.gnome.desktop.GDesktopProxyMode"><default>'none'</default></key>
+    <key name="autoconfig-url" type="s"><default>''</default></key>
+    <key name="ignore-hosts" type="as"><default>['localhost', '127.0.0.0/8', '::1']</default></key>
+  </schema>
+  <schema id="org.gnome.system.proxy.http" path="/system/proxy/http/">
+    <key name="host" type="s"><default>''</default></key><key name="port" type="i"><default>8080</default></key></schema>
+  <schema id="org.gnome.system.proxy.https" path="/system/proxy/https/">
+    <key name="host" type="s"><default>''</default></key><key name="port" type="i"><default>0</default></key></schema>
+  <schema id="org.gnome.system.proxy.ftp" path="/system/proxy/ftp/">
+    <key name="host" type="s"><default>''</default></key><key name="port" type="i"><default>0</default></key></schema>
+  <schema id="org.gnome.system.proxy.socks" path="/system/proxy/socks/">
+    <key name="host" type="s"><default>''</default></key><key name="port" type="i"><default>0</default></key></schema>
+</schemalist>""")
+subprocess.run(["glib-compile-schemas", _SCHEMAS], check=True)
+os.environ.update(GSETTINGS_SCHEMA_DIR=_SCHEMAS, GSETTINGS_BACKEND="memory", XDG_CURRENT_DESKTOP="GNOME")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import cairo
 import gi
@@ -14,6 +38,12 @@ from vpnman.gui import proxypage as PP
 from vpnman.settings import DEFAULTS
 
 CALLS = []
+NET_STATUS = {"enabled": False, "active": False, "error": "", "ignore": ["localhost", "127.0.0.0/8", "::1"], "apps": [],
+              "dns": "1.1.1.1", "udp": "block", "servers": {}, "supported": True, "installed": True,
+              "http": {"host": "", "port": 8080, "user": "", "password": "", "has_password": False},
+              "https": {"host": "", "port": 0, "user": "", "password": "", "has_password": False},
+              "ftp": {"host": "", "port": 0, "user": "", "password": "", "has_password": False},
+              "socks": {"host": "", "port": 0, "user": "", "password": "", "has_password": False}}
 BLOCK_STATUS = {"enabled": True, "active": True, "error": "", "supported": True, "reason": "", "apps_supported": True, "apps_reason": "",
                 "entries": [{"id": "aaaa1111", "kind": "address", "value": "203.0.113.9/32", "proto": "any", "note": "bad", "enabled": True, "created": 0},
                             {"id": "bbbb2222", "kind": "endpoint", "value": "203.0.113.9:443", "proto": "tcp", "note": "", "enabled": False, "created": 0},
@@ -28,7 +58,7 @@ def fake_rpc(method, ok=None, fail=None, **kw):
     canned = {
         "proxy.list": [{"id": "%012d" % i, "name": n, "protocol": "vless", "server": "p%d.example.com" % i, "port": 443,
                         "group": g, "selected": i == 1, "notes": ""} for i, (n, g) in enumerate([("Home", ""), ("WS", "sub"), ("TR", "sub")], 1)],
-        "proxy.status": PROXY_STATUS, "proxy.sources": [], "proxy.set": PROXY_STATUS, "proxy.select": {"id": "x"},
+        "proxy.status": PROXY_STATUS, "netproxy.status": NET_STATUS, "netproxy.set": NET_STATUS, "proxy.sources": [], "proxy.set": PROXY_STATUS, "proxy.select": {"id": "x"},
         "proxy.latency": {"%012d" % 1: 12.5, "%012d" % 2: None},
         "proxy.remove": {"removed": ["WS", "TR"], "failed": []},
         "proxy.fastest": {"id": "%012d" % 2, "name": "WS", "latency": 9.4},
@@ -149,6 +179,59 @@ class App(A.Application):
         pw._toggle_trust()
         assert CALLS[-1] == ("network.trust", {"name": "Home", "trusted": True}), CALLS
         assert pw.net_btn.get_label() == "Stop Trusting"
+        # ---- network proxy: Preferences → Connection and the switch on the Connection page
+        from vpnman.gui import proxyprefs as PX
+        np_ = pw.netproxy
+        assert set(np_.hosts) == {"http", "https", "ftp", "socks"} and int(np_.ports["http"].get_value()) == 8080
+        assert np_.ignore.get_text() == "localhost, 127.0.0.0/8, ::1"
+        CALLS.clear()
+        np_.hosts["http"].set_text("http://proxy.example.com:3128/")
+        np_._save()
+        assert CALLS[-1] == ("netproxy.set", {"http": {"host": "proxy.example.com", "port": 3128, "user": ""}}), CALLS
+        CALLS.clear()
+        np_.hosts["socks"].set_text("me:pw@10.0.0.5")                    # no port yet: nothing is sent
+        np_._save()
+        assert not CALLS and "socks" in np_._dirty, CALLS
+        np_.ports["socks"].set_value(1080)
+        assert CALLS[-1] == ("netproxy.set", {"socks": {"host": "10.0.0.5", "port": 1080, "user": "me", "password": "pw"}}), CALLS
+        CALLS.clear()
+        np_.apps.set_text("steam, thunderbird")
+        np_.ignore.set_text("localhost, *.corp.example")
+        np_._save()
+        assert CALLS[-1] == ("netproxy.set", {"ignore": ["localhost", "*.corp.example"], "apps": ["steam", "thunderbird"]}), CALLS
+        from gi.repository import Gio
+        gs = Gio.Settings.new("org.gnome.system.proxy")
+        CALLS.clear()
+        np_._import()
+        assert not any(c[0] == "netproxy.set" for c in CALLS), "nothing set on the desktop: nothing copied"
+        gs.set_string("mode", "manual")
+        gs.get_child("http").set_string("host", "corp-proxy.example")
+        gs.get_child("http").set_int("port", 3128)
+        gs.get_child("socks").set_string("host", "10.0.0.9")
+        gs.get_child("socks").set_int("port", 1080)
+        np_._import()
+        got = next(c[1] for c in CALLS if c[0] == "netproxy.set")
+        assert got["http"] == {"host": "corp-proxy.example", "port": 3128, "user": "", "password": ""}, got
+        assert got["socks"]["host"] == "10.0.0.9" and got["https"]["host"] == "" and got["ignore"] == ["localhost", "127.0.0.0/8", "::1"]
+        assert PX.parse_url("u:p@[2001:db8::1]:1080") == ("u", "p", "2001:db8::1", 1080)
+        assert PX.show_url({"host": "2001:db8::1", "user": "u"}) == "u@[2001:db8::1]"
+        assert PX.summary(dict(NET_STATUS, enabled=True, active=True,
+                               http={"host": "p", "port": 3128})) == "All traffic goes through HTTP p:3128"
+        assert PX.summary(dict(NET_STATUS, enabled=True, error="no proxy server is set")).startswith("Not running")
+        sw = w.netproxy_switch.row                                        # the Connection page
+        grp = sw.get_ancestor(A.Adw.PreferencesGroup)
+        assert grp.get_title() == "Network Proxy"
+        CALLS.clear()
+        sw.set_active(True)
+        assert ("netproxy.set", {"enabled": True}) in CALLS, CALLS
+        w.netproxy.update(dict(NET_STATUS, enabled=True, active=True, http={"host": "p", "port": 3128}))
+        assert sw.get_active() and "HTTP p:3128" in sw.get_subtitle(), (sw.get_active(), sw.get_subtitle())
+        assert pw.netproxy.switch.row.get_active()
+        w.netproxy.update(dict(NET_STATUS))
+        assert not sw.get_active()
+        pw.present()
+        pw.close()
+        assert np_.sync not in w.netproxy.listeners, "a closed Preferences window stops listening"
         # ---- servers: groups, sorting, headers
         profs = [prof(1, "Zeta"), prof(2, ""), prof(3, "Alpha", fav=True), prof(4, "Alpha")]
         w.profiles = profs

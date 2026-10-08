@@ -1398,6 +1398,31 @@ class QrTests(unittest.TestCase):
         self.assertIn("\033[30;47m", text)
 
 
+class SystemProxyTests(unittest.TestCase):
+    """Reading the desktop's proxy settings (Copy from the desktop settings) and the host/port helpers."""
+
+    def test_hosts_and_ports(self):
+        from vpnman.gui import sysproxy as sp
+        self.assertEqual([sp.clean_host(x) for x in ("http://proxy.example:3128/", "proxy.example", " 10.0.0.1:8080 ",
+                                                     "socks5://[2001:db8::1]:1080", "::1", "")],
+                         ["proxy.example", "proxy.example", "10.0.0.1", "2001:db8::1", "::1", ""])
+        self.assertEqual([sp.port_in(x) for x in ("http://h:3128", "h:8080/", "h", "::1", "h:99999")],
+                         [3128, 8080, None, None, None])
+        self.assertEqual(sp.split_hosts("localhost, 127.0.0.0/8 ::1,,"), ["localhost", "127.0.0.0/8", "::1"])
+
+    def test_kde_settings(self):
+        from vpnman.gui import sysproxy as sp
+        store = {"ProxyType": "1", "httpProxy": "http://127.0.0.1 10809", "socksProxy": "socks://127.0.0.1 10808",
+                 "NoProxyFor": "localhost,::1"}
+        k = sp.KdeProxy(read_tool="kr", run=lambda cmd: store.get(cmd[6], "") + "\n")
+        got = k.read()
+        self.assertEqual((got["mode"], got["http"], got["socks"], got["https"], got["ignore"]),
+                         ("manual", ("127.0.0.1", 10809), ("127.0.0.1", 10808), ("", 0), ["localhost", "::1"]))
+        self.assertEqual(sp.KdeProxy.parse("http://proxy:3128"), ("proxy", 3128))
+        store["ProxyType"] = "3"
+        self.assertEqual(k.read()["mode"], "auto", "WPAD counts as automatic")
+
+
 class TemporaryBlockTests(unittest.TestCase):
     def test_durations_and_expiry(self):
         from vpnman import blocks
@@ -2409,6 +2434,127 @@ AAAA
         finally:
             xr.apply_ruleset, xr.remove_ruleset = real
             self._proxy_reset()
+
+    def test_network_proxy_carries_everything_and_pauses_the_xray_proxy(self):
+        from vpnman import xray as xr
+        applied = []
+        real = (xr.apply_ruleset, xr.remove_ruleset)
+        xr.apply_ruleset = lambda text: applied.append(text)
+        xr.remove_ruleset = lambda: applied.append("REMOVED")
+        off = {k: {"host": "", "port": 0, "user": "", "password": ""} for k in ("http", "https", "ftp", "socks")}
+        try:
+            self._proxy_reset()
+            st = self.c.call("netproxy.set", enabled=True)
+            self.assertFalse(st["active"])
+            self.assertIn("no proxy server", st["error"])
+            for bad in ({"http": {"host": "bad host!", "port": 1}}, {"http": {"host": "p.example", "port": 0}},
+                        {"socks": {"host": "p", "port": 70000}}, {"apps": ["no/slash"]}, {"dns": "x"}, {"udp": "maybe"},
+                        {"nonsense": 1}):
+                with self.assertRaises(ipc.RpcError, msg=bad):
+                    self.c.call("netproxy.set", **bad)
+            st = self.c.call("netproxy.set", http={"host": "203.0.113.30", "port": 3128},
+                             socks={"host": "203.0.113.31", "port": 1080, "user": "me", "password": "secret"},
+                             ignore=["localhost", "10.1.0.0/16", "*.corp.example", "2001:db8::/32"], udp="block")
+            self.assertTrue(st["active"], st)
+            self.assertEqual((st["socks"]["password"], st["socks"]["has_password"]), ("", True), "no password out")
+            self.assertEqual(self.c.call("settings.get", key="netproxy")["socks"]["password"], "********")
+            self.assertNotIn("secret", json.dumps(self.c.call("settings.get")))
+            cfg = self._xray_cfg()
+            outs = {o["tag"]: o for o in cfg["outbounds"]}
+            self.assertEqual(outs["up-http"]["protocol"], "http")
+            self.assertEqual(outs["up-socks"]["settings"]["servers"][0]["users"], [{"user": "me", "pass": "secret"}])
+            rules = cfg["routing"]["rules"]
+            self.assertIn({"type": "field", "inboundTag": ["redirect-in"], "port": "80", "outboundTag": "up-http"}, rules)
+            self.assertEqual(rules[-1]["outboundTag"], "up-socks", "anything else: the SOCKS proxy")
+            self.assertTrue(any("domain:corp.example" in r.get("domain", []) and r["outboundTag"] == "direct" for r in rules))
+            self.assertEqual(cfg["dns"]["servers"], ["tcp://1.1.1.1:53"])
+            rs = applied[-1]
+            self.assertIn("10.1.0.0/16", rs)
+            self.assertIn("203.0.113.30", rs, "the proxy servers themselves are not redirected")
+            self.assertIn("ip6 daddr { 2001:db8::/32 } accept", rs)
+            self.assertEqual(self.mgr.proxy.lock_ips(), {"203.0.113.30", "203.0.113.31"}, "the kill switch lets them through")
+            # the password survives an edit that sends back the masked value
+            self.c.call("netproxy.set", socks={"host": "203.0.113.31", "port": 1080, "user": "me", "password": "********"})
+            self.assertEqual(self.mgr.settings.get("netproxy")["socks"]["password"], "secret")
+            # the Xray proxy waits while the network proxy is on
+            self.c.call("proxy.import", text=self.LINK)
+            self.c.call("proxy.select", ident="Home")
+            px = self.c.call("proxy.set", enabled=True)
+            self.assertFalse(px["running"])
+            self.assertIn("Network Proxy", px["error"])
+            self.assertTrue(px["net"]["active"])
+            rc, out, _ = self._cli("netproxy")
+            self.assertIn("ACTIVE", out)
+            self.assertIn("SOCKS  me@203.0.113.31:1080", out)
+            rc, out, _ = self._cli("netproxy", "set", "https", "http://proxy.example.net:8443")
+            self.assertEqual((rc, self.mgr.settings.get("netproxy")["https"]["host"]), (0, "proxy.example.net"))
+            self._cli("netproxy", "clear", "https")
+            self.assertEqual(self._cli("netproxy", "set", "https", "noport")[0], 1)
+            # switching it off hands Xray back to the proxy
+            st = self.c.call("netproxy.set", enabled=False)
+            self.assertFalse(st["active"])
+            self.assertTrue(self._wait_proxy(True)["running"])
+        finally:
+            self.c.call("netproxy.set", enabled=False, ignore=["localhost", "127.0.0.0/8", "::1"], apps=[], **off)
+            xr.apply_ruleset, xr.remove_ruleset = real
+            self._proxy_reset()
+
+
+def _real_xray():
+    exe = os.environ.get("VPNMAN_REAL_XRAY") or __import__("shutil").which("xray")
+    if exe:
+        try:
+            if b"Xray" in __import__("subprocess").run([exe, "version"], capture_output=True, timeout=10).stdout:
+                return exe
+        except (OSError, Exception):  # noqa: BLE001
+            pass
+    return None
+
+
+class RealXrayTests(unittest.TestCase):
+    """With a real xray (on PATH, or VPNMAN_REAL_XRAY): every configuration VPNMan writes must be accepted by it, and
+    - as root, with nftables and unshare - the network proxy must really carry traffic (tests/netns_check.py)."""
+
+    def setUp(self):
+        self.xray = _real_xray()
+        if not self.xray:
+            self.skipTest("no real xray (set VPNMAN_REAL_XRAY)")
+
+    def _accepts(self, conf):
+        import subprocess
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "c.json")
+        with open(path, "w") as fh:
+            json.dump(conf, fh)
+        r = subprocess.run([self.xray, "run", "-test", "-c", path], capture_output=True, text=True, timeout=30)
+        self.assertIn("Configuration OK", r.stdout + r.stderr, (r.stdout + r.stderr)[-2000:])
+
+    def test_every_configuration_is_valid(self):
+        key = "hPdNm1NU4tHuaKBzUfdxm3meZ9bu9RF7sZkmu--JAlI"           # a real x25519 public key (REALITY checks it)
+        links = [EndToEnd.LINK.replace("pbk=PUB", "pbk=" + key), EndToEnd.LINK2,
+                 "vless://11111111-2222-3333-4444-555555555555@cdn.example.com:443?security=tls&type=ws&host=h.example.com"
+                 "&path=%2Fws&sni=h.example.com#WS",
+                 "ss://" + base64.urlsafe_b64encode(b"aes-256-gcm:pw").decode().rstrip("=") + "@203.0.113.9:8388#SS"]
+        for link in links:
+            ob = _xray.pin_address(_xray.parse_link(link)["outbound"], "203.0.113.50")
+            self._accepts(_xray.build_config(ob, socks=18808, http=18809))
+            self._accepts(_xray.build_config(ob, redirect=18810, dns=18811, mark=_xray.MARK, socks=18808, http=18809))
+            self._accepts(_xray.build_config(ob, forward=(18812, "198.51.100.4", 1194)))
+        self._accepts(_xray.netproxy_config({"http": ("203.0.113.30", 3128, "", ""),
+                                             "socks": ("203.0.113.31", 1080, "me", "pw")},
+                                            redirect=18810, dns=18811, mark=_xray.MARK,
+                                            direct_nets=["10.0.0.0/8", "2001:db8::/32"], direct_domains=["corp.example"]))
+
+    def test_network_proxy_in_a_private_network_namespace(self):
+        import shutil
+        import subprocess
+        if os.geteuid() != 0 or not shutil.which("unshare") or not shutil.which("nft"):
+            self.skipTest("needs root, unshare and nft")
+        r = subprocess.run(["unshare", "-n", sys.executable, os.path.join(os.path.dirname(__file__), "netns_check.py"),
+                            self.xray], capture_output=True, text=True, timeout=120)
+        if "Operation not permitted" in r.stderr and "NETNS-OK" not in r.stdout:
+            self.skipTest("network namespaces are not allowed here")
+        self.assertIn("NETNS-OK", r.stdout, (r.stdout + r.stderr)[-3000:])
 
 
 class ScheduleTests(unittest.TestCase):
