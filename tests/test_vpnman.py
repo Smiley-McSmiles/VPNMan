@@ -2493,6 +2493,15 @@ AAAA
         finally:
             blocks.supported = real
 
+    def test_doctor_and_protocols_run(self):
+        """Regression: `vpnman doctor` crashed (AttributeError: json) after `protocols` got --json."""
+        rc, out, err = self._cli("doctor")
+        self.assertIn("Proxy engine:", out, out + err)
+        self.assertIn("Helpers:", out)
+        rc, out, _ = self._cli("protocols", "--json")
+        self.assertEqual(rc, 0)
+        self.assertIn("helpers", json.loads(out))
+
     def test_group_order_and_network_rules_from_the_command_line(self):
         ids = []
         for name, group in (("a1", "Alpha"), ("b1", "Beta"), ("g1", "Gamma")):
