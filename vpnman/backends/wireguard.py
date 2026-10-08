@@ -104,6 +104,11 @@ class WireGuard(Backend):
 
         # pre-resolved endpoints keep wg from needing DNS under the kill switch
         text = re.sub(r"^(\s*Endpoint\s*=\s*)(.+)$", sub, text, flags=re.M | re.I)
+        fwd = ctx.state.get("xray_fwd")
+        if fwd:
+            # a proxy (Xray) in front of the VPN: the peer is reached through the local UDP forwarder
+            text = re.sub(r"^(\s*Endpoint\s*=\s*)(.+)$", lambda m: "%s127.0.0.1:%d" % (m.group(1), fwd["port"]),
+                          text, flags=re.M | re.I)
         if self._native():
             ctx.state["conf"] = text
             return
@@ -143,7 +148,7 @@ class WireGuard(Backend):
             if "endpoint" in p:
                 h, port = split_endpoint(p["endpoint"])
                 pc += ["wgendpoint", h, str(port)]
-                if gw and _is_ip(h):
+                if gw and _is_ip(h) and not h.startswith("127."):
                     hostroutes.append(h)
                     cmds.append(["route", "-q", "add", "-host", h, gw])
             if "presharedkey" in p:

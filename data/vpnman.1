@@ -1,62 +1,1091 @@
-.TH VPNMAN 1 "2026" "vpnman 1.0.6" "User Commands"
+.TH VPNMAN 1 "October 2026" "vpnman 1.0.7" "User Commands"
+.\" Written for man(7) / mdoc-free roff so it renders on every man implementation (man-db, mandoc, BSD).
 .SH NAME
-vpnman \- multi-protocol VPN manager with a kill switch
+vpnman, vpnmand, vpnman\-gtk \- multi\-protocol VPN manager with a kill switch
 .SH SYNOPSIS
 .B vpnman
-[\fICOMMAND\fR] [\fIARGS\fR]
+[\fICOMMAND\fR [\fIARGUMENTS\fR]]
+.br
+.B vpnman
+.B \-\-help
+|
+.B \-\-version
+.br
+.B vpnman
+\fICOMMAND\fR
+.B \-\-help
+.br
+.B vpnman\-gtk
+[\fB\-\-background\fR]
 .br
 .B vpnmand
 .SH DESCRIPTION
-Run without arguments in a terminal for an interactive menu. \fBvpnmand\fR is the privileged background daemon
-(managed by systemd, runit, OpenRC, SysV init or OpenBSD rc.d) that owns tunnels and the network lock;
-\fBvpnman\fR and the GTK application talk to it over a Unix socket available to members of the \fBvpnman\fR group.
+.B VPNMan
+manages VPN connections from the terminal or from a GTK\ 4 / libadwaita desktop application.
+It speaks OpenVPN, WireGuard and a long list of other protocols (see
+.BR PROTOCOLS ),
+keeps your traffic from leaking with a firewall\-based \fBkill switch\fR, reconnects and fails over
+automatically, lets chosen applications and addresses bypass the VPN, connects on a schedule or on
+untrusted networks, can put a VLESS/VMess/Trojan/Shadowsocks proxy (Xray) in front of or behind the VPN, and runs on systemd, runit, OpenRC, SysV init, OpenBSD and FreeBSD.
+.PP
+It consists of three programs:
+.TP
+.B vpnmand
+The privileged background \fBdaemon\fR (run as root by the init system).
+It owns the tunnels, the firewall rules, the DNS settings, the schedule and the network monitor.
+Tunnels and firewall rules are only ever created or changed by the daemon, never by the front ends.
+.TP
+.B vpnman
+The command line interface described in this page. Run without arguments in a terminal it shows an
+interactive menu; otherwise it prints the connection status.
+.TP
+.B vpnman\-gtk
+The graphical application (also started by \fBvpnman gui\fR or from the application menu).
+.PP
+The front ends talk to the daemon over a Unix socket (\fI/run/vpnman/vpnman.sock\fR). Who may use it is
+described under
+.BR "ACCESS CONTROL" .
+Most commands therefore need no \fBsudo\fR; only installing, service control and cleanup do.
+.SH QUICK START
+.nf
+sudo vpnman service enable        # once: start the background service now and at every boot
+vpnman import work.ovpn           # add a profile (OpenVPN, WireGuard, ...)
+vpnman connect Work               # connect and wait until the tunnel is up
+vpnman lock on                    # engage the kill switch
+vpnman leaktest                   # verify: tunnel, public IP, kill switch, DNS and IPv6
+vpnman disconnect
+.fi
+.PP
+Most installs (packages and \fBinstall.sh\fR) already enable the service, so the first line is usually not needed.
+.PP
+Anywhere a \fIPROFILE\fR is expected you may give the profile's id, its exact name, or any unique part of its name
+(case\-insensitive). An ambiguous part of a name is refused with the list of matches.
 .SH COMMANDS
+Commands that talk to the daemon print \fBerror: ...\fR and exit with status 2 if it is not running
+(start it with \fBsudo vpnman service enable\fR).
+All commands accept \fB\-h\fR/\fB\-\-help\fR, which prints the options and examples of that command.
+.SS Connecting
 .TP
-status, list, connect, disconnect, import, add, remove, edit, fav, block, ping
-Manage profiles and the connection.
+.B status \fR[\fB\-\-json\fR]
+Show the state (disconnected, connecting, connected, reconnecting, error), the profile, the interface,
+the public IP, uptime, traffic and rates, and the kill switch. The exit status is 0 when connected and 3
+otherwise, so \fBvpnman status >/dev/null\fR works as a test in scripts. \fB\-\-json\fR prints the raw status object.
 .TP
-lock on|off|status
-Engage or release the network lock (kill switch).
+.B connect \fR[\fIPROFILE\fR] [\fB\-\-fastest\fR] [\fB\-\-last\fR] [\fB\-\-no\-wait\fR] [\fB\-\-timeout\fR \fISECONDS\fR]
+Connect and wait until the tunnel is up (default timeout 90 seconds), printing the progress. Without a
+profile it reconnects the last one used. \fB\-\-fastest\fR measures every profile that is not blocked and uses
+the one with the lowest latency. \fB\-\-no\-wait\fR returns at once. If a connection is already up it is replaced
+by the new one (no double tunnels). If the server rejects the username or password, VPNMan stops retrying,
+and in a terminal asks for new credentials, stores them and tries again. Alias:
+.BR up .
 .TP
-schedule [list|add|remove|enable|disable|on|off]
-Connect (and optionally disconnect) at set times; see vpnman schedule --help.
+.B disconnect
+Take the VPN down. The kill switch is released too unless it was engaged by hand (\fBvpnman lock on\fR) or
+\fBnetlock.persist\fR is set. Alias:
+.BR down .
 .TP
-bypass [list|add|remove|available|on|off]
-Applications that keep using the normal connection while the VPN is up (split tunnel, Linux).
+.B lock \fR[\fBon\fR|\fBoff\fR|\fBstatus\fR]
+Engage, release or show the kill switch (see
+.BR "KILL SWITCH" ).
+A lock engaged with \fBon\fR stays until you run \fBoff\fR, even across disconnects.
 .TP
-routes [list|add|remove]
-Addresses, networks or domains that always skip the VPN and are never blocked by the kill switch.
+.B ping \fR[\fIPROFILE\fR...]
+Measure the round\-trip time to the servers (all profiles when none is named): a TCP connect for TCP servers,
+ICMP ping for UDP ones. Unreachable servers are reported as such.
+.SS Profiles
 .TP
-networks [show|trust|untrust]
-The current network and trusted networks (automatic connect on untrusted ones).
+.B list \fR[\fB\-l\fR|\fB\-\-latency\fR] [\fB\-\-sort\fR \fIname\fR|\fIlatency\fR|\fIgroup\fR] [\fB\-\-names\fR] [\fB\-\-json\fR]
+List the profiles with protocol and server. A star marks favourites, a crossed circle marks blocked profiles,
+and the group is shown in brackets. \fB\-\-latency\fR measures every server; \fB\-\-sort latency\fR implies it.
+\fB\-\-names\fR prints one name per line (used by the shell completions). Alias:
+.BR ls .
 .TP
-leaktest
-Check the live connection: tunnel, public IP, kill switch, DNS and IPv6 leaks.
+.B import \fR[\fIoptions\fR] \fIPATH\fR...
+Import configuration files. The protocol is detected from the file name and contents; \fB\-\-protocol\fR forces
+one. A directory is searched recursively (files ending in \fI.ovpn .conf .swanctl .vpnc .fortivpn .yml .yaml\fR)
+and the name of the sub\-folder a file was found in becomes the profile's \fBgroup\fR. Certificates and keys a
+config refers to by file name are copied along. Importing is safe to repeat: two profiles with the same name get
+distinct names, and one failing file never stops the others (every failure is reported).
+.IP
+After the import, parts of an OpenVPN config that cannot work on this system are listed as \fBnote:\fR lines and
+are ignored when connecting: Windows\-only options (\fBregister\-dns\fR, \fBblock\-outside\-dns\fR, \fBdhcp\-renew\fR,
+\fBip\-win32\fR, \fBroute\-method\fR, ...), \fBup\fR/\fBdown\fR/\fBroute\-up\fR style hooks that point at missing
+scripts or at DNS helpers such as \fBupdate\-resolv\-conf\fR (VPNMan sets the DNS servers itself), and a missing
+CA certificate. DNS servers written into the config as \fBdhcp\-option DNS\fR are honoured.
+.RS
 .TP
-failover PROFILE [SERVER...] [--clear]
-Show or set the servers to try, in order, when PROFILE keeps failing.
+.BI \-\-name " NAME"
+Profile name (only with a single file; default: the file name without its extension).
 .TP
-update
-Check GitHub for a newer release (exit status 10 if there is one).
+.BI \-\-protocol " ID"
+Skip detection. See \fBvpnman protocols\fR for the ids.
 .TP
-history
-Recent connections with duration and traffic.
+.BI \-\-user " USER"
+Username to store.
 .TP
-backup export|import FILE
-Back up or restore all profiles (including credentials) and settings.
+.BI \-\-password " PASSWORD"
+Password to store. It is visible to other users in the process list; prefer
+.BR \-\-ask\-password .
 .TP
-cleanup
-Remove firewall rules, routes and cgroups VPNMan left behind (root).
+.B \-\-ask\-password
+Prompt for the password.
 .TP
-get, set
-Read or change settings (dotted keys such as netlock.allow_lan).
+.BI \-\-stunnel " HOST[:PORT]"
+Carry OpenVPN over TLS through stunnel (default port 443). See
+.BR "SSL TUNNEL (STUNNEL)" .
 .TP
-logs [-f], protocols, doctor, service, daemon, gui
-Diagnostics, service control and the GTK interface.
+.BI \-\-stunnel\-sni " NAME"
+TLS server name to present.
+.TP
+.BI \-\-stunnel\-ca " FILE"
+CA certificate with which to verify the stunnel server.
+.TP
+.BI \-\-stunnel\-verify " none|system|ca"
+How to verify the stunnel server.
+.RE
+.TP
+.B add \fIname\fR \fB\-\-protocol\fR \fIID\fR [\fB\-\-server\fR \fIHOST\fR] [\fB\-\-port\fR \fIN\fR] [\fB\-\-user\fR \fIUSER\fR] [\fB\-\-ask\-password\fR] [\fB\-o\fR|\fB\-\-option\fR \fIKEY=VALUE\fR]...
+Create a profile without a config file, for protocols that need only a server and credentials (OpenConnect,
+SSTP, PPTP, Tailscale, ...). \fB\-o\fR may be repeated for protocol options such as \fBexit_node=100.64.0.1\fR.
+.TP
+.B edit \fIPROFILE\fR \fIKEY=VALUE\fR...
+Change fields: \fBname\fR, \fBusername\fR, \fBpassword\fR, \fBserver\fR, \fBport\fR, \fBdns\fR (comma separated
+list that overrides the DNS servers for this profile), \fBnotes\fR, \fBgroup\fR, \fBfavorite\fR and \fBblacklisted\fR
+(true/false), and the stunnel fields \fBstunnel=HOST:PORT\fR (or \fBoff\fR), \fBstunnel_sni\fR, \fBstunnel_ca=FILE\fR and
+\fBstunnel_verify\fR.
+.TP
+.B remove \fIPROFILE\fR...
+Delete profiles and their stored credentials. If one of them is connected, the VPN is disconnected first.
+Alias:
+.BR rm .
+.TP
+.B fav \fIPROFILE\fR...   unfav \fIPROFILE\fR...
+Mark or unmark favourites. Favourites sort first and are the last resort of failover.
+.TP
+.B block \fIPROFILE\fR...   unblock \fIPROFILE\fR...
+Blacklist a profile: \fB\-\-fastest\fR, the scheduler's \fBfastest\fR and failover never pick it (you can still
+connect to it by name).
+.TP
+.B group \fR[\fIlist\fR]
+.TQ
+.B group edit \fIGROUP\fR \fIKEY=VALUE\fR... [\fB\-\-ask\-password\fR]
+List the groups (a profile's group is set with \fBedit PROFILE group=NAME\fR, or comes from the folder it was
+imported from), or change \fBevery server in a group at once\fR. Keys: \fBname\fR (renames the group),
+\fBusername\fR, \fBpassword\fR (or \fB\-\-ask\-password\fR), \fBstunnel=HOST[:PORT]\fR (or \fBoff\fR),
+\fBstunnel_sni\fR and \fBstunnel_verify\fR. Whatever is not named stays as it is. The SSL tunnel is applied to the
+OpenVPN servers of the group only; the others are reported as skipped. \fIGROUP\fR may be a unique part of the name.
+.TP
+.B failover \fIPROFILE\fR [\fISERVER\fR...] [\fB\-\-clear\fR]
+Show or set the servers tried, in order, when \fIPROFILE\fR keeps failing. See
+.BR FAILOVER .
+.SS Safety and privacy
+.TP
+.B bypass \fR[\fIlist\fR|\fIadd\fR|\fIremove\fR|\fIavailable\fR|\fIon\fR|\fIoff\fR|\fImode\fR] [\fIAPP\fR...]
+Applications that skip the VPN. See
+.BR "APP BYPASS" .
+Alias:
+.BR split .
+.TP
+.B routes \fR[\fIlist\fR|\fIadd\fR|\fIremove\fR] [\fIADDRESS\fR...]
+Addresses, networks (CIDR) or domain names that always use your normal connection and are never blocked by the
+kill switch. See
+.BR "BYPASS ADDRESSES" .
+.TP
+.B dns \fR[\fIPRESET\fR | \fIIP\fR[,\fIIP\fR...] | \fBprovider\fR | \fBoff\fR]
+Choose the DNS servers used while connected. Without an argument it shows the current choice and the presets
+(Cloudflare, Cloudflare malware\-blocking, Google, Quad9, OpenDNS, AdGuard, Mullvad). \fBprovider\fR uses the
+servers the VPN pushes; \fBoff\fR leaves your DNS settings untouched (this can leak queries). Takes effect
+immediately if connected. See
+.BR DNS .
+.TP
+.B leaktest \fR[\fB\-\-json\fR]
+Test the live connection: that the tunnel is up, the public IP, that traffic outside the tunnel is really blocked
+while the kill switch is engaged, that the DNS servers sit behind the tunnel and that IPv6 cannot bypass it.
+Prints a mark for each check (ok, warning, fail, info). Exit status 1 if a check fails. Connect first.
+.TP
+.B connections \fR[\fB\-l\fR|\fB\-\-listening\fR] [\fB\-\-local\fR] [\fB\-r\fR|\fB\-\-resolve\fR] [\fB\-w\fR|\fB\-\-watch\fR] [\fB\-\-json\fR]
+The network connections of this computer as the daemon sees them: the way (\fBin\fR, \fBout\fR, \fBlisten\fR), the
+application and its pid, the protocol (TCP, UDP, with a 6 for IPv6), the local and remote address and port, and the TCP
+state. A TCP connection is \fBin\fR when a local listener accepted it. Sockets that only wait for connections
+(\fB\-\-listening\fR) and connections that never leave this computer (\fB\-\-local\fR) are hidden unless asked for.
+\fB\-\-resolve\fR shows host names instead of addresses where reverse DNS knows them (the lookups are done in the
+background by the daemon, so names appear a moment later; they are cached for ten minutes and cost DNS queries, which is
+why it is off by default). \fB\-\-watch\fR refreshes every two seconds. Linux reads \fI/proc/net\fR and finds the owner of every socket through
+\fI/proc/PID/fd\fR; FreeBSD uses \fBsockstat\fR; other BSD systems use \fBnetstat\fR and show no application names.
+The same table is on the Connection page of the application.
+.TP
+.B blocks \fR[\fIlist\fR|\fIadd\fR|\fIremove\fR|\fIenable\fR|\fIdisable\fR|\fIon\fR|\fIoff\fR] [\fIARG\fR...] [\fB\-\-proto\fR \fBany\fR|\fBtcp\fR|\fBudp\fR] [\fB\-\-note\fR \fITEXT\fR] [\fB\-\-json\fR]
+Addresses, ports and programs that may not use the network. See
+.BR "BLOCKED CONNECTIONS" .
+\fBlist\fR (the default) shows the entries with their ids; \fBadd\fR \fIKIND\fR \fIVALUE\fR blocks one (\fIKIND\fR is
+\fBaddress\fR, \fBendpoint\fR, \fBport\fR or \fBapp\fR; \fB\-\-proto\fR applies to endpoints and ports; \fB\-\-note\fR is a
+reminder); \fBremove\fR \fIID\fR... unblocks; \fBenable\fR/\fBdisable\fR \fIID\fR... keep an entry but stop or resume
+enforcing it; \fBon\fR/\fBoff\fR switch the whole list.
+.TP
+.B proxy \fR[\fIlist\fR|\fIadd\fR|\fIrefresh\fR|\fIremove\fR|\fIedit\fR|\fIuse\fR|\fIon\fR|\fIoff\fR|\fIorder\fR|\fImode\fR|\fIset\fR|\fIstatus\fR|\fIping\fR] [\fIARG\fR...]
+Proxies served through Xray, alone or together with the VPN. See
+.BR "PROXIES (XRAY)" .
+.RS
+.TP
+.B proxy list \fR[\fB\-l\fR|\fB\-\-latency\fR] [\fB\-\-json\fR]
+The proxies; a dot marks the one in use.
+.TP
+.B proxy add \fISOURCE\fR... [\fB\-\-name\fR \fINAME\fR] [\fB\-\-group\fR \fIGROUP\fR]
+Add proxies. A \fISOURCE\fR is a share link (\fBvless://\fR, \fBvmess://\fR, \fBtrojan://\fR, \fBss://\fR), a file that
+holds links (or an Xray JSON config), or an \fBhttp(s)://\fR subscription address, which is downloaded as you (not by the
+daemon) and remembered so that \fBrefresh\fR can update it. \fB\-\-group\fR names the group the proxies go into
+(default: the subscription's host name). A proxy that is already present is not added twice; a line that cannot be
+understood is reported and does not stop the others.
+.TP
+.B proxy refresh \fR[\fIURL\fR...]
+Download the subscriptions again (all of them, or the given ones): new servers appear, changed ones are updated, servers
+that vanished from the list are removed.
+.TP
+.B proxy remove \fINAME\fR...   proxy edit \fINAME\fR \fIKEY=VALUE\fR...
+Delete proxies, or change \fBname\fR, \fBgroup\fR, \fBnotes\fR or \fBfavorite\fR.
+.TP
+.B proxy use \fINAME\fR
+Choose the proxy to use.
+.TP
+.B proxy on   proxy off
+Switch the proxy on or off.
+.TP
+.B proxy order proxy_only\fR|\fBvpn_proxy\fR|\fBproxy_vpn
+How the proxy and the VPN are combined (see PROXIES).
+.TP
+.B proxy mode local\fR|\fBsystem
+A proxy for applications, or all TCP and DNS of this computer (Linux).
+.TP
+.B proxy set \fIKEY\fR \fIVALUE
+\fBsocks_port\fR, \fBhttp_port\fR, \fBdns\fR, \fBudp\fR (\fBblock\fR or \fBdirect\fR), \fBorder\fR, \fBmode\fR.
+.TP
+.B proxy status \fR[\fB\-\-json\fR]   \fBproxy ping \fR[\fINAME\fR...]
+Show whether it runs, with the addresses of the local proxies; or measure the connect time to the proxy servers.
+.RE
+.TP
+.B networks \fR[\fIshow\fR|\fItrust\fR|\fIuntrust\fR] [\fINAME\fR]
+Show the current network and the trusted ones, or mark one as trusted (the current one when no \fINAME\fR is
+given). See
+.BR "TRUSTED NETWORKS" .
+.TP
+.B schedule \fR[\fIlist\fR|\fIadd\fR|\fIremove\fR|\fIenable\fR|\fIdisable\fR|\fIon\fR|\fIoff\fR] [\fIID\fR|\fINAME\fR] [options]
+Connect at set times. See
+.BR SCHEDULE .
+.TP
+.B autostart \fR[\fBoff\fR|\fBlast\fR|\fBfastest\fR|\fIPROFILE\fR] [\fB\-\-login\-app\fR \fBon\fR|\fBoff\fR]
+Choose what the daemon connects to when the machine boots (setting \fBconnection.autoconnect\fR) and whether the
+tray application starts at login for the current user (an XDG autostart entry
+\fI~/.config/autostart/\:io.github.smiley_mcsmiles.VPNMan.desktop\fR). At boot the daemon waits up to
+\fBconnection.autoconnect_wait\fR seconds for a network and keeps retrying until it connects.
+.SS Maintenance
+.TP
+.B backup export\fR|\fBimport\fR \fIFILE\fR [\fB\-\-replace\fR] [\fB\-\-settings\fR] [\fB\-\-force\fR]
+Write all profiles (with their passwords and private keys) and the settings to a single file, or restore them.
+\fBexport\fR refuses to overwrite a file without \fB\-\-force\fR and writes it readable by you only. \fBimport\fR adds
+the profiles that are missing and changes nothing else; \fB\-\-replace\fR first removes every profile on this machine
+and restores the settings as well; \fB\-\-settings\fR restores the settings without \fB\-\-replace\fR. The backup is
+an ordinary \fI.tar.gz\fR; it is \fBnot encrypted\fR, so keep it somewhere safe. Importing never trusts the archive: only the expected file names are accepted (no paths, links or devices) and
+sizes are capped.
+.TP
+.B history \fR[\fB\-n\fR|\fB\-\-lines\fR \fILINES\fR] [\fB\-\-json\fR] [\fB\-\-clear\fR]
+Recent connections: when, how long, traffic and why each one ended. The last 200 are kept in
+\fI/etc/vpnman/history.json\fR.
+.TP
+.B logs \fR[\fB\-n\fR|\fB\-\-lines\fR \fILINES\fR] [\fB\-f\fR|\fB\-\-follow\fR]
+The daemon's recent log (connections, output of the VPN programs, firewall changes, errors). \fB\-f\fR follows it.
+The log is also written to \fI/var/log/vpnman.log\fR.
+.TP
+.B get \fR[\fIKEY\fR]   \fBset\fR \fIKEY\fR \fIVALUE\fR
+Show or change settings. Keys are dotted (\fBnetlock.allow_lan\fR). A section or the whole tree is shown as JSON.
+\fBset\fR takes effect immediately and is saved. Booleans accept true/false, on/off, yes/no, 1/0; lists are comma
+separated. See
+.BR SETTINGS .
+.TP
+.B update \fR[\fB\-\-json\fR]
+Ask GitHub for the newest VPNMan release and compare it with the installed one. Runs as you (not through the
+daemon); nothing is downloaded or installed. Exit status 10 means a newer version exists.
+.TP
+.B protocols
+List every supported protocol, whether its programs are installed, and what to install if not.
+.TP
+.B doctor \fR[\fB\-\-fix\fR]
+Report distribution, init system, daemon, firewall, the launcher and icons, tray support and available protocols.
+\fB\-\-fix\fR (root) copies the launcher and icons into \fI/usr/share\fR, rebuilds the icon caches and removes stale
+bytecode; log out and in afterwards. This is the first thing to run if VPNMan is missing from the menu.
+.TP
+.B cleanup \fR[\fB\-\-force\fR]
+(root) Remove everything VPNMan created in the system: kill\-switch rules, the app\-bypass table, routing rule and
+table, and the cgroups. Refuses to run while the service is running unless \fB\-\-force\fR is given. Use it if a
+crash left you offline. Uninstalling runs it for you.
+.TP
+.B service install\fR|\fBuninstall\fR|\fBenable\fR|\fBdisable\fR|\fBstart\fR|\fBstop\fR|\fBrestart\fR|\fBstatus\fR [\fB\-\-init\fR \fISYSTEM\fR]
+(root) Install or control the background service with the init system of this machine (auto\-detected;
+\fB\-\-init\fR forces \fIsystemd\fR, \fIrunit\fR, \fIopenrc\fR, \fIsysv\fR, \fIopenbsd\-rc\fR or \fIbsd\-rc\fR).
+\fBenable\fR installs the definition if needed, enables it at boot and starts it; \fBdisable\fR does the reverse;
+\fBinstall\fR/\fBuninstall\fR only add or remove the service definition.
+.TP
+.B daemon
+(root) Run the daemon in the foreground. This is what the init system runs as \fBvpnmand\fR. For debugging, stop the
+service first.
+.TP
+.B gui \fR[\fB\-\-background\fR]
+Open the graphical application. \fB\-\-background\fR starts it minimised to the tray.
+.TP
+.B about
+Credits, license and how to support the project.
+.TP
+.B shell \fR(alias \fBmenu\fR)
+Open the interactive menu (also what plain \fBvpnman\fR does in a terminal).
+.SH INTERACTIVE MENU
+Plain \fBvpnman\fR in a terminal shows the status and a one\-key menu: \fBc\fR Connect, \fBf\fR Connect to fastest,
+\fBd\fR Disconnect, \fBs\fR Servers / profiles (favourites, blocking, editing, removing), \fBl\fR Network lock,
+\fBi\fR Import profile(s), \fBp\fR Preferences, \fBa\fR App bypass, \fBt\fR Schedule, \fBg\fR View log,
+\fBx\fR System check and \fBq\fR Quit. It uses the same daemon calls as the commands above.
+.SH GRAPHICAL APPLICATION
+.B vpnman\-gtk
+(or \fBvpnman gui\fR) needs PyGObject, GTK\ 4 and libadwaita 1.4 or newer; the traffic graph additionally needs
+pycairo (without it a text line is shown instead). Its pages are:
+.TP
+.B Connection
+Choose a server and connect or disconnect; status, public IP, uptime and a live traffic graph; a live
+\fBConnections\fR table (way, application and pid, protocol, local and remote address and port, state, refreshed every two
+seconds while the page is open, with a filter box and switches for listening sockets, local connections and \fBResolve names\fR; a
+\fBPop out\fR button opens the same table in a window of its own with a \fBPause\fR button for reading it; right\-click a
+row to \fBcopy\fR its remote or local address, the application or the whole row, to \fBforce\-close\fR the connection, to
+\fBstop\fR or \fBforce\-kill\fR the application (only your own programs) and to \fBblock\fR the remote address, the address
+and port, the remote or local port, or the application; \fBBlocked connections\fR below the table opens the window where
+the blocks are added, switched off and removed); recent connections; DNS servers; start at boot. The server drop\-down follows profile changes immediately.
+.TP
+.B Servers
+Two sub\-tabs. \fBVPN Servers\fR: all profiles, with a search box on top, grouped by group name and sorted by favourites, name or latency (\fBTest
+Latency\fR, or automatically every 5/15/30 minutes while the tab is open), and favourite and block buttons.
+Select several servers with Ctrl+click, Shift+click or Ctrl+A and remove or \fBEdit\fR them together (Delete key,
+or the selection bar). The \fBEdit\fR button next to a group's name renames the group and edits all its servers
+at once; the same dialog, opened from the selection bar, edits just the selected servers. In it you can set the group,
+the username and password, and enable, change or disable the SSL tunnel (stunnel) server for all of them; fields
+left empty stay as they are. \fBAdd Profile\fR (and the \fB+\fR button in the header bar) imports files or adds a profile by
+hand; editing a profile also sets its failover servers.
+.RS
+.PP
+\fBProxy\fR: the proxies (add share links, load a file, or give a subscription address; \fBRefresh Subscriptions\fR
+re\-downloads them), a check box to choose the one in use, latency, multi\-select with Ctrl+click, Shift+click or Ctrl+A to remove several proxies
+at once (Delete key, or the selection bar), and above the list the controls: \fBUse the
+proxy\fR (with its live state), \fBPath of your traffic\fR (proxy only, VPN then proxy, proxy then VPN), \fBMode\fR (local proxy or
+system\-wide), the local addresses with copy buttons, and the ports, DNS server and UDP behaviour.
+.RE
+.TP
+.B Network Lock
+The kill switch: engage it now, and its behaviour (see
+.BR "KILL SWITCH" ).
+.TP
+.B Schedule
+Times at which the VPN connects and disconnects.
+.TP
+.B Apps
+Applications and addresses that skip the VPN, and the bypass mode.
+.TP
+.B Log
+The daemon's log, live.
+.PP
+The main menu holds \fBPreferences\fR, \fBExport Backup\fR / \fBRestore Backup\fR, \fBTest connection\fR,
+\fBCheck for Updates\fR, \fBAbout\fR and \fBQuit\fR. Preferences cover reliability (reconnect, retries, failover,
+timeouts), extra OpenVPN arguments, DNS and the connection checks, trusted networks, and interface options:
+notifications, running in the background (tray), automatic latency tests and the daily update check (off by
+default).
+.PP
+A rejected login opens a prompt for the username and password and reconnects. Closing the window keeps the
+application in the system tray when a tray is available (\fBrun in background\fR); \fBQuit\fR ends it. The GUI
+holds no privileges; everything it does goes through the daemon.
+.PP
+All pop\-up windows and dialogs (the connection table window, blocked connections, profile and group editors, preferences, ...)
+close with \fBEscape\fR or \fBCtrl+W\fR.
+.SH KILL SWITCH
+The network lock (kill switch) blocks all traffic that does not go through the VPN. While it is engaged only these
+may send or receive packets:
+.IP \(bu 2
+the loopback interface;
+.IP \(bu 2
+the VPN tunnel interface(s) and the VPN server addresses (so the tunnel can be established and re\-established);
+.IP \(bu 2
+DHCP (\fBnetlock.allow_dhcp\fR) and the local network (\fBnetlock.allow_lan\fR: 10/8, 172.16/12, 192.168/16, 169.254/16,
+multicast, and the IPv6 equivalents), ICMP echo if \fBnetlock.allow_ping\fR;
+.IP \(bu 2
+the addresses in \fBnetlock.whitelist_out\fR (outgoing) and \fBnetlock.whitelist_in\fR (incoming), and the addresses
+added with \fBvpnman routes\fR;
+.IP \(bu 2
+the applications added with \fBvpnman bypass\fR (their traffic is recognised by a firewall mark).
+.PP
+Everything else, DNS included, is dropped. IPv6 is dropped entirely when \fBnetlock.block_ipv6\fR is on (the
+default), which prevents IPv6 leaks on tunnels that carry only IPv4.
+.PP
+When it engages: \fBvpnman lock on\fR engages it by hand and it stays until \fBvpnman lock off\fR;
+\fBnetlock.enabled\fR engages it automatically with every connection and releases it on disconnect;
+\fBnetlock.persist\fR keeps it engaged after disconnecting and across reboots, so a machine is never exposed between
+boot and the VPN coming up. A lock left behind by a crashed daemon is removed at the next start unless it was set to
+persist or engaged by hand.
+.PP
+Back ends (\fBnetlock.backend\fR, default \fBauto\fR): \fBnftables\fR (table \fIinet vpnman\fR), \fBiptables\fR (chains
+\fBVPNMAN_OUT\fR and \fBVPNMAN_IN\fR, plus ip6tables) and \fBpf\fR (OpenBSD, FreeBSD; loads a complete ruleset and
+restores \fI/etc/pf.conf\fR, or disables pf if it was off, when released). \fBauto\fR prefers nftables, then pf, then
+iptables. The nftables rules are loaded atomically. \fBvpnman cleanup\fR removes whatever any back end left.
+.PP
+Some protocols need extra rules; \fBvpnman protocols\fR and the profile editor show the caveat (PPTP is broken
+cryptographically; policy\-based IPsec has no tunnel interface; Nebula and Tailscale talk to many peers directly and
+those must be whitelisted).
+.SH DNS
+While connected VPNMan can replace the system's DNS servers so queries cannot leak (\fBdns.force\fR, default on). The
+servers used, in order of priority, are \fBdns.servers\fR (if set), then the profile's own \fBdns\fR field, then the
+ones the VPN server pushes. The previous \fI/etc/resolv.conf\fR is restored on disconnect, and also at daemon start if it
+crashed. On systems with systemd\-resolved the servers are set on the tunnel link. Set \fBdns.force\fR to false (or
+\fBvpnman dns off\fR) to leave DNS alone. Use \fBvpnman leaktest\fR to verify. The environment variable
+\fBVPNMAN_RESOLV_CONF\fR overrides the file that is edited.
+.PP
+OpenVPN 2.7's built\-in DNS handling (\fB\-\-dns\-updown\fR) is switched off when supported, because VPNMan manages DNS
+itself.
+.SH APP BYPASS
+Applications added with \fBvpnman bypass add\fR (or on the \fBApps\fR page) keep using your normal connection while
+the VPN is up, and keep working even when the VPN drops under the kill switch. Applications are found from the
+installed \fI.desktop\fR launchers (native, Flatpak and Snap; \fBvpnman bypass available\fR lists them) or may be
+given by process name. VPNMan places the application's processes, and everything they start, in a control group
+and routes that group's traffic outside the tunnel.
+.PP
+Modes (\fBvpnman bypass mode\fR, setting \fBsplit.mode\fR):
+.TP
+.B exclude
+(default) the listed applications skip the VPN.
+.TP
+.B include
+(experimental) \fBonly\fR the listed applications use the VPN; everything else uses the normal connection.
+.PP
+Requirements: Linux with \fBnft\fR, \fBip\fR (iproute2) and a \fBunified cgroup v2\fR hierarchy mounted at
+\fI/sys/fs/cgroup\fR (hybrid cgroup layouts are not supported). It is not available on
+the BSDs. Processes are moved within a couple of seconds of the tunnel coming up or of the application starting.
+.PP
+What it creates (all removed on disconnect, daemon stop, \fBvpnman cleanup\fR and uninstall): the nftables table
+\fIinet vpnman_split\fR, the cgroups \fIvpnman\-bypass\fR and \fIvpnman\-tunnel\fR, firewall mark \fB0x5652\fR, an
+\fBip rule\fR for that mark and routing table \fB5652\fR. VPNMan keeps its rule ahead of those added by
+\fBwg\-quick\fR, so it works with WireGuard as well as OpenVPN. The bypass follows a new default gateway when the
+network changes (for example Ethernet to Wi\-Fi).
+.SH BYPASS ADDRESSES
+\fBvpnman routes\fR keeps a list of IP addresses, networks (CIDR) and domain names that use the normal connection
+instead of the tunnel. They are also allowed through the kill switch. Domain names are resolved when needed and
+refreshed. Typical uses: a company intranet or printer, a banking site, a game server. The list is the setting
+\fBroutes\fR.
+.SH FAILOVER
+When a connection fails \fBconnection.retry_max\fR times in a row (waiting \fBconnection.retry_delay\fR seconds
+between attempts) and \fBconnection.failover\fR is on, VPNMan moves on to another server. The order is:
+.IP 1. 3
+the profile's own failover list (\fBvpnman failover PROFILE SERVER...\fR, or \fBFailover servers\fR in the profile
+editor), in the order given;
+.IP 2. 3
+the other profiles in the same group, if \fBconnection.failover_group\fR is on;
+.IP 3. 3
+your favourites.
+.PP
+Blocked profiles and servers already tried in this round are skipped. A rejected username or password (\fBAUTH_FAILED\fR)
+never causes retries or failover: it stops with a clear message, since another attempt would just repeat the
+wrong credentials. With \fBconnection.reconnect\fR off a lost connection is not re\-established.
+.SH SCHEDULE
+\fBvpnman schedule add --start HH:MM [--end HH:MM] [--days SPEC] [--profile P] [--name N]\fR creates an entry. Times
+are on a 24\-hour clock in the machine's local time. \fB\-\-days\fR accepts \fBall\fR, \fBweekdays\fR, \fBweekends\fR, a
+list such as \fBmon,wed,fri\fR or a range such as \fBmon\-fri\fR. \fB\-\-profile\fR is a profile, \fBfastest\fR or \fBlast\fR
+(the default). An entry with an end time is a window that connects at the start and disconnects at the end; a window
+whose end is not later than its start runs past midnight and belongs to the day it started on. An entry without an end
+only connects. The scheduler reacts to the start and end \fIedges\fR: a manual disconnect inside a window is respected
+until the next edge. \fBvpnman schedule on|off\fR turns the whole scheduler on or off; entries can be enabled or
+disabled individually. The scheduler runs inside the daemon, so it works with nobody logged in.
+.SH TRUSTED NETWORKS
+The daemon watches the network you are on. Wi\-Fi networks are identified by their name (SSID), wired ones by the
+hardware address of the gateway. Mark networks you do not need the VPN on (home, office) with \fBvpnman networks trust\fR.
+Then, with \fBnetwork.untrusted_action\fR set to \fBconnect\fR, VPNMan connects as soon as you join any network that is
+not trusted (to \fBnetwork.profile\fR: \fBlast\fR, \fBfastest\fR or a profile), and with \fBnetwork.trusted_action\fR set to
+\fBdisconnect\fR it disconnects again on a trusted one \(em only if it was the one that connected automatically.
+.SH SSL TUNNEL (STUNNEL)
+OpenVPN over TCP can be wrapped in TLS so that it looks like ordinary HTTPS (useful behind restrictive firewalls).
+VPNMan runs \fBstunnel\fR in client mode on a local port and points OpenVPN at it. Enable it with
+\fBvpnman import \-\-stunnel HOST[:PORT]\fR, \fBvpnman edit PROFILE stunnel=HOST:PORT\fR or in the profile editor.
+\fBstunnel_verify\fR selects \fBnone\fR, \fBsystem\fR (the system CA bundle) or \fBca\fR (the certificate given with
+\fBstunnel_ca\fR, stored in the profile); \fBstunnel_sni\fR sets the TLS server name. The \fBstunnel\fR program must be
+installed.
+.SH BLOCKED CONNECTIONS
+The list of blocked things (setting \fBblocks\fR) is enforced by the nftables table \fIinet vpnman_block\fR, whose chains
+run before the kill switch and the proxy rules. It is built when the daemon starts, rebuilt whenever the list changes and
+removed when the daemon stops. An entry is one of:
+.TP
+.B address
+An IP address or network (CIDR): nothing is sent to it and nothing is accepted from it.
+.TP
+.B endpoint
+An address and a port with a protocol, for example \fB203.0.113.9:443\fR or \fB[2001:db8::1]:443\fR.
+.TP
+.B port
+A port with a protocol: outgoing connections to it and incoming connections to a local service on it.
+.TP
+.B app
+A program by name. Its processes (and everything they start) are kept in the cgroup \fIvpnman\-blocked\fR, whose outgoing
+packets are dropped; running programs are found by a scan every two seconds, so nothing has to be started in a special way.
+Needs cgroup v2 (the same layout as the app bypass); without it addresses and ports still work.
+.PP
+Blocking also \fBcloses the matching connections that are open right now\fR (with \fBss \-K\fR, which needs a kernel built
+with CONFIG_INET_DIAG_DESTROY), because dropped packets alone would let an established TCP connection hang on for minutes.
+Every entry can be switched off without deleting it. Blocking needs Linux with nftables; it is not available on the BSDs.
+.PP
+The GUI offers the same from the right\-click menu of the connection table and from the \fBBlocked connections\fR window.
+Blocks apply to everybody on the computer. \fBvpnman cleanup\fR and uninstalling remove the table and the cgroup.
+.SH PROXIES (XRAY)
+VPNMan can use VLESS, VMess, Trojan and Shadowsocks servers (including Reality, WebSocket, gRPC, HTTPUpgrade, XHTTP,
+mKCP and HTTP/2 transports) through \fBXray\fR (https://github.com/XTLS/Xray\-core), a single self\-contained program
+that is not part of VPNMan: install the \fBxray\fR package of your distribution if it has one, or the release binary for
+your system (Xray publishes builds for Linux, FreeBSD, OpenBSD and others) and put it where \fBPATH\fR finds it
+(\fI/usr/local/bin\fR is searched too). \fBvpnman doctor\fR reports whether it is found. \fBsudo ./install.sh \-\-xray\-only\fR (from the source directory) downloads and installs it for you.
+.PP
+Proxies are stored like VPN profiles, root\-only in \fI/etc/vpnman/proxies/\fR, and are managed in the \fBProxy\fR
+sub\-tab of the Servers page or with \fBvpnman proxy\fR. Share links and subscriptions are converted to Xray's
+configuration when they are imported; the server address is resolved by the daemon, so Xray never needs DNS (which matters
+while the kill switch is up), and clients never see the credentials inside a link.
+.SS Order: how the proxy and the VPN are combined (proxy.order)
+The names describe the path your traffic takes:
+.TP
+.B proxy_only
+You \(-> proxy \(-> internet. Xray runs whenever the proxy is switched on, with or without a VPN. Websites see the
+proxy server's address.
+.TP
+.B vpn_proxy
+You \(-> VPN \(-> proxy \(-> internet. Xray runs \fIinside\fR the tunnel: it is started once the VPN is connected (so its
+own connection to the proxy server goes through the tunnel) and stopped when the VPN goes down or reconnects. Websites see
+the proxy server's address; the proxy server only sees the VPN's address. The kill switch needs no exception for the
+proxy server.
+.TP
+.B proxy_vpn
+You \(-> proxy \(-> VPN \(-> internet. The VPN's own packets travel through the proxy: VPNMan starts Xray before the VPN,
+which then connects to a local forwarder (\fI127.0.0.1\fR) instead of the VPN server, exactly like the SSL tunnel (stunnel)
+does. Your ISP only sees the proxy; websites see the VPN's address. Works with \fBOpenVPN\fR (UDP and TCP) and
+\fBWireGuard\fR/AmneziaWG profiles with a single peer; other protocols are refused with a message, and so is a profile
+that also uses the SSL tunnel. The kill switch lets only the proxy server through, and a host route keeps the proxy server's
+traffic outside the VPN (it follows the default gateway when you change from Wi\-Fi to Ethernet). UDP VPNs need a proxy
+server that carries UDP (VLESS, VMess, Trojan and Shadowsocks do); a TCP profile is the more dependable choice.
+.SS Mode (proxy.mode)
+.TP
+.B local
+Xray offers a SOCKS5 proxy (\fBproxy.socks_port\fR, default 10808) and an HTTP proxy (\fBproxy.http_port\fR, default 10809),
+both on \fI127.0.0.1\fR only, never on the network. Point a browser or program at them, or copy the address from the
+Proxy tab. Nothing else changes on the system.
+.TP
+.B system
+(Linux with nftables.) In addition, every TCP connection and every DNS query of this computer is redirected to Xray with
+the nftables table \fIinet vpnman_proxy\fR, so programs need no settings. Xray's own connections carry the socket mark
+\fB0x5658\fR and are left alone. Not redirected: loopback, the local network (if \fBnetlock.allow_lan\fR), the VPN server
+(in \fBvpn_proxy\fR), the bypass addresses (\fBvpnman routes\fR) and the applications of the app bypass. DNS queries are answered by
+\fBproxy.dns\fR (default 1.1.1.1) \fIthrough the proxy\fR. \fBIPv6 is blocked\fR in this mode, and so is UDP other than DNS
+(QUIC, NTP, voice and game traffic) unless \fBproxy.udp\fR is \fBdirect\fR, in which case that UDP leaves around the
+proxy. System\-wide mode is not available on the BSDs; \fBlocal\fR works everywhere Xray does.
+.SS Behaviour to know
+.IP \(bu 2
+A proxy switched on without a kill switch is not a guarantee: if Xray stops, traffic may go out directly. Combine it with
+the kill switch (\fBvpnman lock on\fR): in \fBproxy_only\fR the proxy server is let through automatically.
+.IP \(bu 2
+Xray is restarted if it dies, and a stale Xray or stale firewall rules left by a crash are removed when the daemon starts.
+\fBvpnman cleanup\fR removes the proxy's firewall table as well.
+.IP \(bu 2
+Subscriptions are downloaded by the program you run (the command line or the GUI), as you; the downloaded text is given to
+the daemon. Nothing is fetched automatically.
+.IP \(bu 2
+Shadowsocks plugins (obfs, v2ray\-plugin) are not supported; use the matching Xray transport instead.
+.IP \(bu 2
+Backups (\fBvpnman backup\fR) include the proxies.
+.SH PROTOCOLS
+The protocol of a profile decides which program VPNMan runs. \fBvpnman protocols\fR shows which are installed.
+.TP
+\fBopenvpn\fR
+OpenVPN (.ovpn) \(em openvpn
+.TP
+\fBwireguard\fR
+WireGuard (wg\-quick .conf) \(em wg, wg\-quick
+.TP
+\fBamneziawg\fR
+AmneziaWG (obfuscated WireGuard) \(em awg, awg\-quick
+.TP
+\fBopenconnect\fR
+AnyConnect, GlobalProtect, Pulse, F5, ... \(em openconnect
+.TP
+\fBopenfortivpn\fR
+Fortinet SSL VPN \(em openfortivpn
+.TP
+\fBikev2\fR
+IKEv2/IPsec (swanctl.conf) \(em swanctl (strongSwan)
+.TP
+\fBsstp\fR
+Microsoft SSTP \(em sstpc, pppd
+.TP
+\fBpptp\fR
+PPTP (legacy, insecure) \(em pppd, pptp
+.TP
+\fBvpnc\fR
+Cisco IPsec \(em vpnc
+.TP
+\fBtailscale\fR
+Tailscale (optional exit node) \(em tailscale
+.TP
+\fBnetbird\fR
+NetBird \(em netbird
+.TP
+\fBzerotier\fR
+ZeroTier (network id) \(em zerotier\-cli
+.TP
+\fBnebula\fR
+Slack Nebula \(em nebula
+.TP
+\fBnetworkmanager\fR
+a VPN defined in NetworkManager \(em nmcli
+.TP
+\fBcustom\fR
+your own connect/disconnect commands \(em (none)
+.PP
+For \fBcustom\fR profiles the commands may use the placeholders \fB{config}\fR, \fB{dir}\fR and \fB{iface}\fR.
+Optional helpers: \fBstunnel\fR (SSL tunnel), \fBnft\fR/\fBiptables\fR/\fBpfctl\fR (kill switch), \fBip\fR and
+cgroup v2 (app bypass), \fBresolvconf\fR or systemd\-resolved (DNS), \fBloginctl\fR (access control).
+.SH SETTINGS
+The settings live in \fI/etc/vpnman/settings.json\fR (root\-owned, mode 600) and are changed with \fBvpnman set\fR,
+\fBvpnman dns\fR, \fBvpnman autostart\fR and the GUI. Sending \fBSIGHUP\fR to \fBvpnmand\fR re\-reads the file after a
+manual edit. Unknown keys and values of the wrong type are ignored.
+.PP
+.B netlock
+.TP
+.B netlock.enabled \fR(false)
+Engage the kill switch automatically on every connection.
+.TP
+.B netlock.persist \fR(false)
+Keep it engaged after disconnecting and across reboots.
+.TP
+.B netlock.backend \fR(auto)
+\fBauto\fR, \fBnftables\fR, \fBiptables\fR or \fBpf\fR.
+.TP
+.B netlock.allow_lan \fR(true)
+Allow private, link\-local and multicast networks.
+.TP
+.B netlock.allow_dhcp \fR(true)
+Allow DHCP so a lease can be renewed.
+.TP
+.B netlock.allow_ping \fR(false)
+Allow ICMP echo.
+.TP
+.B netlock.block_ipv6 \fR(true)
+Drop all IPv6.
+.TP
+.B netlock.whitelist_in\fR, \fBnetlock.whitelist_out \fR(empty)
+IPs or CIDR networks allowed to reach this machine / that it may reach outside the tunnel.
+.PP
+.B dns
+.TP
+.B dns.force \fR(true)
+Replace the DNS servers while connected.
+.TP
+.B dns.servers \fR(empty)
+Custom DNS servers; they override the pushed ones.
+.PP
+.B connection
+.TP
+.B connection.autoconnect \fR(off)
+At boot: \fBoff\fR, \fBlast\fR, \fBfastest\fR or a profile id/name.
+.TP
+.B connection.autoconnect_wait \fR(120)
+Seconds to wait for a network at boot before giving up waiting (it then keeps retrying).
+.TP
+.B connection.reconnect \fR(true)
+Re\-establish a lost connection.
+.TP
+.B connection.retry_max \fR(3), \fBconnection.retry_delay \fR(5)
+Attempts before failing over or giving up, and seconds between attempts.
+.TP
+.B connection.failover \fR(true), \fBconnection.failover_group \fR(true)
+Fail over to another server, and prefer servers of the same group.
+.TP
+.B connection.timeout \fR(60)
+Seconds to wait for a tunnel to come up.
+.TP
+.B connection.openvpn_args \fR(empty)
+Extra raw arguments appended to the OpenVPN command line.
+.PP
+.B access
+.TP
+.B access.mode \fR(session)
+\fBsession\fR or \fBgroup\fR (see ACCESS CONTROL).
+.TP
+.B access.groups \fR(vpnman, wheel, sudo)
+Groups whose members may use the daemon.
+.PP
+.B network
+.TP
+.B network.trusted \fR(empty)
+Trusted networks (set with \fBvpnman networks trust\fR).
+.TP
+.B network.untrusted_action \fR(off), \fBnetwork.trusted_action \fR(off)
+\fBconnect\fR / \fBdisconnect\fR, see TRUSTED NETWORKS.
+.TP
+.B network.profile \fR(last)
+What to connect to on an untrusted network.
+.PP
+.B schedule
+.TP
+.B schedule.enabled \fR(true), \fBschedule.entries\fR
+The scheduler switch and its entries (managed with \fBvpnman schedule\fR).
+.PP
+.B split
+.TP
+.B split.enabled \fR(true), \fBsplit.mode \fR(exclude), \fBsplit.apps\fR
+App bypass switch, mode and the applications (managed with \fBvpnman bypass\fR).
+.PP
+.B routes
+.TP
+.B routes
+Addresses that skip the VPN (managed with \fBvpnman routes\fR).
+.PP
+.B blocks
+.TP
+.B blocks.enabled \fR(true)
+Enforce the list of blocked connections.
+.TP
+.B blocks.entries \fR(empty)
+The list itself (managed with \fBvpnman blocks\fR and the Blocked connections window): each entry has an id, a kind,
+a value, a protocol, a note, an enabled flag and the time it was added.
+.PP
+.B proxy
+.TP
+.B proxy.enabled \fR(false)
+Use the selected proxy.
+.TP
+.B proxy.selected \fR(empty)
+Id of the proxy in use (set with \fBvpnman proxy use\fR).
+.TP
+.B proxy.order \fR(proxy_only)
+\fBproxy_only\fR, \fBvpn_proxy\fR or \fBproxy_vpn\fR (see PROXIES).
+.TP
+.B proxy.mode \fR(local)
+\fBlocal\fR or \fBsystem\fR.
+.TP
+.B proxy.socks_port \fR(10808), \fBproxy.http_port \fR(10809)
+Ports of the local SOCKS5 and HTTP proxies (1024\-65535, different from each other).
+.TP
+.B proxy.dns \fR(1.1.1.1)
+System\-wide mode: the resolver that answers redirected DNS queries (asked through the proxy).
+.TP
+.B proxy.udp \fR(block)
+System\-wide mode: \fBblock\fR drops UDP other than DNS; \fBdirect\fR lets it bypass the proxy.
+.PP
+.B events
+.TP
+.B events.pre_connect\fR, \fBevents.connected\fR, \fBevents.disconnected \fR(empty)
+Commands run through \fB/bin/sh \-c\fR as root (60 second limit) before connecting, once the tunnel is up and after it
+goes down. See
+.BR "EVENT HOOKS" .
+.PP
+.B checks
+.TP
+.B checks.tunnel \fR(true)
+Look up the public IP after connecting.
+.TP
+.B checks.url \fR(https://api.ipify.org?format=json)
+The address asked for the public IP (the lookup goes through the tunnel).
+.PP
+.B ui
+.TP
+.B ui.notifications \fR(true)
+Desktop notifications.
+.SH EVENT HOOKS
+The commands in \fBevents.pre_connect\fR, \fBevents.connected\fR and \fBevents.disconnected\fR run as root with these
+environment variables set: \fBVPNMAN_EVENT\fR (the hook name), \fBVPNMAN_PROFILE\fR (profile name),
+\fBVPNMAN_PROTOCOL\fR and \fBVPNMAN_IFACE\fR (the tunnel interface, empty before it exists). Their output is written to the
+log. A hook that fails or takes longer than 60 seconds is logged and otherwise ignored. Example:
+.PP
+.nf
+vpnman set events.connected 'logger "VPN up on $VPNMAN_IFACE via $VPNMAN_PROFILE"'
+.fi
+.SH ACCESS CONTROL
+The daemon's socket accepts connections from every local user, and each connection is checked (on Linux by the peer
+credentials the kernel supplies). Allowed: \fBroot\fR; members of the groups in \fBaccess.groups\fR (default
+\fBvpnman\fR, \fBwheel\fR, \fBsudo\fR); and, in the default \fBaccess.mode session\fR, any regular user with an active
+\fIlocal\fR login session (the trust model of desktop network managers, so no group membership or re\-login is
+needed). On systems without a session manager any regular local user is allowed. Remote (ssh) sessions are not
+trusted by \fBsession\fR mode. With \fBaccess.mode group\fR only root and group members may connect. Decisions are cached
+for a few seconds. The installer adds the user who ran \fBsudo\fR to the \fBvpnman\fR group.
+.PP
+Stored passwords never leave the daemon: clients only see whether a password exists.
+.SH INSTALLATION
+Install a package (\fB.deb\fR, \fB.rpm\fR, Arch \fB.pkg.tar.xz\fR; recipes for Void, Alpine and OpenBSD are generated
+by \fBpackage.sh\fR), or from the source tarball:
+.PP
+.nf
+tar xf vpnman-VERSION.tar.gz && cd vpnman-VERSION
+sudo ./install.sh                       # to /usr/local, service enabled for this machine
+sudo ./install.sh \-\-prefix /usr         # another prefix (recommended on desktops)
+sudo ./install.sh \-\-install\-deps        # also install dependencies with the native package manager (and Xray)
+sudo ./install.sh \-\-xray\-only           # only download and install Xray, the engine of "vpnman proxy"
+\&./install.sh \-\-check                   # only report what is missing
+.fi
+.PP
+\fBinstall.sh\fR options: \fB\-\-prefix DIR\fR; \fB\-\-init SYSTEM\fR (\fIauto\fR, \fIsystemd\fR, \fIsysv\fR, \fIopenrc\fR,
+\fIrunit\fR, \fIopenbsd\fR, \fIfreebsd\fR, \fIall\-linux\fR, \fInone\fR); \fB\-\-no\-post\fR (do not create the group, touch
+caches or enable the service); \fB\-\-no\-system\-links\fR; \fB\-\-install\-deps\fR; \fB\-\-install\-xray\fR; \fB\-\-xray\-only\fR; \fB\-\-check\fR; \fB\-\-uninstall\fR and
+\fB\-\-purge\fR. \fB\-\-install\-xray\fR downloads the official Xray release for this machine (Linux, FreeBSD or OpenBSD; it needs curl or
+wget), verifies it against the checksum published next to it (a mismatch aborts, a missing checksum file only warns) and installs the
+single program as \fIPREFIX\fR/bin/xray, replacing an older copy. Xray needs no service of its own, so this works on any init
+system. \fB\-\-xray\-only\fR does just that (as a normal user if \fIPREFIX\fR/bin is writable); \fB\-\-install\-deps\fR does it
+when Xray is missing. \fB\-\-uninstall\fR removes an Xray that this installer put there and leaves any other copy alone.
+With \fBDESTDIR\fR set it stages files for packaging. It supports apt, dnf, pacman, xbps, apk, zypper,
+pkg_add and pkg for dependencies, installs wrapper scripts that choose a Python interpreter that really has
+PyGObject (so desktop launchers work even when another Python comes first in \fBPATH\fR), copies the launcher and
+icons into \fI/usr/share\fR when installing elsewhere (some desktops ignore \fI/usr/local/share\fR), restores SELinux
+contexts, creates the \fBvpnman\fR group, and waits for the service to answer, printing diagnostics if it does not.
+.PP
+Requirements: Python 3.9 or newer; for the GUI PyGObject, GTK\ 4 and libadwaita 1.4+ (plus pycairo for the traffic
+graph, and the XApp/GTK\ 3 typelibs for the tray on Cinnamon); the program of each protocol you use; and one of
+\fBnft\fR, \fBiptables\fR or \fBpfctl\fR for the kill switch.
+.SS Where things are installed
+With the default prefix \fI/usr/local\fR (packages use \fI/usr\fR):
+.TP
+\fIPREFIX\fR/bin/vpnman, vpnmand, vpnman\-gtk
+the programs (small wrapper scripts)
+.TP
+\fIPREFIX\fR/lib/vpnman/vpnman/
+the Python package
+.TP
+\fIPREFIX\fR/share/vpnman/
+init templates and a private icon copy
+.TP
+\fIPREFIX\fR/share/applications/
+io.github.smiley_mcsmiles.VPNMan.desktop
+.TP
+\fIPREFIX\fR/share/icons/hicolor/, share/pixmaps/
+icons
+.TP
+\fIPREFIX\fR/share/metainfo/
+AppStream metadata (also the release notes)
+.TP
+\fIPREFIX\fR/share/man/man1/vpnman.1
+this manual page
+.TP
+\fIPREFIX\fR/share/bash\-completion/completions/vpnman
+bash completion
+.TP
+\fIPREFIX\fR/share/zsh/site\-functions/_vpnman
+zsh completion
+.TP
+\fIPREFIX\fR/share/fish/vendor_completions.d/vpnman.fish
+fish completion
+.TP
+/usr/lib/systemd/system/vpnmand.service
+systemd unit (/etc/systemd/system for other prefixes)
+.TP
+/etc/sv/vpnmand/ (or /etc/runit/sv/vpnmand/)
+runit service, linked into /var/service or /etc/service
+.TP
+/etc/init.d/vpnmand
+OpenRC and SysV init script
+.TP
+/etc/rc.d/vpnmand, /usr/local/etc/rc.d/vpnmand
+OpenBSD and FreeBSD rc scripts
 .SH FILES
 .TP
-/etc/vpnman/
-Profiles, settings and state (root only).
+.I /etc/vpnman/
+Configuration directory, root only (mode 700). Override with \fBVPNMAN_CONFIG_DIR\fR.
 .TP
-/run/vpnman/vpnman.sock
-Daemon socket.
+.I /etc/vpnman/profiles/ID/
+One directory per profile: \fIprofile.json\fR (name, protocol, server, credentials, group, failover list, options) and the
+config files, certificates and keys it needs. Mode 700/600 because it holds credentials.
+.TP
+.I /etc/vpnman/proxies/ID/
+One directory per proxy (same layout as the profiles; \fIprofile.json\fR holds the share link and the Xray outbound with
+its credentials), root only.
+.TP
+.I /etc/vpnman/settings.json
+The settings (see SETTINGS).
+.TP
+.I /etc/vpnman/state.json
+The last connected profile and whether the kill switch was engaged by hand.
+.TP
+.I /etc/vpnman/history.json
+Connection history (last 200).
+.TP
+.I /run/vpnman/vpnman.sock
+The daemon socket (\fI/var/run/vpnman/\fR on the BSDs). Override with \fBVPNMAN_SOCKET\fR / \fBVPNMAN_RUN_DIR\fR.
+.TP
+.I /run/vpnman/vpnmand.pid
+The daemon's process id.
+.TP
+.I /run/vpnman/proxy/
+Xray's runtime configuration (\fIconfig.json\fR, mode 600) and \fIxray.pid\fR while it runs.
+.TP
+.I /run/vpnman/conn/ID/
+Runtime files of a live connection (the config copy given to the VPN program, a credentials file, the stunnel
+configuration). Removed on disconnect and on reboot.
+.TP
+.I /var/log/vpnman.log
+Daemon log (override with \fBVPNMAN_LOG_FILE\fR). Under runit also \fI/var/log/vpnmand/current\fR; under OpenRC and SysV
+\fI/var/log/vpnmand.out\fR; under systemd \fBjournalctl \-u vpnmand\fR.
+.TP
+.I ~/.config/vpnman/gui.json
+Per\-user GUI preferences (run in background, server sort, automatic latency test, update check).
+.TP
+.I ~/.config/autostart/io.github.smiley_mcsmiles.VPNMan.desktop
+Created by \fBvpnman autostart \-\-login\-app on\fR.
+.PP
+Firewall objects created while running (all removed again by \fBvpnman cleanup\fR): nftables tables \fIinet vpnman\fR,
+\fIinet vpnman_split\fR, \fIinet vpnman_proxy\fR (system\-wide proxy mode) and \fIinet vpnman_block\fR (blocked connections); iptables chains \fBVPNMAN_OUT\fR and \fBVPNMAN_IN\fR; cgroups \fI/sys/fs/cgroup/vpnman\-bypass\fR,
+\fI/sys/fs/cgroup/vpnman\-tunnel\fR and \fI/sys/fs/cgroup/vpnman\-blocked\fR; an \fBip rule\fR with fwmark 0x5652 and routing table 5652.
+.SH ENVIRONMENT
+.TP
+.B VPNMAN_CONFIG_DIR, VPNMAN_RUN_DIR, VPNMAN_SOCKET, VPNMAN_LOG_FILE
+Relocate the configuration directory, runtime directory, socket and log file (used by tests and unprivileged trials).
+.TP
+.B VPNMAN_ALLOW_UNPRIVILEGED
+Let \fBvpnmand\fR start without root (development only; tunnels and firewall changes will fail).
+.TP
+.B VPNMAN_INIT
+Force the init system detected by \fBvpnman service\fR.
+.TP
+.B VPNMAN_PYTHON
+Force the Python interpreter used by the installed wrapper scripts.
+.TP
+.B VPNMAN_DATA_DIR
+Where the wrappers keep the init templates and private icons (set by the wrappers).
+.TP
+.B VPNMAN_RESOLV_CONF
+The resolver file VPNMan edits (default \fI/etc/resolv.conf\fR).
+.TP
+.B VPNMAN_TRAY
+Set to \fBsni\fR to use the StatusNotifier tray even on Cinnamon.
+.TP
+.B VPNMAN_NO_REEXEC
+Set to \fB1\fR to stop the GUI restarting itself after an upgrade.
+.TP
+.B NO_COLOR
+Disable colours in the command line output.
+.TP
+.B XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_DATA_DIRS
+Where the per\-user files and the application launchers are looked for.
+.SH UNINSTALLING
+.SS Packages
+Use the package manager; each package stops the service and runs \fBvpnman cleanup\fR for you, so no kill\-switch rule
+is left behind:
+.PP
+.nf
+sudo apt remove vpnman          # keep /etc/vpnman        (sudo apt purge vpnman  deletes it too)
+sudo dnf remove vpnman          # keeps /etc/vpnman
+sudo pacman \-R vpnman
+sudo xbps\-remove vpnman         # Void
+sudo apk del vpnman             # Alpine
+.fi
+.PP
+Profiles and settings in \fI/etc/vpnman\fR are kept unless the package manager purges configuration (Debian
+\fBpurge\fR); delete the directory yourself for a clean slate.
+.SS Installed with install.sh
+Run the installer from the extracted source directory again with \fB\-\-uninstall\fR (use the same \fB\-\-prefix\fR you
+installed with):
+.PP
+.nf
+sudo ./install.sh \-\-uninstall            # keeps /etc/vpnman (profiles, settings)
+sudo ./install.sh \-\-uninstall \-\-purge    # also deletes /etc/vpnman
+.fi
+.PP
+It stops and disables the service for your init system, runs \fBvpnman cleanup \-\-force\fR (kill switch, app bypass
+rules, routing rule and cgroups), removes the programs, the Python package, launcher, icons, metadata, man page,
+completions and the service definition, refreshes the icon caches, and finally makes sure the \fIinet vpnman\fR table is
+gone so a stale kill switch can never outlive the software.
+.SS Leftovers it does not touch
+.IP \(bu 2
+\fI/etc/vpnman\fR without \fB\-\-purge\fR; the \fBvpnman\fR group (\fBsudo groupdel vpnman\fR);
+.IP \(bu 2
+per\-user files: \fI~/.config/vpnman/\fR and \fI~/.config/autostart/io.github.smiley_mcsmiles.VPNMan.desktop\fR
+(or run \fBvpnman autostart \-\-login\-app off\fR before uninstalling);
+.IP \(bu 2
+the VPN programs, stunnel and other dependencies, which VPNMan only uses.
+.PP
+Back up first if you may want your profiles again: \fBvpnman backup export FILE\fR.
+.SS Removing by hand
+Stop and disable the service (\fBsudo vpnman service disable\fR; then \fBsudo vpnman service uninstall\fR), run
+\fBsudo vpnman cleanup \-\-force\fR, and delete the files listed under INSTALLATION and FILES.
+.SH EXIT STATUS
+.TP
+.B 0
+Success (for \fBstatus\fR: connected).
+.TP
+.B 1
+An error, a failed connection, or a failed \fBleaktest\fR check.
+.TP
+.B 2
+The background service is not running.
+.TP
+.B 3
+\fBstatus\fR: not connected.
+.TP
+.B 10
+\fBupdate\fR: a newer release exists.
+.TP
+.B 130
+Interrupted (Ctrl+C).
+.SH TROUBLESHOOTING
+.TP
+.B Run vpnman doctor
+It checks the daemon, firewall, init system, launcher, icons, tray and protocols, and says what is missing.
+.TP
+.B "error: ... daemon ..."  (exit 2)
+\fBsudo vpnman service enable\fR; look at \fBvpnman logs\fR or the init system's log (see FILES).
+.TP
+.B Offline after a crash or with the kill switch stuck
+\fBsudo vpnman cleanup \-\-force\fR (or \fBvpnman lock off\fR if the daemon runs).
+.TP
+.B Menu entry or icon missing
+\fBsudo vpnman doctor \-\-fix\fR, then log out and in. Installing with \fB\-\-prefix /usr\fR avoids \fBXDG_DATA_DIRS\fR problems.
+.TP
+.B "Unrecognized option" from OpenVPN
+VPNMan already removes Windows\-only options. If OpenVPN refuses another option, the log shows the exact command
+line and the offending line of the runtime copy; remove that option from the profile (Windows clients often export
+options Linux does not know).
+.TP
+.B Login rejected
+The password or username is wrong: run \fBvpnman connect\fR again and enter them, or \fBvpnman edit PROFILE username=... password=...\fR.
+.TP
+.B An application cannot reach the network under the kill switch
+Add it with \fBvpnman bypass add\fR, or its destination with \fBvpnman routes add\fR, or allow it in
+\fBnetlock.whitelist_out\fR.
+.TP
+.B The proxy does not start
+\fBvpnman proxy status\fR shows the reason. Is \fBxray\fR installed (\fBvpnman doctor\fR)? Does the log (\fBvpnman logs\fR)
+show lines from Xray (\fBproxy\fR level)? In \fBvpn_proxy\fR order it waits for the VPN. A share link that Xray rejects
+usually has a transport or Reality parameter missing: import the link again from its source.
+.TP
+.B Proxy then VPN does not connect
+Check that the profile is OpenVPN or WireGuard with a single server, that the proxy server carries UDP if the profile is
+UDP, and that the proxy server address resolves. The kill switch is only open to the proxy server in this order.
+.TP
+.B Bypass or include mode does nothing
+It needs nft, ip and cgroup v2 (check \fBvpnman bypass list\fR for the reason). WireGuard with IPv6 disabled by sysctl
+needs IPv6 enabled again (\fBnet.ipv6.conf.all.disable_ipv6=0\fR) because \fBwg\-quick\fR configures it.
+.TP
+.B "resolvconf: signature mismatch" on disconnect
+Harmless; fixed in current versions by turning OpenVPN's own DNS handling off.
+.SH SECURITY
+The daemon runs as root and is the only component with privileges. Profiles, settings and backups can contain
+passwords and private keys, so \fI/etc/vpnman\fR is mode 700 and backups are written mode 600 but unencrypted. The
+socket checks the identity of every client. Credentials are handed to VPN programs through private files in \fI/run/vpnman/conn\fR (for example OpenVPN's
+\fB\-\-auth\-user\-pass\fR file), not on the command line. Config files imported from others can contain scripts (\fBup\fR, \fBdown\fR with
+\fBscript\-security 2\fR): only import profiles you trust. \fBvpnman update\fR and the GUI's update check contact
+github.com as the user and are never started automatically unless you enable the daily check.
+.SH SEE ALSO
+.BR openvpn (8),
+.BR wg (8),
+.BR wg\-quick (8),
+.BR nft (8),
+.BR iptables (8),
+.BR ip (8),
+.BR stunnel (8),
+.BR systemctl (1)
+.PP
+Project page, releases and issue tracker: https://github.com/Smiley\-McSmiles/VPNMan
+.SH BUGS
+Report problems at https://github.com/Smiley\-McSmiles/VPNMan/issues. Include the output of \fBvpnman doctor\fR and
+\fBvpnman logs\fR (remove server names and addresses you do not want to publish). Not verified on real systems yet: the
+OpenRC, OpenBSD, FreeBSD, Void and Alpine builds, the trusted\-network detection on every Wi\-Fi stack, connections to real
+Xray servers (the tests use a stand\-in for Xray), the system\-wide proxy mode on a live machine, and the connection table on the BSDs.
+.SH AUTHORS
+VPNMan contributors. Licensed under the MIT license.

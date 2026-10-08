@@ -19,7 +19,7 @@ MANIFEST = "vpnman-backup.json"
 MAX_FILE = 8 * 1024 * 1024
 MAX_TOTAL = 64 * 1024 * 1024
 MAX_MEMBERS = 5000
-_PROFILE_FILE = re.compile(r"^profiles/([0-9a-f]{12})/([A-Za-z0-9._-]{1,128})$")
+_PROFILE_FILE = re.compile(r"^(profiles|proxies)/([0-9a-f]{12})/([A-Za-z0-9._-]{1,128})$")
 
 
 class BackupError(ValueError):
@@ -29,49 +29,52 @@ class BackupError(ValueError):
 def export_archive(config_dir, settings_path, count_hint=None):
     """Return the archive bytes for everything under <config_dir>/profiles plus the settings file."""
     buf = io.BytesIO()
-    profiles = os.path.join(config_dir, "profiles")
     now = int(time.time())
-    n = 0
+    counts = {"profiles": 0, "proxies": 0}
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
         def add(name, data):
             ti = tarfile.TarInfo(name)
             ti.size, ti.mode, ti.mtime, ti.uid, ti.gid = len(data), 0o600, now, 0, 0
             ti.uname = ti.gname = "root"
             tf.addfile(ti, io.BytesIO(data))
-        try:
-            pids = sorted(os.listdir(profiles))
-        except OSError:
-            pids = []
-        for pid in pids:
-            d = os.path.join(profiles, pid)
-            if not re.match(r"^[0-9a-f]{12}$", pid) or not os.path.isdir(d):
-                continue
-            if not os.path.isfile(os.path.join(d, "profile.json")):
-                continue
-            n += 1
-            for fn in sorted(os.listdir(d)):
-                full = os.path.join(d, fn)
-                if os.path.isfile(full) and not os.path.islink(full) and re.match(r"^[A-Za-z0-9._-]{1,128}$", fn) \
-                        and not fn.endswith(".tmp"):
-                    with open(full, "rb") as fh:
-                        add("profiles/%s/%s" % (pid, fn), fh.read())
+        for kind in ("profiles", "proxies"):
+            root = os.path.join(config_dir, kind)
+            try:
+                pids = sorted(os.listdir(root))
+            except OSError:
+                pids = []
+            for pid in pids:
+                d = os.path.join(root, pid)
+                if not re.match(r"^[0-9a-f]{12}$", pid) or not os.path.isdir(d):
+                    continue
+                if not os.path.isfile(os.path.join(d, "profile.json")):
+                    continue
+                counts[kind] += 1
+                for fn in sorted(os.listdir(d)):
+                    full = os.path.join(d, fn)
+                    if os.path.isfile(full) and not os.path.islink(full) and re.match(r"^[A-Za-z0-9._-]{1,128}$", fn) \
+                            and not fn.endswith(".tmp"):
+                        with open(full, "rb") as fh:
+                            add("%s/%s/%s" % (kind, pid, fn), fh.read())
         if os.path.isfile(settings_path):
             with open(settings_path, "rb") as fh:
                 add("settings.json", fh.read())
-        manifest = {"format": FORMAT, "vpnman": __version__, "created": now, "profiles": n}
+        manifest = {"format": FORMAT, "vpnman": __version__, "created": now, "profiles": counts["profiles"],
+                    "proxies": counts["proxies"]}
         add(MANIFEST, json.dumps(manifest).encode())
     return buf.getvalue()
 
 
-def read_archive(data):
-    """Validate an archive and return (manifest, {profile id: {filename: bytes}}, settings dict or None)."""
+def read_archive(data, with_proxies=False):
+    """Validate an archive and return (manifest, {profile id: {filename: bytes}}, settings dict or None); with
+    ``with_proxies`` the proxies come back as a fourth item of the same shape."""
     if len(data) > MAX_TOTAL:
         raise BackupError("the backup file is too large")
     try:
         tf = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
     except (tarfile.TarError, OSError, EOFError) as e:
         raise BackupError("not a VPNMan backup (%s)" % e)
-    manifest, settings, profiles, total = None, None, {}, 0
+    manifest, settings, profiles, proxies, total = None, None, {}, {}, 0
     with tf:
         members = tf.getmembers()
         if len(members) > MAX_MEMBERS:
@@ -102,16 +105,18 @@ def read_archive(data):
                 mt = _PROFILE_FILE.match(name)
                 if not mt:
                     raise BackupError("unexpected file in the backup: %s" % name)
-                profiles.setdefault(mt.group(1), {})[mt.group(2)] = body
+                (proxies if mt.group(1) == "proxies" else profiles).setdefault(mt.group(2), {})[mt.group(3)] = body
     if not manifest or manifest.get("format") != FORMAT:
         raise BackupError("not a VPNMan backup (or from a newer version)")
-    for pid, files in profiles.items():
+    for pid, files in list(profiles.items()) + list(proxies.items()):
         try:
             p = json.loads(files.get("profile.json", b""))
             if p.get("id") != pid or "name" not in p or "protocol" not in p:
                 raise ValueError
         except (ValueError, AttributeError):
             raise BackupError("profile %s in the backup is damaged" % pid)
+    if with_proxies:
+        return manifest, profiles, settings, proxies
     return manifest, profiles, settings
 
 

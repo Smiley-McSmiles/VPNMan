@@ -9,6 +9,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, GObject, Gtk  # noqa: E402
 
 from .. import apps as appmod, schedule as sched  # noqa: E402
+from .keys import close_keys  # noqa: E402
 
 try:                                    # drawing needs pycairo (Debian/Ubuntu: python3-gi-cairo); without it the graph
     gi.require_foreign("cairo")         # degrades to the text line instead of failing
@@ -60,6 +61,7 @@ class TimeRow(Adw.ActionRow):
 class ScheduleDialog(Adw.Window):
     def __init__(self, parent, profiles, entry=None, on_done=None):
         super().__init__(transient_for=parent, modal=True, default_width=460, default_height=620)
+        close_keys(self)
         self.entry = dict(entry or {"enabled": True, "days": [0, 1, 2, 3, 4], "start": "08:00", "end": "",
                                     "profile": "", "name": ""})
         self.on_done = on_done
@@ -237,6 +239,7 @@ class AppPicker(Adw.Window):
 
     def __init__(self, parent, already, on_done):
         super().__init__(transient_for=parent, modal=True, default_width=480, default_height=640)
+        close_keys(self)
         self.on_done, self.checks, self.have = on_done, {}, set(already)
         self.set_title("Add Apps")
         view = Adw.ToolbarView()

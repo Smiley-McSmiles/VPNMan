@@ -164,6 +164,16 @@ class OpenVPN(Backend):
             if tun.get("ip") and ":" not in tun["ip"]:
                 extra.append("route %s 255.255.255.255 net_gateway" % tun["ip"])   # keep stunnel outside the VPN
             text = text.rstrip("\n") + "\n" + "\n".join(extra) + "\n"
+        fwd = ctx.state.get("xray_fwd")
+        if fwd:
+            # a proxy (Xray) in front of the VPN: OpenVPN talks to the local forwarder, which carries it to the server
+            text = re.sub(r"^\s*(remote|remote-random|proto|explicit-exit-notify|http-proxy|socks-proxy)\b.*$\n?",
+                          "", text, flags=re.M)
+            extra = ["remote 127.0.0.1 %d" % fwd["port"], "proto %s" % ("tcp-client" if fwd["proto"] == "tcp" else "udp"),
+                     "nobind"]
+            if fwd.get("ip") and ":" not in fwd["ip"]:
+                extra.append("route %s 255.255.255.255 net_gateway" % fwd["ip"])      # keep the proxy outside the VPN
+            text = text.rstrip("\n") + "\n" + "\n".join(extra) + "\n"
         ctx.state["text"] = text
         ctx.state["path"] = ctx.write("runtime.ovpn", text)
 

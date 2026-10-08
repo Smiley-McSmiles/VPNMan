@@ -5,7 +5,7 @@ _vpnman() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     cmd="${COMP_WORDS[1]}"
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=( $(compgen -W "about add autostart backup block bypass cleanup connect daemon disconnect dns doctor down edit failover fav get gui history import leaktest list lock logs ls menu networks ping protocols remove rm routes schedule service set shell split status unblock unfav up update --version --help" -- "$cur") )
+        COMPREPLY=( $(compgen -W "about add autostart backup block blocks bypass cleanup connect connections daemon disconnect dns doctor down edit failover fav get group gui history import leaktest list lock logs ls menu networks ping protocols proxy remove rm routes schedule service set shell split status unblock unfav up update --version --help" -- "$cur") )
         return
     fi
     case "$cmd" in
@@ -29,9 +29,13 @@ _vpnman() {
             opts=""
             choices=""
             names=1 ;;
+        blocks)
+            opts="--proto --note --json"
+            choices="list status add remove rm enable disable on off"
+            names=0 ;;
         bypass)
             opts=""
-            choices=""
+            choices="list add remove rm available on off mode"
             names=0 ;;
         cleanup)
             opts="--force"
@@ -41,6 +45,10 @@ _vpnman() {
             opts="--fastest --last --no-wait --timeout"
             choices=""
             names=1 ;;
+        connections)
+            opts="--listening -l --local --resolve -r --watch -w --json"
+            choices=""
+            names=0 ;;
         daemon)
             opts=""
             choices=""
@@ -76,6 +84,10 @@ _vpnman() {
         get)
             opts=""
             choices=""
+            names=0 ;;
+        group)
+            opts="--ask-password"
+            choices="list edit"
             names=0 ;;
         gui)
             opts="--background"
@@ -125,6 +137,10 @@ _vpnman() {
             opts=""
             choices=""
             names=0 ;;
+        proxy)
+            opts="--name --group --latency -l --json"
+            choices="list add remove rm edit use on off order mode set status ping refresh"
+            names=0 ;;
         remove)
             opts=""
             choices=""
@@ -135,11 +151,11 @@ _vpnman() {
             names=1 ;;
         routes)
             opts=""
-            choices=""
+            choices="list add remove rm"
             names=0 ;;
         schedule)
             opts="--name --days --start --end --profile"
-            choices=""
+            choices="list add remove rm enable disable on off"
             names=0 ;;
         service)
             opts="--init"
@@ -155,7 +171,7 @@ _vpnman() {
             names=0 ;;
         split)
             opts=""
-            choices=""
+            choices="list add remove rm available on off mode"
             names=0 ;;
         status)
             opts="--json"
@@ -182,6 +198,7 @@ _vpnman() {
     case "${COMP_WORDS[COMP_CWORD-1]}" in
         --protocol) COMPREPLY=( $(compgen -W "openvpn wireguard amneziawg openconnect openfortivpn ikev2 sstp pptp vpnc tailscale netbird zerotier nebula networkmanager custom" -- "$cur") ); return ;;
         --login-app) COMPREPLY=( $(compgen -W "on off" -- "$cur") ); return ;;
+        --proto) COMPREPLY=( $(compgen -W "any tcp udp" -- "$cur") ); return ;;
         --stunnel-verify) COMPREPLY=( $(compgen -W "none system ca" -- "$cur") ); return ;;
         --sort) COMPREPLY=( $(compgen -W "name latency group" -- "$cur") ); return ;;
         --init) COMPREPLY=( $(compgen -W "systemd runit openrc sysv openbsd-rc bsd-rc" -- "$cur") ); return ;;

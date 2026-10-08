@@ -8,9 +8,10 @@ import sys
 import threading
 import traceback
 
-from . import __version__, access, backends, ipc, paths
+from . import __version__, access, backends, conntable, ipc, paths
 from . import platform as plat
 from .manager import Manager
+from .blocks import BlockError
 from .profiles import ProfileError, public_view
 from .settings import Settings
 
@@ -40,7 +41,7 @@ class Handler(socketserver.StreamRequestHandler):
                 raise ProfileError("unknown method: %s" % method)
             result = fn(mgr, **params)
             resp = {"id": req.get("id"), "ok": True, "result": result}
-        except (ProfileError, KeyError, ValueError, TypeError, RuntimeError, OSError) as e:
+        except (ProfileError, BlockError, KeyError, ValueError, TypeError, RuntimeError, OSError) as e:
             msg = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
             resp = {"id": None, "ok": False, "error": str(msg)}
             if not isinstance(e, (ProfileError, KeyError, ValueError)):
@@ -59,6 +60,8 @@ def _changed(m, key, result):
         m.reapply_dns()
     elif key.startswith("split"):
         m.split_changed()
+    elif key.startswith("proxy"):
+        m.proxy.changed()
     return result
 
 
@@ -88,6 +91,7 @@ METHODS = {
     "profiles.update": lambda m, ident, changes: public_view(m.store.update(ident, changes)),
     "profiles.remove": lambda m, ident: _remove_one(m, ident),
     "profiles.remove_many": lambda m, ids: m.remove_profiles(ids),
+    "profiles.update_many": lambda m, ids, changes: m.update_profiles(ids, changes),
     "latency": lambda m, ids=None: m.latency(ids),
     "connect": lambda m, ident=None, fastest=False, last=False: m.connect(ident, fastest, last),
     "disconnect": lambda m: m.disconnect(),
@@ -101,6 +105,23 @@ METHODS = {
     "split.status": lambda m: m.split_status(),
     "split.set": lambda m, apps=None, enabled=None, mode=None: m.split_set(apps, enabled, mode),
     "routes.set": lambda m, entries: m.routes_set(entries),
+    "proxy.list": lambda m: m.proxy.list(),
+    "proxy.status": lambda m: m.proxy.status(),
+    "proxy.sources": lambda m: m.proxy.sources(),
+    "proxy.import": lambda m, text, source="", group="", name=None: m.proxy.import_text(text, source, group, name),
+    "proxy.remove": lambda m, ids: m.proxy.remove(ids),
+    "proxy.update": lambda m, ident, changes: m.proxy.update(ident, changes),
+    "proxy.select": lambda m, ident: m.proxy.select(ident),
+    "proxy.set": lambda m, **kw: m.proxy.configure(**kw),
+    "proxy.latency": lambda m, ids=None: m.proxy.latency(ids),
+    "blocks.status": lambda m: m.blocks.status(),
+    "blocks.add": lambda m, kind, value, proto="any", note="": m.blocks.add(kind, value, proto, note),
+    "blocks.update": lambda m, ident, enabled=None, note=None: m.blocks.update(ident, enabled, note),
+    "blocks.remove": lambda m, ids: m.blocks.remove(ids),
+    "blocks.set": lambda m, enabled: m.blocks.set_enabled(enabled),
+    "connections.close": lambda m, proto, local, lport, remote, rport: m.blocks.close_row(proto, local, lport, remote, rport),
+    "connections": lambda m, listening=False, local=False, resolve=False: conntable.snapshot(
+        bool(listening), bool(local), resolve=bool(resolve)),
     "network.status": lambda m: m.network_status(),
     "network.trust": lambda m, name=None, trusted=True: m.network_trust(name, trusted),
     "backup.export": lambda m: m.backup_export(),

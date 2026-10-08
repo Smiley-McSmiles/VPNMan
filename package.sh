@@ -124,6 +124,8 @@ PRM
 set -e
 if [ "$1" = remove ] || [ "$1" = purge ]; then
     command -v nft >/dev/null 2>&1 && nft delete table inet vpnman 2>/dev/null || true
+    command -v nft >/dev/null 2>&1 && nft delete table inet vpnman_proxy 2>/dev/null || true
+    command -v nft >/dev/null 2>&1 && nft delete table inet vpnman_block 2>/dev/null || true
     [ -d /run/systemd/system ] && systemctl daemon-reload || true
 fi
 if [ "$1" = remove ] || [ "$1" = purge ]; then
@@ -222,6 +224,8 @@ if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-datab
 
 if [ "\$1" -eq 0 ] && command -v nft >/dev/null 2>&1; then
     nft delete table inet vpnman >/dev/null 2>&1 || :
+    nft delete table inet vpnman_proxy >/dev/null 2>&1 || :
+    nft delete table inet vpnman_block >/dev/null 2>&1 || :
 fi
 
 %files

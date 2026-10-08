@@ -494,6 +494,8 @@ class Cli:
         print("Restored: %d profile(s) added, %d already present%s%s." % (
             res["added"], res["skipped"], ", %d removed first" % res["removed"] if a.replace else "",
             ", settings restored" if res["settings"] else ""))
+        if res.get("proxies"):
+            print("          %d prox%s restored." % (res["proxies"], "y" if res["proxies"] == 1 else "ies"))
         return 0
 
     def cmd_history(self, a):
@@ -514,6 +516,286 @@ class Cli:
             print("%s  %-28s %8s  down %-10s up %-10s %s" % (when, r["profile"][:28], "%d:%02d:%02d" % (d // 3600, d % 3600 // 60, d % 60),
                                                            human_bytes(r["rx"]), human_bytes(r["tx"]), dim(r["reason"])))
         return 0
+
+    # ------------------------------------------------------------------ proxy (Xray)
+    @staticmethod
+    def fetch_subscription(url, timeout=15):
+        import urllib.request
+        req = urllib.request.Request(url, headers={"User-Agent": "vpnman/%s" % __version__})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read(5 << 20).decode("utf-8", "replace")
+
+    def proxy_add(self, sources, name=None, group=None):
+        import re
+        total = {"added": 0, "updated": 0, "removed": 0, "skipped": 0, "errors": []}
+        for src in sources:
+            kw = {}
+            if re.match(r"^https?://", src, re.I):
+                try:
+                    text = self.fetch_subscription(src)
+                except (OSError, ValueError) as e:
+                    raise RpcError("could not download %s: %s" % (src, e))
+                kw = {"source": src, "group": group or re.sub(r"^https?://([^/]+).*$", r"\1", src)}
+            elif os.path.isfile(src):
+                with open(src, errors="replace") as fh:
+                    text = fh.read()
+                kw = {"group": group or ""}
+            else:
+                text, kw = src, {"group": group or ""}
+            res = self.call("proxy.import", text=text, name=name if len(sources) == 1 else None, **kw)
+            for k in ("added", "updated", "removed", "skipped"):
+                total[k] += res[k]
+            total["errors"] += res["errors"]
+        return total
+
+    def cmd_proxy(self, a):
+        act, items = a.action or "list", a.items
+        if act == "list":
+            ps = self.call("proxy.list")
+            lat = self.call("proxy.latency") if a.latency else {}
+            if a.json:
+                print(json.dumps(ps, indent=2))
+                return 0
+            if not ps:
+                print("No proxies yet. Add share links or a subscription: vpnman proxy add vless://... | https://...")
+                return 0
+            w = max(len(p["name"]) for p in ps)
+            for p in ps:
+                ms = lat.get(p["id"])
+                extra = ("  %6.1f ms" % ms) if ms else ("  %9s" % "-" if a.latency else "")
+                grp = ("  [%s]" % p["group"]) if p.get("group") else ""
+                print("%s %-*s  %-12s %s%s%s" % (green("●") if p["selected"] else " ", w, p["name"], p["protocol"],
+                                                  dim("%s:%s" % (p["server"], p["port"])), extra, dim(grp)))
+            return 0
+        if act == "status":
+            st = self.call("proxy.status")
+            if a.json:
+                print(json.dumps(st, indent=2))
+                return 0
+            order = {"proxy_only": "you -> proxy -> internet", "vpn_proxy": "you -> VPN -> proxy -> internet",
+                     "proxy_vpn": "you -> proxy -> VPN -> internet"}.get(st["order"], st["order"])
+            print("%s %s" % (bold("Proxy:"), (green("RUNNING") if st["running"] else
+                                              (yellow("on, waiting for the VPN") if st["enabled"] and st["order"] == "vpn_proxy"
+                                               else ("on" if st["enabled"] else dim("off"))))))
+            print("  server:  %s" % (st["name"] or dim("none chosen (vpnman proxy use NAME)")))
+            print("  order:   %s   (%s)" % (st["order"], order))
+            print("  mode:    %s" % st["mode"])
+            if st["socks"]:
+                print("  SOCKS5:  127.0.0.1:%d    HTTP: 127.0.0.1:%d" % (st["socks"], st["http"]))
+            if st["carrier"]:
+                print("  carrying the VPN connection")
+            if st["error"]:
+                print(red("  error:   %s" % st["error"]))
+            if not st["installed"]:
+                print(yellow("  xray is not installed - install it to use proxies"))
+            return 0
+        if act == "add":
+            if not items:
+                raise RpcError("give share links (vless://, vmess://, trojan://, ss://), a file, or a subscription URL")
+            res = self.proxy_add(items, a.name, a.group)
+            print("%s %d new, %d updated, %d removed, %d already present" % (
+                green("proxies:"), res["added"], res["updated"], res["removed"], res["skipped"]))
+            for e in res["errors"]:
+                print("  %s %s" % (yellow("skipped"), e), file=sys.stderr)
+            return 0 if (res["added"] or res["updated"] or res["skipped"]) else 1
+        if act == "refresh":
+            srcs = items or [s["source"] for s in self.call("proxy.sources")]
+            if not srcs:
+                print("No subscriptions to refresh (add one: vpnman proxy add https://...)")
+                return 0
+            res = self.proxy_add(srcs)
+            print("%s %d new, %d updated, %d removed" % (green("refreshed:"), res["added"], res["updated"], res["removed"]))
+            return 0
+        if act in ("remove", "rm"):
+            if not items:
+                raise RpcError("name the proxies to remove")
+            ids = [self._proxy_ident(i) for i in items]
+            res = self.call("proxy.remove", ids=ids)
+            for n in res["removed"]:
+                print("Removed %s" % n)
+            for f in res["failed"]:
+                print(red("failed: %s" % f["error"]), file=sys.stderr)
+            return 1 if res["failed"] else 0
+        if act == "use":
+            if len(items) != 1:
+                raise RpcError("usage: vpnman proxy use NAME")
+            p = self.call("proxy.select", ident=self._proxy_ident(items[0]))
+            print("Using %s. Switch the proxy on with: vpnman proxy on" % p["name"])
+            return 0
+        if act in ("on", "off"):
+            st = self.call("proxy.set", enabled=(act == "on"))
+            print("Proxy %s%s." % (act, "" if act == "off" or st["running"] or st["order"] == "proxy_vpn" else
+                                   " (%s)" % ("it starts when the VPN is connected" if st["order"] == "vpn_proxy"
+                                              else st["error"] or "starting")))
+            return 0
+        if act in ("order", "mode"):
+            if len(items) != 1:
+                raise RpcError("usage: vpnman proxy %s VALUE" % act)
+            self.call("proxy.set", **{act: items[0]})
+            print("%s set to %s." % (act.capitalize(), items[0]))
+            return 0
+        if act == "set":
+            if len(items) != 2:
+                raise RpcError("usage: vpnman proxy set KEY VALUE  (socks_port, http_port, dns, udp, order, mode)")
+            self.call("proxy.set", **{items[0]: items[1]})
+            print("%s = %s" % tuple(items))
+            return 0
+        if act == "edit":
+            if len(items) < 2:
+                raise RpcError("usage: vpnman proxy edit NAME KEY=VALUE...  (name, group, notes, favorite)")
+            ch = {}
+            for kv in items[1:]:
+                k, _, v = kv.partition("=")
+                ch[k] = v.lower() in ("1", "true", "yes", "on") if k == "favorite" else v
+            self.call("proxy.update", ident=self._proxy_ident(items[0]), changes=ch)
+            print("Updated.")
+            return 0
+        if act == "ping":
+            ps = self.call("proxy.list")
+            ids = [self._proxy_ident(i) for i in items] or None
+            lat = self.call("proxy.latency", ids=ids)
+            for p in ps:
+                if p["id"] in lat:
+                    print("%-30s %s" % (p["name"], ("%.1f ms" % lat[p["id"]]) if lat[p["id"]] else red("unreachable")))
+            return 0
+        raise RpcError("unknown action %r (list, add, remove, use, on, off, order, mode, set, edit, status, ping, refresh)" % act)
+
+    def _proxy_ident(self, text):
+        ps = self.call("proxy.list")
+        for p in ps:
+            if text in (p["id"], p["name"]):
+                return p["id"]
+        hits = [p for p in ps if text.lower() in p["name"].lower()]
+        if len(hits) == 1:
+            return hits[0]["id"]
+        raise RpcError("no such proxy: %s" % text if not hits else "'%s' is ambiguous: %s" % (text, ", ".join(h["name"] for h in hits[:6])))
+
+    def cmd_blocks(self, a):
+        act, items = a.action or "list", a.items
+        if act in ("list", "status"):
+            st = self.call("blocks.status")
+            if a.json:
+                print(json.dumps(st, indent=2))
+                return 0
+            state = green("ENFORCED") if st["active"] else (yellow("not enforced") if st["enabled"] and st["entries"] else dim("off"))
+            print("%s %s%s" % (bold("Blocked connections:"), state, "" if st["enabled"] else dim("  (switched off: vpnman blocks on)")))
+            if st["error"]:
+                print(red("  %s" % st["error"]))
+            if not st["supported"]:
+                print(yellow("  %s" % st["reason"]))
+            for e in st["entries"]:
+                what = {"address": "address", "endpoint": "address:port", "port": "port", "app": "program"}[e["kind"]]
+                proto = "" if e.get("proto", "any") == "any" else e["proto"]
+                print("  %-8s %s %-13s %-28s %-4s %s" % (e["id"], "on " if e.get("enabled", True) else "off", what, e["value"],
+                                                        proto, dim(e.get("note", ""))))
+            if not st["entries"]:
+                print("  nothing blocked - e.g.: vpnman blocks add address 203.0.113.9")
+            return 0
+        if act in ("on", "off"):
+            self.call("blocks.set", enabled=(act == "on"))
+            print("Blocking %s." % ("enabled" if act == "on" else "disabled"))
+            return 0
+        if act == "add":
+            if len(items) != 2:
+                raise RpcError("usage: vpnman blocks add address|endpoint|port|app VALUE [--proto tcp|udp] [--note TEXT]")
+            e = self.call("blocks.add", kind=items[0], value=items[1], proto=a.proto or "any", note=a.note or "")
+            print("%s %s %s%s" % (green("blocked"), items[0], e["value"],
+                                  "  (closed %d open connection%s)" % (e["closed"], "" if e["closed"] == 1 else "s") if e.get("closed") else ""))
+            return 0
+        if act in ("remove", "rm", "enable", "disable"):
+            if not items:
+                raise RpcError("give the ids shown by 'vpnman blocks'")
+            if act in ("remove", "rm"):
+                self.call("blocks.remove", ids=items)
+                print("Removed.")
+            else:
+                for i in items:
+                    self.call("blocks.update", ident=i, enabled=(act == "enable"))
+                print("Done.")
+            return 0
+        raise RpcError("unknown action %r (list, add, remove, enable, disable, on, off)" % act)
+
+    def cmd_connections(self, a):
+        def show():
+            res = self.call("connections", listening=a.listening, local=a.local, resolve=a.resolve)
+            if a.json:
+                print(json.dumps(res, indent=2))
+                return
+            if res.get("note"):
+                print(yellow(res["note"]))
+            print(bold("%-6s %-22s %-5s %-24s %-24s %s" % ("WAY", "APP", "PROTO", "LOCAL", "REMOTE", "STATE")))
+            for r in res["rows"]:
+                way = {"in": "in", "out": "out", "listen": "listen"}[r["dir"]]
+                app = ("%s (%d)" % (r["app"], r["pid"])) if r["pid"] else (r["app"] or "-")
+                loc = "%s:%d" % (r["local"], r["lport"])
+                rem = "%s:%d" % (r.get("rname") or r["remote"], r["rport"]) if r["rport"] else "-"
+                print("%-6s %-22s %-5s %-24s %-24s %s" % (way, app[:22], r["proto"].upper() + ("6" if r["v6"] else ""),
+                                                          loc[:24], rem[:24], r["state"]))
+            if res.get("truncated"):
+                print(dim("(list truncated)"))
+        if not a.watch:
+            show()
+            return 0
+        while True:
+            print("\033[2J\033[H", end="")
+            show()
+            time.sleep(2)
+
+    def cmd_group(self, a):
+        """vpnman group [list] | vpnman group edit GROUP KEY=VALUE...: look at groups, rename one or edit all its servers."""
+        profiles = self.call("profiles.list")
+        groups = {}
+        for p in profiles:
+            if p.get("group"):
+                groups.setdefault(p["group"], []).append(p)
+        act = a.action or "list"
+        if act == "list":
+            for g in sorted(groups, key=str.lower):
+                print("%-28s %d server%s" % (g, len(groups[g]), "" if len(groups[g]) == 1 else "s"))
+            if not groups:
+                print("No groups yet. Importing a folder makes one per sub-folder, or: vpnman edit PROFILE group=NAME")
+            return 0
+        if act != "edit":
+            raise RpcError("unknown action %r (list, edit)" % act)
+        if not a.group or not a.changes and not a.ask_password:
+            raise RpcError("usage: vpnman group edit GROUP KEY=VALUE...  (keys: name, username, password, stunnel, "
+                           "stunnel_sni, stunnel_verify)")
+        match = [g for g in groups if g.lower() == a.group.lower()] or [g for g in groups if a.group.lower() in g.lower()]
+        if len(match) != 1:
+            raise RpcError("no such group: %s" % a.group if not match else "'%s' is ambiguous: %s" % (a.group, ", ".join(match)))
+        name = match[0]
+        ch, st = {}, {}
+        for kv in a.changes:
+            k, _, v = kv.partition("=")
+            if k == "name":
+                ch["group"] = v
+            elif k in ("username", "password"):
+                ch[k] = v
+            elif k == "stunnel":
+                if v.lower() in ("", "off", "none", "false"):
+                    st["mode"] = "off"
+                else:
+                    o = self.stunnel_opts(v)
+                    st.update(mode="set", host=o["host"], port=o["port"])
+            elif k == "stunnel_sni":
+                st["sni"] = v
+            elif k == "stunnel_verify":
+                st["verify"] = v
+            else:
+                raise RpcError("cannot set %r on a group (name, username, password, stunnel, stunnel_sni, stunnel_verify)" % k)
+        if a.ask_password:
+            ch["password"] = getpass.getpass("New password for all servers in %s: " % name)
+        if st:
+            if "mode" not in st:
+                raise RpcError("stunnel_sni / stunnel_verify need stunnel=HOST[:PORT] as well")
+            ch["stunnel"] = st
+        res = self.call("profiles.update_many", ids=[p["id"] for p in groups[name]], changes=ch)
+        print("%s %d server%s in %s." % (green("edited"), len(res["updated"]), "" if len(res["updated"]) == 1 else "s", name))
+        for s in res["skipped"]:
+            print("  %s %s: %s" % (yellow("skipped"), s["name"], s["reason"]))
+        for f in res["failed"]:
+            print("  %s %s" % (red("failed"), f["error"]), file=sys.stderr)
+        return 1 if res["failed"] else 0
 
     def cmd_failover(self, a):
         """vpnman failover PROFILE [SERVER ...] [--clear]: which servers to try, in order, when PROFILE keeps failing."""
@@ -606,7 +888,7 @@ class Cli:
         return 1 if res["summary"] == "fail" else 0
 
     def cmd_cleanup(self, a):
-        from . import netlock, split
+        from . import blocks, netlock, split, xray
         if self.client.alive() and not a.force:
             raise RpcError("the VPNMan service is running and owns these rules - stop it first "
                            "(vpnman disconnect; vpnman lock off), or use --force")
@@ -615,6 +897,10 @@ class Cli:
         gone = netlock.cleanup_all()
         if plat.os_family() == "linux":
             split.cleanup()
+            if xray.cleanup():
+                gone = list(gone) + ["proxy redirect"]
+            if blocks.cleanup():
+                gone = list(gone) + ["blocked connections"]
         print("Removed: %s" % (", ".join(gone) if gone else "no kill-switch rules"),
               "+ app-bypass rules, routing rule/table and cgroup" if plat.os_family() == "linux" else "")
         return 0
@@ -694,6 +980,10 @@ class Cli:
                 for m in desktop.purge_bytecode() + desktop.link_system_dirs() + icons.fix():
                     print("  " + green("fixed: ") + m)
                 print("  Log out and back in (or restart the desktop shell) so it re-reads launchers and icons.")
+        from . import xray
+        print("Proxy engine:")
+        print("  %s xray %s" % (green("✔") if xray.binary() else yellow("!"),
+                               xray.binary() or "is not installed (needed for 'vpnman proxy'; install it with: sudo ./install.sh --xray-only, or see https://github.com/XTLS/Xray-core)"))
         print()
         return self.cmd_protocols(a)
 
@@ -927,91 +1217,355 @@ def _settings_menu(cli):
 
 # ----------------------------------------------------------------------- parser
 
+MAIN_EPILOG = """\
+getting started:
+  vpnman import my.ovpn         add a profile (OpenVPN, WireGuard, ... see: vpnman protocols)
+  vpnman connect                connect to the last used profile (or: vpnman connect NAME, --fastest)
+  vpnman lock on                engage the kill switch: nothing leaves except through the VPN
+  vpnman leaktest               check the tunnel, public IP, kill switch, DNS and IPv6
+  vpnman                        with no command in a terminal: an interactive menu
+  vpnman gui                    the graphical app (also: vpnman-gtk, or VPNMan in the application menu)
+
+profile names:
+  anywhere a PROFILE is expected you can give its id, its exact name, or any unique part of the name.
+
+exit status:
+  0 success    1 error or failed check    2 the background service (vpnmand) is not running
+  3 `status` only: not connected          10 `update` only: a newer release exists
+  130 interrupted
+
+files:
+  /etc/vpnman/                profiles, settings.json, state.json, history.json  (root only)
+  /run/vpnman/vpnman.sock     the daemon's socket          /var/log/vpnman.log  daemon log file
+  ~/.config/vpnman/gui.json   per-user GUI preferences
+
+more: man vpnman     (every command, setting, file, how to uninstall)     https://github.com/Smiley-McSmiles/VPNMan
+"""
+
+
 def build_parser():
-    ap = argparse.ArgumentParser(prog="vpnman", description="Multi-protocol VPN manager with kill switch.")
+    ap = argparse.ArgumentParser(
+        prog="vpnman", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=MAIN_EPILOG,
+        description="VPNMan - multi-protocol VPN manager with a kill switch.\n\n"
+                    "Commands talk to the background service (vpnmand), which owns the tunnels and the firewall.\n"
+                    "Run 'vpnman COMMAND --help' for the details and examples of one command.")
     ap.add_argument("--version", action="version", version="vpnman " + __version__)
     sub = ap.add_subparsers(dest="cmd", metavar="COMMAND")
 
-    def add(name, help, **kw):
-        return sub.add_parser(name, help=help, **kw)
+    def add(name, help, desc=None, examples=None, **kw):
+        ep = ("examples:\n" + "\n".join("  " + x for x in examples)) if examples else None
+        return sub.add_parser(name, help=help, description=desc or (help[:1].upper() + help[1:] + "."), epilog=ep,
+                              formatter_class=argparse.RawDescriptionHelpFormatter, **kw)
 
-    s = add("status", "show connection status"); s.add_argument("--json", action="store_true")
-    s = add("list", "list profiles", aliases=["ls"]); s.add_argument("--latency", "-l", action="store_true")
+    JSON = "print machine-readable JSON instead of text"
+    protocols = list(backends.REGISTRY)
+
+    s = add("status", "show connection status",
+            "Show the state of the connection: server, interface, public IP, uptime, traffic and the kill switch.\n"
+            "Exit status is 0 when connected and 3 when not, so scripts can test it.",
+            ["vpnman status", "vpnman status --json", "vpnman status >/dev/null && echo up"])
+    s.add_argument("--json", action="store_true", help=JSON)
+    s = add("list", "list profiles",
+            "List the saved profiles. A star marks favourites; a crossed circle marks blocked profiles (never chosen by\n"
+            "--fastest or failover). The group, if any, is shown in brackets.",
+            ["vpnman list", "vpnman list --latency --sort latency", "vpnman list --sort group"], aliases=["ls"])
+    s.add_argument("--latency", "-l", action="store_true", help="measure and show the latency of every server")
     s.add_argument("--names", action="store_true", help="one profile name per line (used by shell completion)")
     s.add_argument("--sort", choices=["name", "latency", "group"], help="sort order (latency implies --latency)")
-    s.add_argument("--json", action="store_true")
-    s = add("connect", "connect to a profile", aliases=["up"])
-    s.add_argument("profile", nargs="?"); s.add_argument("--fastest", action="store_true")
-    s.add_argument("--last", action="store_true"); s.add_argument("--no-wait", action="store_true")
-    s.add_argument("--timeout", type=int, default=90)
-    add("disconnect", "disconnect", aliases=["down"])
-    s = add("import", "import config files or a directory of them")
-    s.add_argument("paths", nargs="+"); s.add_argument("--name"); s.add_argument("--protocol", choices=list(backends.REGISTRY))
-    s.add_argument("--user"); s.add_argument("--password"); s.add_argument("--ask-password", action="store_true")
+    s.add_argument("--json", action="store_true", help=JSON)
+    s = add("connect", "connect to a profile",
+            "Connect and wait until the tunnel is up. With no profile it reconnects the last used one.\n"
+            "A connection that is already up is switched to the new profile. If the server rejects the login\n"
+            "you are asked for the username and password right away (in a terminal) and it retries.",
+            ["vpnman connect Work", "vpnman connect --fastest", "vpnman connect --no-wait Home"], aliases=["up"])
+    s.add_argument("profile", nargs="?", help="profile id or name (default: the last used one)")
+    s.add_argument("--fastest", action="store_true", help="measure all servers and use the one with the lowest latency")
+    s.add_argument("--last", action="store_true", help="use the last connected profile (the default without a profile)")
+    s.add_argument("--no-wait", action="store_true", help="return immediately instead of waiting for the tunnel")
+    s.add_argument("--timeout", type=int, default=90, metavar="SECONDS", help="how long to wait (default 90)")
+    add("disconnect", "disconnect",
+        "Disconnect the VPN. The kill switch stays engaged if it was turned on with 'vpnman lock on' or\n"
+        "netlock.persist is set; otherwise it is released.", ["vpnman disconnect"], aliases=["down"])
+    s = add("import", "import config files or a directory of them",
+            "Import VPN configuration files. The protocol is detected from the file (use --protocol to force it).\n"
+            "A directory is searched recursively and each sub-folder name becomes the profile's group.\n"
+            "Options in a config that cannot work here (Windows-only options, missing up/down scripts) are listed\n"
+            "as notes after the import and ignored when connecting.",
+            ["vpnman import work.ovpn", "vpnman import ~/vpn-configs/        # folders become groups",
+             "vpnman import --user bob --ask-password *.ovpn", "vpnman import --stunnel vpn.example.com:443 srv.ovpn"])
+    s.add_argument("paths", nargs="+", metavar="PATH", help="config file(s) or directories")
+    s.add_argument("--name", help="profile name (default: the file name; only with a single file)")
+    s.add_argument("--protocol", choices=protocols, help="skip detection and use this protocol")
+    s.add_argument("--user", help="username to store with the profile")
+    s.add_argument("--password", help="password to store (visible in the process list - prefer --ask-password)")
+    s.add_argument("--ask-password", action="store_true", help="prompt for the password instead of putting it on the command line")
     s.add_argument("--stunnel", metavar="HOST[:PORT]", help="carry OpenVPN over TLS via stunnel (default port 443)")
-    s.add_argument("--stunnel-sni", metavar="NAME"); s.add_argument("--stunnel-ca", metavar="FILE")
-    s.add_argument("--stunnel-verify", choices=["none", "system", "ca"])
-    s = add("add", "create a profile without a config file")
-    s.add_argument("name"); s.add_argument("--protocol", required=True, choices=list(backends.REGISTRY))
-    s.add_argument("--server"); s.add_argument("--port", type=int); s.add_argument("--user")
-    s.add_argument("--ask-password", action="store_true"); s.add_argument("--option", "-o", action="append", metavar="K=V")
-    s = add("remove", "delete profiles", aliases=["rm"]); s.add_argument("profiles", nargs="+")
-    s = add("edit", "change profile fields (name, username, password, server, port, dns, notes, group, "
-                 "stunnel=HOST:PORT|off, stunnel_sni, stunnel_ca=FILE, stunnel_verify)")
-    s.add_argument("profile"); s.add_argument("changes", nargs="+", metavar="KEY=VALUE")
-    for n, h in (("fav", "mark favourite"), ("unfav", "unmark favourite"), ("block", "blacklist"),
-                 ("unblock", "remove from blacklist")):
-        s = add(n, h); s.add_argument("profiles", nargs="+")
-    s = add("ping", "measure latency to profiles"); s.add_argument("profiles", nargs="*")
-    s = add("lock", "network lock (kill switch)"); s.add_argument("action", choices=["on", "off", "status"], nargs="?", default="status")
-    s = add("autostart", "connect the VPN automatically when the system starts")
+    s.add_argument("--stunnel-sni", metavar="NAME", help="TLS server name to present (SNI)")
+    s.add_argument("--stunnel-ca", metavar="FILE", help="CA certificate to verify the stunnel server with")
+    s.add_argument("--stunnel-verify", choices=["none", "system", "ca"], help="how to verify the stunnel server")
+    s = add("add", "create a profile without a config file",
+            "Create a profile by hand, for protocols that need only a server and credentials (OpenConnect, SSTP,\n"
+            "PPTP, Tailscale, ...). Extra protocol settings go in with -o KEY=VALUE.",
+            ["vpnman add Office --protocol openconnect --server vpn.example.com --user bob --ask-password",
+             "vpnman add Mesh --protocol tailscale -o exit_node=100.64.0.1"])
+    s.add_argument("name", help="name of the new profile")
+    s.add_argument("--protocol", required=True, choices=protocols, help="VPN protocol (see: vpnman protocols)")
+    s.add_argument("--server", help="server host name or address")
+    s.add_argument("--port", type=int, help="server port")
+    s.add_argument("--user", help="username")
+    s.add_argument("--ask-password", action="store_true", help="prompt for the password")
+    s.add_argument("--option", "-o", action="append", metavar="K=V", help="protocol option (repeatable)")
+    s = add("remove", "delete profiles",
+            "Delete profiles and their stored credentials. If one of them is connected, the VPN is disconnected.",
+            ["vpnman remove OldServer", "vpnman rm srv1 srv2"], aliases=["rm"])
+    s.add_argument("profiles", nargs="+", metavar="PROFILE", help="profile id or name (several allowed)")
+    s = add("edit", "change profile fields",
+            "Change fields of a profile. Fields: name, username, password, server, port, dns (comma separated),\n"
+            "notes, group, favorite and blacklisted (true/false), and the stunnel settings: stunnel=HOST:PORT|off,\n"
+            "stunnel_sni=NAME, stunnel_ca=FILE, stunnel_verify=none|system|ca.",
+            ["vpnman edit Work username=bob group=Office", "vpnman edit Work dns=1.1.1.1,1.0.0.1",
+             "vpnman edit Work stunnel=vpn.example.com:443", "vpnman edit Work stunnel=off"])
+    s.add_argument("profile", help="profile id or name")
+    s.add_argument("changes", nargs="+", metavar="KEY=VALUE", help="field and its new value")
+    for n, h, d in (("fav", "mark favourite", "Mark profiles as favourites: they sort first and are the last resort of failover."),
+                    ("unfav", "unmark favourite", "Remove the favourite mark."),
+                    ("block", "blacklist", "Blacklist profiles: --fastest and failover never pick them."),
+                    ("unblock", "remove from blacklist", "Allow --fastest and failover to pick the profiles again.")):
+        s = add(n, h, d, ["vpnman %s Work Home" % n])
+        s.add_argument("profiles", nargs="+", metavar="PROFILE", help="profile id or name (several allowed)")
+    s = add("ping", "measure latency to profiles",
+            "Measure the round-trip time to each server: a TCP connect for TCP servers, ICMP ping for UDP ones\n"
+            "(all profiles when none is named). Servers that do not answer are shown as unreachable.",
+            ["vpnman ping", "vpnman ping Work Home"])
+    s.add_argument("profiles", nargs="*", metavar="PROFILE", help="profile id or name (default: all)")
+    s = add("lock", "network lock (kill switch)",
+            "The kill switch. While engaged, only the VPN tunnel, the VPN server, the local network (if allowed)\n"
+            "and the exceptions in netlock.whitelist_out, 'vpnman routes' and 'vpnman bypass' can send or receive\n"
+            "traffic. If the VPN drops, nothing leaks. 'on' engages it now; turn it on for good with\n"
+            "'vpnman set netlock.enabled true' (engage whenever connecting) or netlock.persist (survive reboots).",
+            ["vpnman lock status", "vpnman lock on", "vpnman lock off"])
+    s.add_argument("action", choices=["on", "off", "status"], nargs="?", default="status",
+                   help="engage, release or show the state (default: status)")
+    s = add("autostart", "connect the VPN automatically when the system starts",
+            "Choose what the background service connects to at boot, and whether the tray app starts at login.\n"
+            "With no arguments it shows the current setting.",
+            ["vpnman autostart", "vpnman autostart last", "vpnman autostart Work", "vpnman autostart off",
+             "vpnman autostart --login-app on"])
     s.add_argument("target", nargs="?", help="off | last | fastest | profile name")
     s.add_argument("--login-app", choices=["on", "off"], help="start the tray app at login (this user)")
-    s = add("dns", "choose the DNS servers used while connected"); s.add_argument("choice", nargs="*")
-    s = add("bypass", "apps that skip the VPN (split tunnel): list|add|remove|available|on|off|mode", aliases=["split"])
-    s.add_argument("action", nargs="?"); s.add_argument("items", nargs="*")
-    s = add("schedule", "connect the VPN at set times: list|add|remove|enable|disable|on|off")
-    s.add_argument("action", nargs="?"); s.add_argument("target", nargs="?")
-    s.add_argument("--name"); s.add_argument("--days", help="all | weekdays | weekends | mon,wed | mon-fri")
-    s.add_argument("--start", metavar="HH:MM"); s.add_argument("--end", metavar="HH:MM", help="disconnect again at this time")
+    s = add("dns", "choose the DNS servers used while connected",
+            "Choose which DNS servers are used while the VPN is up. With no argument it shows the current choice\n"
+            "and the presets. 'provider' uses the servers the VPN pushes, 'off' leaves your DNS settings alone\n"
+            "(that can leak queries - see 'vpnman leaktest').",
+            ["vpnman dns", "vpnman dns cloudflare", "vpnman dns 9.9.9.9,149.112.112.112", "vpnman dns provider",
+             "vpnman dns off"])
+    s.add_argument("choice", nargs="*", help="preset name | IP[,IP...] | provider | off")
+    s = add("bypass", "apps that skip the VPN (split tunnel)",
+            "Applications that keep using your normal connection while the VPN is up (Linux with nft, ip and\n"
+            "cgroup v2). They keep working even when the VPN drops under the kill switch.\n\n"
+            "  list                 show the state and the apps\n"
+            "  available [TEXT]     installed applications (optionally filtered)\n"
+            "  add APP...           add apps by name or process name\n"
+            "  remove APP...        remove apps\n"
+            "  on | off             turn the feature on or off\n"
+            "  mode [exclude|include]\n"
+            "                       exclude (default): listed apps skip the VPN.\n"
+            "                       include (experimental): ONLY listed apps use the VPN.",
+            ["vpnman bypass available fire", "vpnman bypass add firefox steam", "vpnman bypass remove steam",
+             "vpnman bypass mode include"], aliases=["split"])
+    s.add_argument("action", nargs="?", choices=["list", "add", "remove", "rm", "available", "on", "off", "mode"],
+                   help="what to do (default: list)")
+    s.add_argument("items", nargs="*", metavar="APP", help="application names / process names (or the mode)")
+    s = add("schedule", "connect the VPN at set times",
+            "Connect (and optionally disconnect) at set times. A window that ends before it starts runs past\n"
+            "midnight. A manual disconnect inside a window is respected until the next start or end.\n\n"
+            "  list                 show the schedules and when each next fires\n"
+            "  add                  create one (--start is required)\n"
+            "  remove|enable|disable ID_OR_NAME\n"
+            "  on | off             turn the whole scheduler on or off",
+            ["vpnman schedule add --days weekdays --start 08:00 --end 18:00 --name Work",
+             "vpnman schedule add --days sat,sun --start 22:00 --end 06:00 --profile fastest",
+             "vpnman schedule disable Work"])
+    s.add_argument("action", nargs="?", choices=["list", "add", "remove", "rm", "enable", "disable", "on", "off"],
+                   help="what to do (default: list)")
+    s.add_argument("target", nargs="?", help="schedule id or name (remove / enable / disable)")
+    s.add_argument("--name", help="label for the schedule")
+    s.add_argument("--days", help="all | weekdays | weekends | mon,wed | mon-fri  (default: all)")
+    s.add_argument("--start", metavar="HH:MM", help="connect at this time (24-hour clock)")
+    s.add_argument("--end", metavar="HH:MM", help="disconnect again at this time")
     s.add_argument("--profile", help="profile name/id, 'fastest' or 'last' (default: last used)")
-    s = add("backup", "export or restore all profiles (with credentials) and settings")
-    s.add_argument("action", choices=["export", "import"]); s.add_argument("file")
-    s.add_argument("--replace", action="store_true", help="import: make this computer match the backup")
+    s = add("backup", "export or restore all profiles (with credentials) and settings",
+            "Write every profile (with its passwords and private keys) and the settings to one file, or restore\n"
+            "them. Restoring adds the profiles that are missing and touches nothing else, unless --replace.\n"
+            "The file is not encrypted: keep it somewhere safe.",
+            ["vpnman backup export ~/vpnman-backup.tar.gz", "vpnman backup import ~/vpnman-backup.tar.gz",
+             "vpnman backup import --replace --settings backup.tar.gz   # make this PC match the backup"])
+    s.add_argument("action", choices=["export", "import"], help="write a backup, or restore one")
+    s.add_argument("file", help="backup file")
+    s.add_argument("--replace", action="store_true", help="import: make this computer match the backup (removes other profiles)")
     s.add_argument("--settings", action="store_true", help="import: also restore the settings (always with --replace)")
     s.add_argument("--force", action="store_true", help="export: overwrite an existing file")
-    s = add("history", "recent connections: when, how long, how much traffic")
-    s.add_argument("-n", "--lines", type=int, default=20); s.add_argument("--json", action="store_true")
-    s.add_argument("--clear", action="store_true")
-    s = add("failover", "servers to try, in order, when a profile keeps failing")
-    s.add_argument("profile"); s.add_argument("servers", nargs="*")
+    s = add("history", "recent connections: when, how long, how much traffic",
+            "The last 200 connections: start time, duration, traffic and why each ended.",
+            ["vpnman history", "vpnman history -n 5", "vpnman history --clear"])
+    s.add_argument("-n", "--lines", type=int, default=20, help="how many entries to show (default 20)")
+    s.add_argument("--json", action="store_true", help=JSON)
+    s.add_argument("--clear", action="store_true", help="delete the history")
+    s = add("proxy", "proxies (Xray: VLESS, VMess, Trojan, Shadowsocks) in front of, or behind, the VPN",
+            "Use a VLESS / VMess / Trojan / Shadowsocks server through Xray, alone or together with the VPN.\n\n"
+            "  list [--latency]       the proxies\n"
+            "  add SOURCE...          share links, a file with links, or a subscription URL (https://...)\n"
+            "  refresh [URL...]       download the subscriptions again (new servers appear, gone ones are removed)\n"
+            "  remove NAME...         delete proxies\n"
+            "  edit NAME KEY=VALUE... name, group, notes, favorite\n"
+            "  use NAME               choose the proxy to use\n"
+            "  on | off               switch the proxy on or off\n"
+            "  order proxy_only|vpn_proxy|proxy_vpn\n"
+            "                         proxy_only: you -> proxy -> internet.  vpn_proxy: you -> VPN -> proxy -> internet.\n"
+            "                         proxy_vpn: you -> proxy -> VPN -> internet (the VPN rides inside the proxy;\n"
+            "                         OpenVPN and WireGuard profiles)\n"
+            "  mode local|system      local: SOCKS5 + HTTP proxy for applications on 127.0.0.1.\n"
+            "                         system (Linux): all TCP and DNS of this computer go through the proxy\n"
+            "  set KEY VALUE          socks_port, http_port, dns, udp (block|direct)\n"
+            "  status | ping [NAME...]\n\n"
+            "Needs the xray program (https://github.com/XTLS/Xray-core).",
+            ["vpnman proxy add 'vless://...@example.com:443?security=reality&...#Home'", "vpnman proxy add https://example.com/sub/abc",
+             "vpnman proxy use Home && vpnman proxy order vpn_proxy && vpnman proxy on", "vpnman proxy mode system",
+             "vpnman proxy status"])
+    s.add_argument("action", nargs="?", choices=["list", "add", "remove", "rm", "edit", "use", "on", "off", "order", "mode",
+                                                  "set", "status", "ping", "refresh"], help="default: list")
+    s.add_argument("items", nargs="*", metavar="ARG", help="links / URLs / names / values (see the actions above)")
+    s.add_argument("--name", help="add: name for a single imported proxy")
+    s.add_argument("--group", help="add: group to put the imported proxies in (default: the subscription's host)")
+    s.add_argument("--latency", "-l", action="store_true", help="list: measure every server")
+    s.add_argument("--json", action="store_true", help=JSON)
+    s = add("blocks", "addresses, ports and programs that may not use the network",
+            "Block connections with the firewall (Linux, nftables). The list is kept across restarts. Blocking also\n"
+            "closes the matching connections that are open right now.\n\n"
+            "  list                    the blocked things, with the ids used below\n"
+            "  add KIND VALUE          KIND is address (IP or network), endpoint (ADDRESS:PORT), port or app\n"
+            "  remove ID...            unblock\n"
+            "  enable|disable ID...    keep an entry in the list but stop (or resume) enforcing it\n"
+            "  on | off                switch the whole list on or off",
+            ["vpnman blocks add address 203.0.113.9", "vpnman blocks add endpoint 203.0.113.9:443 --proto tcp",
+             "vpnman blocks add port 6881 --proto udp --note torrents", "vpnman blocks add app steam", "vpnman blocks remove 3f9a1c2b"])
+    s.add_argument("action", nargs="?", choices=["list", "status", "add", "remove", "rm", "enable", "disable", "on", "off"],
+                   help="default: list")
+    s.add_argument("items", nargs="*", metavar="ARG", help="add: KIND VALUE; remove/enable/disable: ids")
+    s.add_argument("--proto", choices=["any", "tcp", "udp"], help="add: protocol (endpoint and port entries)")
+    s.add_argument("--note", help="add: a reminder of why")
+    s.add_argument("--json", action="store_true", help=JSON)
+    s = add("connections", "live list of connections: which application, port and protocol",
+            "Show the network connections of this computer as the daemon sees them: the way (in, out, listen), the\n"
+            "application and its pid, the protocol, the local and remote address and port, and the TCP state.\n"
+            "Connections that never leave this machine and sockets that only listen are hidden unless asked for.\n"
+            "On BSD systems other than FreeBSD the application names are not available.",
+            ["vpnman connections", "vpnman connections --listening", "vpnman connections --watch", "vpnman connections --json"])
+    s.add_argument("--listening", "-l", action="store_true", help="also show sockets that wait for connections")
+    s.add_argument("--local", action="store_true", help="also show connections within this computer (loopback)")
+    s.add_argument("--resolve", "-r", action="store_true",
+                   help="show host names instead of addresses where reverse DNS knows them (sends DNS queries)")
+    s.add_argument("--watch", "-w", action="store_true", help="refresh every 2 seconds")
+    s.add_argument("--json", action="store_true", help=JSON)
+    s = add("group", "list groups; rename a group or edit all its servers at once",
+            "Servers are grouped by the folder they were imported from (or 'vpnman edit PROFILE group=NAME').\n"
+            "'edit' changes every server in a group in one go. Keys: name (renames the group), username,\n"
+            "password, stunnel=HOST[:PORT] (or off), stunnel_sni, stunnel_verify. Whatever you do not name stays\n"
+            "as it is. The SSL tunnel applies to the OpenVPN servers of the group only.",
+            ["vpnman group", "vpnman group edit Germany name=DE", "vpnman group edit DE username=bob --ask-password",
+             "vpnman group edit DE stunnel=vpn.example.com:443", "vpnman group edit DE stunnel=off"])
+    s.add_argument("action", nargs="?", choices=["list", "edit"], help="default: list")
+    s.add_argument("group", nargs="?", help="group name (or a unique part of it)")
+    s.add_argument("changes", nargs="*", metavar="KEY=VALUE", help="what to change on every server of the group")
+    s.add_argument("--ask-password", action="store_true", help="prompt for a new password for all of them")
+    s = add("failover", "servers to try, in order, when a profile keeps failing",
+            "Show or set the servers tried, in order, when PROFILE keeps failing (after connection.retry_max\n"
+            "attempts). After that list come the servers of the same group, then your favourites\n"
+            "(see connection.failover and connection.failover_group). Blocked servers are never used.",
+            ["vpnman failover Work", "vpnman failover Work Backup1 Backup2", "vpnman failover Work --clear"])
+    s.add_argument("profile", help="the profile whose list to show or set")
+    s.add_argument("servers", nargs="*", metavar="SERVER", help="fallback profiles, in the order to try them")
     s.add_argument("--clear", action="store_true", help="remove the list")
-    s = add("update", "check GitHub for a newer VPNMan release (exit 10 if there is one)")
-    s.add_argument("--json", action="store_true")
-    s = add("networks", "show the current network; trust/untrust it (auto-connect on untrusted networks)")
-    s.add_argument("action", nargs="?", choices=["show", "trust", "untrust"]); s.add_argument("name", nargs="?")
-    s = add("routes", "addresses, networks or domains that skip the VPN: list|add|remove")
-    s.add_argument("action", nargs="?"); s.add_argument("items", nargs="*")
-    s = add("leaktest", "check the live connection: tunnel, public IP, kill switch, DNS and IPv6 leaks")
-    s.add_argument("--json", action="store_true")
-    s = add("cleanup", "remove firewall rules, routes and cgroups VPNMan left behind (root)")
+    s = add("update", "check GitHub for a newer VPNMan release (exit 10 if there is one)",
+            "Ask GitHub for the newest release and compare. Runs as you, not through the service; nothing is\n"
+            "downloaded or installed. Exit status 10 means a newer version exists.",
+            ["vpnman update", "vpnman update --json"])
+    s.add_argument("--json", action="store_true", help=JSON)
+    s = add("networks", "show the current network; trust/untrust it",
+            "Trusted networks are ones where you do not need the VPN (home, office). Combine with\n"
+            "'vpnman set network.untrusted_action connect' to connect automatically everywhere else and\n"
+            "'vpnman set network.trusted_action disconnect' to disconnect on trusted ones. Wi-Fi is identified\n"
+            "by its name (SSID), wired networks by the gateway's hardware address.",
+            ["vpnman networks", "vpnman networks trust", "vpnman networks trust \"Home WiFi\"", "vpnman networks untrust"])
+    s.add_argument("action", nargs="?", choices=["show", "trust", "untrust"], help="default: show")
+    s.add_argument("name", nargs="?", help="network to trust / untrust (default: the current one)")
+    s = add("routes", "addresses, networks or domains that skip the VPN",
+            "Destinations that always use your normal connection instead of the VPN, and that the kill switch\n"
+            "never blocks. Give IP addresses, networks (CIDR) or domain names (re-resolved when needed).",
+            ["vpnman routes", "vpnman routes add 10.0.0.0/8 intranet.example.com", "vpnman routes remove 10.0.0.0/8"])
+    s.add_argument("action", nargs="?", choices=["list", "add", "remove", "rm"], help="default: list")
+    s.add_argument("items", nargs="*", metavar="ADDRESS", help="IP, network (CIDR) or domain name")
+    s = add("leaktest", "check the live connection: tunnel, public IP, kill switch, DNS and IPv6 leaks",
+            "Test the live connection: that the tunnel is up, what the public IP is, that traffic outside the\n"
+            "tunnel is really blocked while the kill switch is engaged, that the DNS servers sit behind the\n"
+            "tunnel and that IPv6 cannot bypass it. Exit status 1 if a check fails, so it works in scripts.\n"
+            "Connect first.", ["vpnman leaktest", "vpnman leaktest --json"])
+    s.add_argument("--json", action="store_true", help=JSON)
+    s = add("cleanup", "remove firewall rules, routes and cgroups VPNMan left behind (root)",
+            "Remove what VPNMan created in the system: the kill switch rules (nftables table 'inet vpnman',\n"
+            "iptables chains VPNMAN_OUT / VPNMAN_IN, or the pf ruleset), the app-bypass table 'inet vpnman_split',\n"
+            "its routing rule and table, the cgroups, the proxy's system-wide redirect (table 'inet vpnman_proxy') and\n"
+            "the blocked-connections table ('inet vpnman_block').\n"
+            "Uninstalling runs this for you. Use it if a crash left\n"
+            "you offline with the kill switch stuck on.",
+            ["sudo vpnman cleanup", "sudo vpnman cleanup --force     # even though the service is running"])
     s.add_argument("--force", action="store_true", help="even if the service is running")
-    s = add("get", "show settings"); s.add_argument("key", nargs="?")
-    s = add("set", "change a setting"); s.add_argument("key"); s.add_argument("value")
-    s = add("logs", "show daemon log"); s.add_argument("-f", "--follow", action="store_true")
-    s.add_argument("-n", "--lines", type=int, default=50)
-    add("protocols", "list supported protocols and whether their tools are installed")
-    s = add("doctor", "check the system (icons, daemon, protocols)")
+    s = add("get", "show settings",
+            "Show all settings, one section, or one value. Keys are dotted: section.name.",
+            ["vpnman get", "vpnman get netlock", "vpnman get netlock.allow_lan"])
+    s.add_argument("key", nargs="?", help="setting such as netlock.allow_lan (default: everything)")
+    s = add("set", "change a setting",
+            "Change one setting; it takes effect immediately and is saved in /etc/vpnman/settings.json.\n"
+            "Booleans: true/false/on/off/yes/no. Lists: comma separated. See 'man vpnman' for every setting.",
+            ["vpnman set netlock.enabled true", "vpnman set netlock.whitelist_out 192.0.2.10,198.51.100.0/24",
+             "vpnman set connection.retry_max 5", "vpnman set events.connected /usr/local/bin/on-vpn-up"])
+    s.add_argument("key", help="setting, e.g. connection.retry_max")
+    s.add_argument("value", help="new value")
+    s = add("logs", "show daemon log",
+            "Show the daemon's recent log: connections, tool output, firewall changes, errors.",
+            ["vpnman logs", "vpnman logs -n 200", "vpnman logs -f"])
+    s.add_argument("-f", "--follow", action="store_true", help="keep running and print new lines")
+    s.add_argument("-n", "--lines", type=int, default=50, help="how many lines to show first (default 50)")
+    add("protocols", "list supported protocols and whether their tools are installed",
+        "List every supported VPN protocol, and which program to install for the ones that are missing.",
+        ["vpnman protocols"])
+    s = add("doctor", "check the system (icons, daemon, protocols)",
+            "Report the state of the installation: distribution, init system, daemon, firewall, launcher and\n"
+            "icons, tray support, and which protocols have their programs installed. Start here when something\n"
+            "does not work (for example the app is missing from the menu).",
+            ["vpnman doctor", "sudo vpnman doctor --fix"])
     s.add_argument("--fix", action="store_true", help="link launcher/icons into /usr/share and rebuild icon caches (root)")
-    s = add("service", "install/control the background service")
-    s.add_argument("action", choices=["install", "uninstall", "enable", "disable", "start", "stop", "restart", "status"])
+    s = add("service", "install/control the background service",
+            "Install or control the background service (vpnmand) with the init system of this machine:\n"
+            "systemd, runit, OpenRC, SysV init, OpenBSD rc.d or FreeBSD rc.d. Needs root.\n"
+            "'enable' installs the definition if needed, enables it at boot and starts it.",
+            ["sudo vpnman service enable", "sudo vpnman service restart", "sudo vpnman service status",
+             "sudo vpnman service uninstall"])
+    s.add_argument("action", choices=["install", "uninstall", "enable", "disable", "start", "stop", "restart", "status"],
+                   help="install/uninstall the definition; enable/disable at boot (and start/stop now); or control it")
     s.add_argument("--init", choices=["systemd", "runit", "openrc", "sysv", "openbsd-rc", "bsd-rc"],
                    help="force the init system instead of auto-detecting it")
-    add("daemon", "run the daemon in the foreground (root)")
-    s = add("gui", "open the GTK4/libadwaita app")
+    add("daemon", "run the daemon in the foreground (root)",
+        "Run the background service in the foreground, with logging to the terminal. This is what the init\n"
+        "system runs (as 'vpnmand'). Useful for debugging; stop the installed service first.",
+        ["sudo vpnman service stop && sudo vpnman daemon"])
+    s = add("gui", "open the GTK4/libadwaita app",
+            "Open the graphical app (also installed as 'vpnman-gtk' and in the application menu). It needs\n"
+            "PyGObject, GTK 4 and libadwaita 1.4+. Closing the window keeps it in the system tray when a tray\n"
+            "is available.", ["vpnman gui", "vpnman gui --background"])
     s.add_argument("--background", action="store_true", help="start minimised to the system tray")
-    add("about", "credits, license and ways to support the project")
-    add("shell", "interactive menu", aliases=["menu"])
+    add("about", "credits, license and ways to support the project", "Show the credits, the license and how to support the project.")
+    add("shell", "interactive menu", "Open the interactive menu (the same as running 'vpnman' in a terminal).", aliases=["menu"])
     return ap
 
 

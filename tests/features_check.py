@@ -10,14 +10,32 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk
 from vpnman.gui import app as A
 from vpnman.gui import pages as P
+from vpnman.gui import proxypage as PP
 from vpnman.settings import DEFAULTS
 
 CALLS = []
+BLOCK_STATUS = {"enabled": True, "active": True, "error": "", "supported": True, "reason": "", "apps_supported": True, "apps_reason": "",
+                "entries": [{"id": "aaaa1111", "kind": "address", "value": "203.0.113.9/32", "proto": "any", "note": "bad", "enabled": True, "created": 0},
+                            {"id": "bbbb2222", "kind": "endpoint", "value": "203.0.113.9:443", "proto": "tcp", "note": "", "enabled": False, "created": 0},
+                            {"id": "cccc3333", "kind": "app", "value": "steam", "proto": "any", "note": "", "enabled": True, "created": 0}]}
+PROXY_STATUS = {"enabled": True, "selected": "%012d" % 1, "name": "Home", "order": "vpn_proxy", "mode": "local", "running": True,
+                "carrier": False, "error": "", "socks": 10808, "http": 10809, "installed": True, "system_ok": True,
+                "socks_port": 10808, "http_port": 10809, "dns": "1.1.1.1", "udp": "block"}
 
 
 def fake_rpc(method, ok=None, fail=None, **kw):
     CALLS.append((method, kw))
     canned = {
+        "proxy.list": [{"id": "%012d" % i, "name": n, "protocol": "vless", "server": "p%d.example.com" % i, "port": 443,
+                        "group": g, "selected": i == 1, "notes": ""} for i, (n, g) in enumerate([("Home", ""), ("WS", "sub"), ("TR", "sub")], 1)],
+        "proxy.status": PROXY_STATUS, "proxy.sources": [], "proxy.set": PROXY_STATUS, "proxy.select": {"id": "x"},
+        "proxy.latency": {"%012d" % 1: 12.5, "%012d" % 2: None},
+        "proxy.remove": {"removed": ["WS", "TR"], "failed": []},
+        "blocks.status": BLOCK_STATUS, "blocks.add": {"id": "abcd1234", "kind": "address", "value": "x", "proto": "any", "closed": 2},
+        "blocks.remove": {"removed": ["aaaa1111"]}, "blocks.set": BLOCK_STATUS, "blocks.update": {"id": "aaaa1111"},
+        "connections.close": {"closed": True}, "connections": {"rows": [], "supported": True},
+        "profiles.list": [{"id": "%012d" % i, "name": "srv%d" % i, "favorite": False, "blacklisted": False, "protocol": "openvpn",
+                           "server": "h", "port": 1, "group": "", "username": ""} for i in (1, 2)],
         "leaktest": {"checks": [{"id": "tunnel", "name": "VPN tunnel", "status": "ok", "detail": "Connected"},
                                 {"id": "dns", "name": "DNS servers", "status": "fail", "detail": "leak <&> test"},
                                 {"id": "ipv6", "name": "IPv6", "status": "warn", "detail": "maybe"}], "summary": "fail"},
@@ -28,6 +46,12 @@ def fake_rpc(method, ok=None, fail=None, **kw):
     }
     if ok and method in canned:
         ok(canned[method])
+
+
+def fake_proxy_list():
+    return [{"id": "%012d" % i, "name": n, "protocol": "vless", "server": "p%d.example.com" % i,
+                                        "port": 443, "group": g, "selected": i == 1, "notes": ""}
+                                       for i, (n, g) in enumerate([("Home", ""), ("WS", "sub"), ("TR", "sub")], 1)]
 
 
 def prof(i, group="", fav=False):
@@ -128,7 +152,7 @@ class App(A.Application):
         assert order() == ["srv2", "srv3", "srv4", "srv1"]
         rows = sorted(w._rows.values(), key=w._sort_key)
         w._header(rows[1], rows[0])
-        assert rows[1].get_header() is not None and rows[1].get_header().get_label() == "Alpha"
+        assert rows[1].get_header() is not None and rows[1].get_header().get_first_child().get_label() == "Alpha"
         w._header(rows[2], rows[1])
         assert rows[2].get_header() is None
         w._header(rows[0], None)
@@ -149,6 +173,269 @@ class App(A.Application):
         ed._submit()
         ch = [kw for m, kw in CALLS if m == "profiles.update" and "failover" in kw.get("changes", {})]
         assert ch and ch[-1]["changes"]["failover"] == got[0], ch
+        # ---- batch edit: group header button, group dialog, selection dialog
+        rows = sorted(w._rows.values(), key=w._sort_key)
+        w._header(rows[1], rows[0])
+        hdr = rows[1].get_header()
+        btns = []
+        c = hdr.get_first_child()
+        while c:
+            if isinstance(c, A.Gtk.Button):
+                btns.append(c.get_label())
+            c = c.get_next_sibling()
+        assert btns == ["Edit…"], btns
+        members = [p for p in w.profiles if p.get("group") == "Alpha"]
+        bd = A.BatchEditDialog(w, members, group="Alpha")
+        assert bd.group_row.get_text() == "Alpha" and bd.changes() == {}
+        bd.group_row.set_text("Beta"); bd.user.set_text("bob"); bd.password.set_text("pw")
+        assert bd.changes() == {"group": "Beta", "username": "bob", "password": "pw"}, bd.changes()
+        bd.st_mode.set_selected(1)
+        try:
+            bd.changes(); raise SystemExit("empty stunnel host must be refused")
+        except ValueError:
+            pass
+        bd.st_host.set_text("vpn.example.com:8443"); bd.st_sni.set_text("sni.example")
+        assert bd.changes()["stunnel"] == {"mode": "set", "host": "vpn.example.com", "port": 8443, "sni": "sni.example"}
+        bd.st_mode.set_selected(2)
+        assert bd.changes()["stunnel"] == {"mode": "off"}
+        sel = A.BatchEditDialog(w, members)
+        assert sel.changes() == {}
+        sel.group_row.set_text("Moved")
+        assert sel.changes() == {"group": "Moved"}
+        CALLS.clear()
+        bd._apply()
+        call = [kw for m, kw in CALLS if m == "profiles.update_many"]
+        assert call and call[0]["ids"] == [p["id"] for p in members] and call[0]["changes"]["group"] == "Beta", call
+        # ---- the lists load even if the daemon was not up yet when the window opened (e.g. right after a reinstall)
+        w.profiles, w._synced, w._sync_try = [], False, 0.0
+        CALLS.clear()
+        w._on_status(dict(base, state="disconnected", error_kind=None, message=""))
+        assert any(c[0] == "profiles.list" for c in CALLS), "an answering daemon with no lists loaded must trigger a load"
+        assert w._synced and len(w.profiles) == 2
+        CALLS.clear()
+        w._on_status(dict(base, state="disconnected", error_kind=None, message=""))
+        assert not any(c[0] == "profiles.list" for c in CALLS), "once loaded, status updates do not reload the lists"
+        w._set_daemon(False)
+        assert not w._synced, "a daemon that went away means: load again when it is back"
+        w._sync_try = 0.0
+        CALLS.clear()
+        w._on_status(dict(base, state="disconnected", error_kind=None, message=""))
+        assert any(c[0] == "profiles.list" for c in CALLS)
+        # ---- Connection tab selector: current / last connected server, predictable
+        w.profiles = [prof(1), prof(2), prof(3)]
+        ids = [p["id"] for p in w.profiles]
+        w._pending, w._user_pick = None, None
+        w.status = {"state": "disconnected", "last_profile": ids[2]}
+        assert w.wanted_selection() == ids[2], "disconnected: the last connected server"
+        w.status = {"state": "disconnected", "last_profile": "gone"}
+        assert w.wanted_selection() == ids[0], "unknown last server: the first one"
+        w._user_pick = ids[1]
+        w.status = {"state": "disconnected", "last_profile": ids[2]}
+        assert w.wanted_selection() == ids[1], "a hand pick holds while nothing is connecting"
+        w.status = {"state": "connecting", "profile_id": ids[0], "last_profile": ids[0]}
+        assert w.wanted_selection() == ids[0] and w._user_pick is None, "a connection under way decides"
+        w.status = {"state": "disconnected", "last_profile": ids[0]}
+        assert w.wanted_selection() == ids[0], "and the hand pick is gone afterwards"
+        import time as _t
+        w._pending = (ids[1], _t.monotonic() + 60)
+        w.status = {"state": "connected", "profile_id": ids[0], "last_profile": ids[0]}
+        assert w.wanted_selection() == ids[1], "a click still on its way wins over the old connection"
+        w._pending = None
+        w.status = {"state": "error", "profile_id": ids[2], "last_profile": ids[2]}
+        assert w.wanted_selection() == ids[2], "after a failed attempt: the server that failed"
+        w.status = {"state": "connected", "profile_id": ids[1], "last_profile": ids[1]}
+        w._sync_selector()
+        assert w.server_row.get_selected() == 1 and w.sel_id == ids[1]
+        w.status = {"state": "disconnected", "last_profile": ids[1]}
+        w._on_profiles([prof(1), prof(2), prof(3)][::-1])           # a refreshed list keeps the right server selected
+        assert w.profiles[w.server_row.get_selected()]["id"] == ids[1]
+        w._on_profiles([prof(3), prof(1)])                           # the selected server was deleted
+        assert w.profiles[w.server_row.get_selected()]["id"] == ids[2]   # falls back to the first of what is left
+        w._pending = None
+        # ---- servers tab: search above the buttons, VPN / Proxy sub-tabs
+        assert w.srv_tabs.get_visible_child_name() == "vpn"
+        sib = w.search.get_next_sibling()
+        assert sib is not None and w.sort_drop.get_parent() is sib and w.ping_btn.get_parent() is sib, "search must sit above the buttons"
+        # ---- proxy page
+        pp = w.proxy_page
+        pp.rpc = fake_rpc
+        pp.update_list(fake_proxy_list())
+        pp.update_status(PROXY_STATUS)
+        assert len(pp._rows) == 3 and pp.enable.get_active() and "Running" in pp.enable.get_subtitle()
+        assert pp.order.get_selected() == 1 and pp.mode.get_visible() and "SOCKS5 127.0.0.1:10808" in pp.addr.get_subtitle()
+        CALLS.clear()
+        pp.order.set_selected(2)                                  # "Proxy, then VPN"
+        assert CALLS[-1] == ("proxy.set", {"order": "proxy_vpn"}), CALLS
+        pp.update_status(dict(PROXY_STATUS, order="proxy_vpn", running=False))
+        assert not pp.mode.get_visible() and "Starts with the next VPN" in pp.enable.get_subtitle()
+        pp.update_status(dict(PROXY_STATUS, error="boom <b>", running=False))
+        assert "boom" in pp.enable.get_subtitle()
+        pp.update_status(dict(PROXY_STATUS, installed=False))
+        assert pp.banner.get_revealed()
+        CALLS.clear()
+        pp.update_status(PROXY_STATUS)
+        assert not CALLS, "updating the widgets from a status must not send changes back"
+        pp.enable.set_active(False)
+        assert CALLS[-1] == ("proxy.set", {"enabled": False}), CALLS
+        pp.update_status(PROXY_STATUS)
+        CALLS.clear()
+        pp._rows["%012d" % 2].use.set_active(True)
+        assert ("proxy.select", {"ident": "%012d" % 2}) in CALLS, CALLS
+        # multi-select and bulk remove, like the VPN servers list
+        assert pp.listbox.get_selection_mode() == A.Gtk.SelectionMode.MULTIPLE and not pp.sel_bar.get_reveal_child()
+        pp.listbox.select_all()
+        assert len(pp.selected_proxies()) == 3 and pp.sel_label.get_label() == "3 selected" and pp.sel_bar.get_reveal_child()
+        pp.update_list(fake_proxy_list())                              # a refresh keeps the selection
+        assert len(pp.selected_proxies()) == 3
+        pp.listbox.unselect_all()
+        assert not pp.sel_bar.get_reveal_child()
+        pp.listbox.select_row(pp._rows["%012d" % 2])
+        assert [p["name"] for p in pp.selected_proxies()] == ["WS"]
+        CALLS.clear()
+        pp.do_remove([p["id"] for p in pp.selected_proxies()] + ["%012d" % 3])
+        assert CALLS[0] == ("proxy.remove", {"ids": ["%012d" % 2, "%012d" % 3]}), CALLS
+        pp.listbox.unselect_all()
+        rows_before = dict(pp._rows)
+        pp.update_list(fake_proxy_list())
+        assert all(pp._rows[k] is v for k, v in rows_before.items()), "an unchanged list must keep its rows (and the scroll position)"
+        CALLS.clear()
+        pp.update_status(PROXY_STATUS)
+        pp._rows["%012d" % 3].use.set_active(True)                     # choosing a proxy must not reload the whole list
+        assert ("proxy.select", {"ident": "%012d" % 3}) in CALLS and not any(c[0] == "proxy.list" for c in CALLS), CALLS
+        pp.update_status(PROXY_STATUS)
+        pp._rows["%012d" % 1].use.set_active(False)                    # the chosen proxy cannot be un-chosen
+        assert pp._rows["%012d" % 1].use.get_active()
+        pp.search.set_text("tr")
+        pp.listbox.invalidate_filter()
+        add = PP.ProxyAddDialog(w, fake_rpc, lambda: None)
+        add._submit()
+        assert add.err.get_revealed(), "an empty add dialog must complain"
+        add.url.set_text("ftp://x")
+        add._submit()
+        assert "http" in add.err.get_title()
+        PP.ProxyEditDialog(w, fake_rpc, fake_proxy_list()[0], lambda: None)
+        # ---- connection table
+        cg = w.conn_group
+        rows = [{"dir": "out", "proto": "tcp", "v6": False, "local": "10.0.0.2", "lport": 40000, "remote": "93.184.216.34", "rport": 443,
+                 "state": "ESTABLISHED", "pid": 7, "app": "firefox"},
+                {"dir": "in", "proto": "udp", "v6": True, "local": "::1", "lport": 53, "remote": "::", "rport": 0, "state": "", "pid": 0, "app": ""}]
+        cg.update({"rows": rows})
+        assert cg.table.store.get_n_items() == 2 and cg.params() == {"listening": False, "local": False, "resolve": False}
+        assert "2 connections" in cg.table.summary.get_label()
+        cg.table.search.set_text("firefox")
+        cg.table.refilter()
+        assert cg.table.filtered.get_n_items() == 1 and "of 2" in cg.table.summary.get_label()
+        cg.table.search.set_text("")
+        cg.table.refilter()
+        first = cg.table.store.get_item(0)
+        cg.update({"rows": rows})
+        assert cg.table.store.get_item(0) is first, "an unchanged table must not be rebuilt"
+        cg.update({"rows": rows[:1], "note": "n"})
+        assert cg.table.store.get_n_items() == 1 and "n" in cg.table.summary.get_label()
+        # ---- right-click menu, actions, pop-out window, blocked connections
+        tb = cg.table
+        r0 = {"dir": "out", "proto": "tcp", "v6": False, "local": "10.0.0.2", "lport": 40000, "remote": "93.184.216.34", "rport": 443,
+              "state": "ESTABLISHED", "pid": 7, "app": "firefox"}
+        rl = {"dir": "listen", "proto": "udp", "v6": False, "local": "0.0.0.0", "lport": 5353, "remote": "0.0.0.0", "rport": 0,
+              "state": "", "pid": 0, "app": ""}
+
+        def labels(menu):
+            out = []
+            for i in range(menu.get_n_items()):
+                sec = menu.get_item_link(i, "section")
+                if sec is not None:
+                    out += labels(sec)
+                else:
+                    out.append(menu.get_item_attribute_value(i, "label", None).get_string())
+            return out
+        got = labels(tb.menu_for(r0))
+        for want in ("Copy remote address (93.184.216.34:443)", "Copy remote IP", "Copy application name", "Force-close this connection",
+                     "Stop application “firefox”…", "Force-kill application “firefox”…", "Block remote address 93.184.216.34",
+                     "Block 93.184.216.34:443 (TCP)", "Block remote port 443 (TCP)", "Block application “firefox”"):
+            assert want in got, (want, got)
+        assert not any("local port" in x for x in got), "an outgoing connection has no local service to block"
+        named = dict(r0, rname="example.net")
+        assert "Copy remote host name (example.net)" in labels(tb.menu_for(named))
+        assert "Copy remote host name" not in " ".join(labels(tb.menu_for(r0)))
+        assert tb.text_for(named, "remote_host") == "example.net" and tb.text_for(r0, "remote_host") == "93.184.216.34"
+        cg.table.update({"rows": [named]})
+        cg.table.search.set_text("93.184")                       # the address still finds the row when a name is shown
+        cg.table.refilter()
+        assert cg.table.filtered.get_n_items() == 1
+        cg.table.search.set_text("example.net")
+        cg.table.refilter()
+        assert cg.table.filtered.get_n_items() == 1
+        cg.table.search.set_text("")
+        cg.table.refilter()
+        cg.table.resolve.set_active(True)
+        assert cg.params()["resolve"] is True
+        cg.table.resolve.set_active(False)
+        got = labels(tb.menu_for(rl))
+        assert "Block local port 5353 (UDP)" in got and not any(x.startswith(("Force-close", "Stop", "Copy remote")) for x in got), got
+        assert tb.block_spec(r0, "endpoint") == ("endpoint", "93.184.216.34:443", "tcp")
+        assert tb.block_spec(dict(r0, remote="2001:db8::1", v6=True), "endpoint")[1] == "[2001:db8::1]:443"
+        assert tb.block_spec(r0, "remote_port") == ("port", "443", "tcp") and tb.block_spec(r0, "app") == ("app", "firefox", "any")
+        assert tb.text_for(r0, "remote") == "93.184.216.34:443" and tb.text_for(r0, "row").count("\t") == 5
+        cg.rpc = tb.rpc = fake_rpc
+        CALLS.clear()
+        tb._row = r0
+        tb._act_block(None, A.GLib.Variant("s", "endpoint"))
+        assert ("blocks.add", {"kind": "endpoint", "value": "93.184.216.34:443", "proto": "tcp"}) in CALLS, CALLS
+        CALLS.clear()
+        tb._act_close(None, None)
+        assert CALLS[0][0] == "connections.close" and CALLS[0][1]["rport"] == 443, CALLS
+        import subprocess
+        sp = subprocess.Popen(["sleep", "30"])
+        assert tb.stop_process(sp.pid, "sleep", False) and sp.wait(5) == -15, "SIGTERM reaches the user's own program"
+        assert not tb.stop_process(1, "init", True) and not tb.stop_process(os.getpid(), "me", True)
+        win = cg.popout()
+        win = cg._win
+        assert win is not None and win.table.controls.get_parent() is not None
+        cg.popout()
+        assert cg._win is win, "a second click re-uses the pop-out window"
+        win.table.update({"rows": [r0, rl]})
+        assert win.table.store.get_n_items() == 2
+        win.pause.set_active(True)
+        win.table.update({"rows": [r0]})
+        assert win.table.store.get_n_items() == 2 and "paused" in win.table.summary.get_label(), "paused table must not change"
+        win.pause.set_active(False)
+        win.table.update({"rows": [r0]})
+        assert win.table.store.get_n_items() == 1
+        win._alive = False
+        win.close()
+        cg.refresh_blocked()
+        assert cg.blocked_count == 3 and "(3)" in cg.blocked_btn.get_label()
+        cg.open_blocked()
+        bw = cg._blocked
+        assert bw is not None and len(bw._rows) == 3 and bw.enforce.get_active() and "Enforced" in bw.enforce.get_subtitle()
+        bw.kind.set_selected(0)
+        assert not bw.proto.get_visible()
+        bw.kind.set_selected(2)
+        assert bw.proto.get_visible()
+        CALLS.clear()
+        bw.value.set_text("6881")
+        bw.proto.set_selected(2)
+        bw.note.set_text("torrents")
+        bw._add()
+        assert ("blocks.add", {"kind": "port", "value": "6881", "proto": "udp", "note": "torrents"}) in CALLS, CALLS
+        bw.value.set_text("")
+        CALLS.clear()
+        bw._add()
+        assert not any(c[0] == "blocks.add" for c in CALLS), "an empty value is not sent"
+        bw.listbox.select_row(bw._rows["aaaa1111"])
+        bw.listbox.select_row(bw._rows["cccc3333"])
+        assert bw.selected_ids() == ["aaaa1111", "cccc3333"] and bw.sel_bar.get_reveal_child()
+        CALLS.clear()
+        bw._remove_selected()
+        assert CALLS[0] == ("blocks.remove", {"ids": ["aaaa1111", "cccc3333"]}), CALLS
+        CALLS.clear()
+        bw._on_entry_switch("aaaa1111", False)
+        assert ("blocks.update", {"ident": "aaaa1111", "enabled": False}) in CALLS, CALLS
+        ctrls = [bw.observe_controllers().get_item(i) for i in range(bw.observe_controllers().get_n_items())]
+        assert any(isinstance(c, A.Gtk.ShortcutController) for c in ctrls), "pop-ups close with Escape and Ctrl+W"
+        bw.fill(dict(BLOCK_STATUS, supported=False, reason="needs Linux", active=False))
+        assert bw.banner.get_revealed()
+        bw.close()
         # ---- update result dialog / import notes build without errors
         w.show_warnings(["a: Will be ignored: 'register-dns'"])
         w._update_result({"current": "1.0.6", "latest": "9.9.9", "newer": True, "url": "https://github.com/x", "notes": "n"}, False)
