@@ -318,10 +318,6 @@ daemon ⇄ client lifecycle against a fake `openvpn`. nftables/iptables applicat
 network namespace; **pf/OpenBSD paths (pf lock, native WireGuard via ifconfig, rc.d) and the runit/OpenRC/FreeBSD
 service files are written from the respective documentation but have not been exercised on real hosts** – please report issues.
 
-## License
-
-MIT – see `LICENSE`.
-
 ## 📄 License
 
 This project is licensed under the **MIT License**. See [LICENSE](LICENSE) for details.
