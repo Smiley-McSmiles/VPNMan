@@ -17,6 +17,20 @@
   <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.0.8" date="2026-10-08">
+      <description>
+        <ul>
+          <li>Network Proxy: send all of this computer's traffic through an HTTP or SOCKS5 proxy, with or without the VPN (after it); Preferences, the Connection page and vpnman netproxy; ignored hosts and programs that skip it</li>
+          <li>Proxies: Use Fastest, automatic failover to the next favourite, share a proxy as a link or QR code, and "via Cloudflare" shown for servers behind Cloudflare</li>
+          <li>The connection test checks the proxy; the tray can switch the proxy on and off</li>
+          <li>Temporary blocks (15 minutes, an hour, a day or until restart); export the connection table as CSV</li>
+          <li>Disconnecting shows a greyed-out "Disconnecting..." button; the server list shows Connected / Connecting on each server and switches servers from the list</li>
+          <li>Password fields turn red when Caps Lock is on</li>
+          <li>Pop-ups close with Escape and Ctrl+W; the server list loads after a reinstall; the server selector shows full names; Resolve names in the connection table</li>
+          <li>Check for Updates shows just the new version; install.sh asks whether to install Xray and package.sh builds packages with the same options as GPGMan, with checksums</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.7" date="2026-10-07">
       <description>
         <ul>
