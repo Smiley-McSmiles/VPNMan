@@ -24,7 +24,7 @@ from .keys import close_keys, restore_scroll
 from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .proxypage import ProxyPage
 from .tray import HelperTray, Tray, wants_helper
-from ..settings import DNS_PRESETS, DEFAULTS
+from ..settings import DNS_PRESETS
 from ..ipc import Client, DaemonUnavailable, RpcError
 
 ACTIVE = ("connected", "connecting", "reconnecting")
@@ -1362,7 +1362,7 @@ class MainWindow(Adw.ApplicationWindow):
                 self.toast("VPNMan %s is the latest version" % res["current"])
         else:
             d = Adw.MessageDialog(transient_for=self, heading="VPNMan %s is available" % res["latest"],
-                                  body=GLib.markup_escape_text("You have %s.\n\n%s" % (res["current"], res["notes"][:600])))
+                                  body="You have %s." % res["current"])
             d.add_response("later", "Later")
             d.add_response("open", "View Release")
             d.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
@@ -1692,7 +1692,6 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_status(self, st):
         self._set_daemon(True)
         self._ensure_loaded()
-        old = self.status
         self.status = st
         state = st["state"]
         active = state in ACTIVE

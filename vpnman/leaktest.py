@@ -5,7 +5,6 @@ the routing table take small callables, so the decision logic is unit-testable w
 """
 
 import ipaddress
-import os
 import re
 import socket
 import urllib.request

@@ -11,7 +11,6 @@ The rule generation and process matching are pure functions so they can be teste
 import ipaddress
 import os
 import threading
-import time
 
 from . import platform as plat
 

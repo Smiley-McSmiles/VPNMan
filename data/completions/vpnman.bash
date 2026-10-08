@@ -134,12 +134,12 @@ _vpnman() {
             choices=""
             names=1 ;;
         protocols)
-            opts=""
+            opts="--json"
             choices=""
             names=0 ;;
         proxy)
-            opts="--name --group --latency -l --json"
-            choices="list add remove rm edit use on off order mode set status ping refresh"
+            opts="--name --group --all --latency -l --json"
+            choices="list show add remove rm edit use on off order mode set status ping refresh sources"
             names=0 ;;
         remove)
             opts=""

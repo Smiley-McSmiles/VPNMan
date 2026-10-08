@@ -59,6 +59,11 @@ def format_status(st):
     nl = st["netlock"]
     lines.append("%s %s%s" % (bold("Network lock:"), green("ENGAGED") if nl["engaged"] else dim("off"),
                               " (%s)" % nl["backend"] if nl["engaged"] and nl["backend"] else ""))
+    px = st.get("proxy")
+    if px and (px["enabled"] or px["running"]):
+        lines.append("%s %s via %s (%s, %s)%s" % (bold("Proxy:      "), green("RUNNING") if px["running"] else yellow("on"),
+                                                 px["name"] or "-", px["order"], px["mode"],
+                                                 red("  " + px["error"]) if px["error"] else ""))
     return "\n".join(lines)
 
 
@@ -72,6 +77,10 @@ class Cli:
     # ------------------------------------------------------------ commands
     def cmd_status(self, a):
         st = self.call("status")
+        try:
+            st["proxy"] = self.call("proxy.status")
+        except RpcError:
+            st["proxy"] = None                      # an older daemon without proxies
         print(json.dumps(st, indent=2) if a.json else format_status(st))
         return 0 if st["state"] == "connected" else 3
 
@@ -431,7 +440,6 @@ class Cli:
         return 0
 
     def cmd_schedule(self, a):
-        from . import schedule as sch
         act = a.action or "list"
         st = self.call("schedule.status")
         entries = st["entries"]
@@ -520,12 +528,12 @@ class Cli:
     # ------------------------------------------------------------------ proxy (Xray)
     @staticmethod
     def fetch_subscription(url, timeout=15):
-        import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "vpnman/%s" % __version__})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read(5 << 20).decode("utf-8", "replace")
+        from .xray import fetch
+        return fetch(url, timeout)
 
-    def proxy_add(self, sources, name=None, group=None):
+    def proxy_add(self, sources, name=None, group=None, refresh=False):
+        """Import share links, files ('-' is standard input) and subscription URLs.  ``refresh`` keeps the group the
+        subscription's proxies already have instead of naming a new one after the host."""
         import re
         total = {"added": 0, "updated": 0, "removed": 0, "skipped": 0, "errors": []}
         for src in sources:
@@ -535,7 +543,10 @@ class Cli:
                     text = self.fetch_subscription(src)
                 except (OSError, ValueError) as e:
                     raise RpcError("could not download %s: %s" % (src, e))
-                kw = {"source": src, "group": group or re.sub(r"^https?://([^/]+).*$", r"\1", src)}
+                kw = {"source": src,
+                      "group": group or ("" if refresh else re.sub(r"^https?://([^/]+).*$", r"\1", src))}
+            elif src == "-":
+                text, kw = sys.stdin.read(), {"group": group or ""}
             elif os.path.isfile(src):
                 with open(src, errors="replace") as fh:
                     text = fh.read()
@@ -552,12 +563,15 @@ class Cli:
         act, items = a.action or "list", a.items
         if act == "list":
             ps = self.call("proxy.list")
-            lat = self.call("proxy.latency") if a.latency else {}
+            if a.group:
+                ps = [p for p in ps if (p.get("group") or "").lower() == a.group.lower()]
+            lat = self.call("proxy.latency", ids=[p["id"] for p in ps]) if a.latency and ps else {}
             if a.json:
                 print(json.dumps(ps, indent=2))
                 return 0
             if not ps:
-                print("No proxies yet. Add share links or a subscription: vpnman proxy add vless://... | https://...")
+                print("No proxies in group %s." % a.group if a.group else
+                      "No proxies yet. Add share links or a subscription: vpnman proxy add vless://... | https://...")
                 return 0
             w = max(len(p["name"]) for p in ps)
             for p in ps:
@@ -584,6 +598,8 @@ class Cli:
                 print("  SOCKS5:  127.0.0.1:%d    HTTP: 127.0.0.1:%d" % (st["socks"], st["http"]))
             if st["carrier"]:
                 print("  carrying the VPN connection")
+            print(dim("  settings: socks_port=%s http_port=%s dns=%s udp=%s" % (
+                st["socks_port"], st["http_port"], st["dns"], st["udp"])))
             if st["error"]:
                 print(red("  error:   %s" % st["error"]))
             if not st["installed"]:
@@ -603,13 +619,26 @@ class Cli:
             if not srcs:
                 print("No subscriptions to refresh (add one: vpnman proxy add https://...)")
                 return 0
-            res = self.proxy_add(srcs)
+            res = self.proxy_add(srcs, group=a.group, refresh=True)
+            for e in res["errors"]:
+                print("  %s %s" % (yellow("skipped"), e), file=sys.stderr)
             print("%s %d new, %d updated, %d removed" % (green("refreshed:"), res["added"], res["updated"], res["removed"]))
             return 0
         if act in ("remove", "rm"):
-            if not items:
-                raise RpcError("name the proxies to remove")
-            ids = [self._proxy_ident(i) for i in items]
+            ps = self.call("proxy.list")
+            if a.all:
+                ids = [p["id"] for p in ps]
+            elif a.group and not items:
+                ids = [p["id"] for p in ps if (p.get("group") or "").lower() == a.group.lower()]
+                if not ids:
+                    raise RpcError("no proxies in group %s" % a.group)
+            elif items:
+                ids = [self._proxy_ident(i) for i in items]
+            else:
+                raise RpcError("name the proxies to remove (or use --group GROUP / --all)")
+            if not ids:
+                print("No proxies to remove.")
+                return 0
             res = self.call("proxy.remove", ids=ids)
             for n in res["removed"]:
                 print("Removed %s" % n)
@@ -634,6 +663,35 @@ class Cli:
             self.call("proxy.set", **{act: items[0]})
             print("%s set to %s." % (act.capitalize(), items[0]))
             return 0
+        if act == "show":
+            if len(items) != 1:
+                raise RpcError("usage: vpnman proxy show NAME")
+            pid = self._proxy_ident(items[0])
+            p = next(p for p in self.call("proxy.list") if p["id"] == pid)
+            if a.json:
+                print(json.dumps(p, indent=2))
+                return 0
+            for k, label in (("name", "Name"), ("protocol", "Protocol"), ("server", "Server"), ("port", "Port"),
+                             ("group", "Group"), ("source", "Subscription"), ("notes", "Notes")):
+                if p.get(k) not in (None, ""):
+                    print("%s %s" % (bold("%-13s" % (label + ":")), p[k]))
+            print("%s %s" % (bold("Favorite:    "), "yes" if p.get("favorite") else "no"))
+            print("%s %s" % (bold("In use:      "), green("yes") if p.get("selected") else "no"))
+            return 0
+        if act == "sources":
+            srcs = self.call("proxy.sources")
+            if a.json:
+                print(json.dumps(srcs, indent=2))
+            elif not srcs:
+                print("No subscriptions (add one: vpnman proxy add https://...)")
+            for s in ([] if a.json else srcs):
+                print("%4d  %s" % (s["count"], s["source"]))
+            return 0
+        if act == "set" and not items:
+            st = self.call("proxy.status")
+            for k in ("order", "mode", "socks_port", "http_port", "dns", "udp"):
+                print("%-11s %s" % (k, st[k]))
+            return 0
         if act == "set":
             if len(items) != 2:
                 raise RpcError("usage: vpnman proxy set KEY VALUE  (socks_port, http_port, dns, udp, order, mode)")
@@ -654,11 +712,15 @@ class Cli:
             ps = self.call("proxy.list")
             ids = [self._proxy_ident(i) for i in items] or None
             lat = self.call("proxy.latency", ids=ids)
+            if a.json:
+                print(json.dumps({p["name"]: lat[p["id"]] for p in ps if p["id"] in lat}, indent=2))
+                return 0
             for p in ps:
                 if p["id"] in lat:
                     print("%-30s %s" % (p["name"], ("%.1f ms" % lat[p["id"]]) if lat[p["id"]] else red("unreachable")))
             return 0
-        raise RpcError("unknown action %r (list, add, remove, use, on, off, order, mode, set, edit, status, ping, refresh)" % act)
+        raise RpcError("unknown action %r (list, show, add, remove, use, on, off, order, mode, set, edit, status, ping, "
+                       "refresh, sources)" % act)
 
     def _proxy_ident(self, text):
         ps = self.call("proxy.list")
@@ -939,7 +1001,13 @@ class Cli:
 
     def cmd_protocols(self, a):
         info = self.call("protocols") if self.client.alive() else backends.describe()
-        for p in info:
+        if a.json:
+            print(json.dumps({"protocols": info, "helpers": backends.helpers()}, indent=2))
+            return 0
+        for p in info + [None] + backends.helpers():
+            if p is None:
+                print(bold("Helpers:"))
+                continue
             mark = green("✔") if p["available"] else red("✘")
             print("%s %-15s %s" % (mark, p["id"], p["label"]))
             print("    %s" % dim(p["description"]))
@@ -1413,10 +1481,14 @@ def build_parser():
     s.add_argument("--clear", action="store_true", help="delete the history")
     s = add("proxy", "proxies (Xray: VLESS, VMess, Trojan, Shadowsocks) in front of, or behind, the VPN",
             "Use a VLESS / VMess / Trojan / Shadowsocks server through Xray, alone or together with the VPN.\n\n"
-            "  list [--latency]       the proxies\n"
-            "  add SOURCE...          share links, a file with links, or a subscription URL (https://...)\n"
+            "  list [--latency] [--group G]  the proxies\n"
+            "  show NAME              everything known about one proxy\n"
+            "  add SOURCE...          share links, a file with links ('-' reads standard input), or a subscription\n"
+            "                         URL (https://...)\n"
+            "  sources                the subscriptions, with how many proxies each holds\n"
             "  refresh [URL...]       download the subscriptions again (new servers appear, gone ones are removed)\n"
-            "  remove NAME...         delete proxies\n"
+            "  remove NAME... | --group G | --all\n"
+            "                         delete proxies\n"
             "  edit NAME KEY=VALUE... name, group, notes, favorite\n"
             "  use NAME               choose the proxy to use\n"
             "  on | off               switch the proxy on or off\n"
@@ -1426,17 +1498,19 @@ def build_parser():
             "                         OpenVPN and WireGuard profiles)\n"
             "  mode local|system      local: SOCKS5 + HTTP proxy for applications on 127.0.0.1.\n"
             "                         system (Linux): all TCP and DNS of this computer go through the proxy\n"
-            "  set KEY VALUE          socks_port, http_port, dns, udp (block|direct)\n"
+            "  set [KEY VALUE]        socks_port, http_port, dns, udp (block|direct); without arguments: show them\n"
             "  status | ping [NAME...]\n\n"
             "Needs the xray program (https://github.com/XTLS/Xray-core).",
             ["vpnman proxy add 'vless://...@example.com:443?security=reality&...#Home'", "vpnman proxy add https://example.com/sub/abc",
              "vpnman proxy use Home && vpnman proxy order vpn_proxy && vpnman proxy on", "vpnman proxy mode system",
-             "vpnman proxy status"])
-    s.add_argument("action", nargs="?", choices=["list", "add", "remove", "rm", "edit", "use", "on", "off", "order", "mode",
-                                                  "set", "status", "ping", "refresh"], help="default: list")
+             "vpnman proxy status", "vpnman proxy remove --group example.com", "xclip -o | vpnman proxy add -"])
+    s.add_argument("action", nargs="?", choices=["list", "show", "add", "remove", "rm", "edit", "use", "on", "off", "order",
+                                                  "mode", "set", "status", "ping", "refresh", "sources"], help="default: list")
     s.add_argument("items", nargs="*", metavar="ARG", help="links / URLs / names / values (see the actions above)")
     s.add_argument("--name", help="add: name for a single imported proxy")
-    s.add_argument("--group", help="add: group to put the imported proxies in (default: the subscription's host)")
+    s.add_argument("--group", help="add: group to put the imported proxies in (default: the subscription's host); "
+                                   "list, remove: only this group")
+    s.add_argument("--all", action="store_true", help="remove: every proxy")
     s.add_argument("--latency", "-l", action="store_true", help="list: measure every server")
     s.add_argument("--json", action="store_true", help=JSON)
     s = add("blocks", "addresses, ports and programs that may not use the network",
@@ -1536,9 +1610,11 @@ def build_parser():
             ["vpnman logs", "vpnman logs -n 200", "vpnman logs -f"])
     s.add_argument("-f", "--follow", action="store_true", help="keep running and print new lines")
     s.add_argument("-n", "--lines", type=int, default=50, help="how many lines to show first (default 50)")
-    add("protocols", "list supported protocols and whether their tools are installed",
-        "List every supported VPN protocol, and which program to install for the ones that are missing.",
-        ["vpnman protocols"])
+    s = add("protocols", "list supported protocols and whether their tools are installed",
+            "List every supported VPN protocol, and which program to install for the ones that are missing, then the\n"
+            "helper programs: stunnel (OpenVPN over TLS) and xray (proxies).",
+            ["vpnman protocols", "vpnman protocols --json"])
+    s.add_argument("--json", action="store_true", help=JSON)
     s = add("doctor", "check the system (icons, daemon, protocols)",
             "Report the state of the installation: distribution, init system, daemon, firewall, launcher and\n"
             "icons, tray support, and which protocols have their programs installed. Start here when something\n"

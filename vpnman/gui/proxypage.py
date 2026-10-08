@@ -2,14 +2,13 @@
 
 import re
 import threading
-import urllib.request
 
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
-from .. import __version__  # noqa: E402
+from ..xray import fetch  # noqa: E402
 from .keys import close_keys, restore_scroll  # noqa: E402
 
 ORDERS = [
@@ -27,11 +26,6 @@ MODES = [
 ]
 
 
-def fetch(url, timeout=15):
-    """Download a subscription as the user (not through the daemon)."""
-    req = urllib.request.Request(url, headers={"User-Agent": "vpnman/%s" % __version__})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read(5 << 20).decode("utf-8", "replace")
 
 
 class ProxyAddDialog(Adw.Window):

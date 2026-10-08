@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import sys
 import stat
@@ -1965,6 +1966,74 @@ AAAA
         self.assertEqual([x["source"] for x in self.c.call("proxy.sources")], [sub])
         self._proxy_reset()
         self.assertEqual(self.c.call("proxy.list"), [])
+
+    def _cli(self, *argv, stdin=None):
+        import contextlib
+        import io
+        from vpnman import cli
+        out, err = io.StringIO(), io.StringIO()
+        old = sys.stdin
+        sys.stdin = io.StringIO(stdin) if stdin is not None else old
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = cli.main(list(argv))
+        finally:
+            sys.stdin = old
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_proxy_cli_show_sources_bulk_remove_and_stdin(self):
+        self._proxy_reset()
+        rc, out, _ = self._cli("proxy", "add", "-", "--group", "piped", stdin=self.LINK + "\n" + self.LINK2 + "\n")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("2 new", out)
+        rc, out, _ = self._cli("proxy", "show", "Home")
+        self.assertEqual(rc, 0)
+        self.assertIn("203.0.113.7", out)
+        self.assertIn("piped", out)
+        rc, out, _ = self._cli("proxy", "list", "--group", "PIPED", "--json")
+        self.assertEqual(len(json.loads(out)), 2)
+        sub = "https://sub.example/cli"
+        self.c.call("proxy.import", text=self.LINK.replace("203.0.113.7", "203.0.113.20"), source=sub, group="mine")
+        rc, out, _ = self._cli("proxy", "sources", "--json")
+        self.assertEqual(json.loads(out), [{"source": sub, "count": 1}])
+        # a refresh (no group given) puts new servers in the group the subscription already uses
+        self.c.call("proxy.import", source=sub, text=self.LINK.replace("203.0.113.7", "203.0.113.20") + "\n" +
+                    self.LINK.replace("203.0.113.7", "203.0.113.21").replace("#Home", "#New"))
+        self.assertEqual({p["group"] for p in self.c.call("proxy.list") if p.get("source") == sub}, {"mine"})
+        rc, out, _ = self._cli("proxy", "set")
+        self.assertIn("socks_port", out)
+        rc, out, _ = self._cli("proxy", "remove", "--group", "piped")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.c.call("proxy.list")), 2)
+        self.assertEqual(self._cli("proxy", "remove")[0], 1)                 # nothing named: refused
+        rc, out, _ = self._cli("proxy", "remove", "--all")
+        self.assertEqual((rc, self.c.call("proxy.list")), (0, []))
+        rc, out, _ = self._cli("status", "--json")
+        self.assertIn("proxy", json.loads(out))
+
+    def test_refreshing_the_proxy_in_use_restarts_xray(self):
+        self._proxy_reset()
+        sub = "https://sub.example/live"
+        self.c.call("proxy.import", text=self.LINK, source=sub)
+        self.c.call("proxy.select", ident="Home")
+        self.c.call("proxy.set", enabled=True, socks_port=18818, http_port=18819)
+        self._wait_proxy(True)
+        self.assertEqual(self._xray_cfg()["outbounds"][0]["streamSettings"]["realitySettings"]["serverName"], "example.com")
+        os.unlink(TMP + "/xray.config.copy")
+        self.c.call("proxy.import", text=self.LINK.replace("sni=example.com", "sni=other.example"), source=sub)
+        self.assertEqual(self._xray_cfg()["outbounds"][0]["streamSettings"]["realitySettings"]["serverName"], "other.example")
+        self._proxy_reset()
+        self.c.call("proxy.set", socks_port=10808, http_port=10809)
+
+    def test_proxy_latency_probes_in_parallel(self):
+        self._proxy_reset()
+        self.c.call("proxy.import", text="\n".join(self.LINK.replace("203.0.113.7", "127.0.0.%d" % i).replace("#Home", "#P%d" % i)
+                                                   for i in range(2, 8)))
+        t0 = time.time()
+        lat = self.c.call("proxy.latency")
+        self.assertEqual(len(lat), 6)
+        self.assertLess(time.time() - t0, 6)        # one by one this could take 6 x 3 s
+        self._proxy_reset()
 
     def test_proxy_only_runs_and_stops(self):
         self._proxy_reset()

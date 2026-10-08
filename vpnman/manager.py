@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, backup, blocks, conntable, dns, history, leaktest, netlock, network, paths, proxysvc, schedule, split, stunnel, xray
+from . import __version__, backends, backup, blocks, dns, history, leaktest, netlock, network, paths, proxysvc, schedule, split, stunnel, xray
 from . import platform as plat
 from .backends.base import CredentialsRequired
 from .profiles import ProfileError, ProfileStore, public_view

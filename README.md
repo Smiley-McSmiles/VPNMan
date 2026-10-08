@@ -102,6 +102,41 @@ in **Servers → Proxy** (or `vpnman proxy add ...`), choose one, and pick how i
 the computer into Xray with nftables (IPv6 and other UDP are blocked so nothing goes around it). The kill switch is aware
 of the proxy server. See `man vpnman` (PROXIES) for the details and limits.
 
+#### Installing Xray
+
+`sudo ./install.sh --xray-only` downloads the official Xray release for your machine, checks its checksum and installs
+it as `/usr/local/bin/xray`. It works with any init system (systemd, runit, OpenRC, s6, BSD rc), because Xray needs no
+service: VPNMan starts it. The same steps as a standalone script, if you don't want to download VPNMan first (needs
+`bash`, `curl`, `unzip` and `sha256sum`; Linux):
+
+```bash
+#!/usr/bin/env bash
+# Install the latest Xray release as /usr/local/bin/xray (checksum verified). Run as root.
+set -euo pipefail
+case "$(uname -m)" in
+    x86_64|amd64) arch=64 ;;          i?86) arch=32 ;;
+    aarch64|arm64) arch=arm64-v8a ;;  armv7*|armv8l) arch=arm32-v7a ;;
+    armv6*) arch=arm32-v6 ;;          riscv64) arch=riscv64 ;;
+    ppc64le) arch=ppc64le ;;          s390x) arch=s390x ;;
+    loongarch64) arch=loong64 ;;
+    *) echo "no Xray build for $(uname -m)" >&2; exit 1 ;;
+esac
+base=https://github.com/XTLS/Xray-core/releases/latest/download
+asset=Xray-linux-$arch.zip
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+curl -fsSL -o "$tmp/$asset" "$base/$asset"
+curl -fsSL -o "$tmp/$asset.dgst" "$base/$asset.dgst"
+want=$(grep -i '256' "$tmp/$asset.dgst" | grep -oiE '[0-9a-f]{64}' | head -n 1)
+have=$(sha256sum "$tmp/$asset" | cut -d' ' -f1)
+if [ -z "$want" ] || [ "${want,,}" != "$have" ]; then echo "checksum mismatch - not installing" >&2; exit 1; fi
+unzip -q "$tmp/$asset" xray -d "$tmp"
+install -m 755 "$tmp/xray" /usr/local/bin/xray
+xray version | head -n 1
+```
+
+To remove it again: `sudo rm /usr/local/bin/xray` (`./install.sh --uninstall` removes Xray only if `install.sh`
+installed it).
+
 ## Feature set
 
 | Feature | Status |

@@ -33,6 +33,15 @@ _HOST = re.compile(r"^[A-Za-z0-9._:\[\]-]{1,253}$")
 _NAME_BAD = re.compile(r"[\x00-\x1f\x7f]")
 
 
+def fetch(url, timeout=15):
+    """Download a subscription (as whoever calls it: the CLI or the app, never the daemon).  At most 5 MiB."""
+    import urllib.request
+    from . import __version__
+    req = urllib.request.Request(url, headers={"User-Agent": "vpnman/%s" % __version__})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read(5 << 20).decode("utf-8", "replace")
+
+
 class ProxyError(ValueError):
     """A link or config that cannot be used (the message says why).  ``fatal``: retrying cannot help."""
 

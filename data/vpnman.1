@@ -68,7 +68,7 @@ All commands accept \fB\-h\fR/\fB\-\-help\fR, which prints the options and examp
 .TP
 .B status \fR[\fB\-\-json\fR]
 Show the state (disconnected, connecting, connected, reconnecting, error), the profile, the interface,
-the public IP, uptime, traffic and rates, and the kill switch. The exit status is 0 when connected and 3
+the public IP, uptime, traffic and rates, the kill switch, and the proxy when it is switched on. The exit status is 0 when connected and 3
 otherwise, so \fBvpnman status >/dev/null\fR works as a test in scripts. \fB\-\-json\fR prints the raw status object.
 .TP
 .B connect \fR[\fIPROFILE\fR] [\fB\-\-fastest\fR] [\fB\-\-last\fR] [\fB\-\-no\-wait\fR] [\fB\-\-timeout\fR \fISECONDS\fR]
@@ -222,27 +222,37 @@ Addresses, ports and programs that may not use the network. See
 reminder); \fBremove\fR \fIID\fR... unblocks; \fBenable\fR/\fBdisable\fR \fIID\fR... keep an entry but stop or resume
 enforcing it; \fBon\fR/\fBoff\fR switch the whole list.
 .TP
-.B proxy \fR[\fIlist\fR|\fIadd\fR|\fIrefresh\fR|\fIremove\fR|\fIedit\fR|\fIuse\fR|\fIon\fR|\fIoff\fR|\fIorder\fR|\fImode\fR|\fIset\fR|\fIstatus\fR|\fIping\fR] [\fIARG\fR...]
+.B proxy \fR[\fIlist\fR|\fIshow\fR|\fIadd\fR|\fIsources\fR|\fIrefresh\fR|\fIremove\fR|\fIedit\fR|\fIuse\fR|\fIon\fR|\fIoff\fR|\fIorder\fR|\fImode\fR|\fIset\fR|\fIstatus\fR|\fIping\fR] [\fIARG\fR...]
 Proxies served through Xray, alone or together with the VPN. See
 .BR "PROXIES (XRAY)" .
 .RS
 .TP
-.B proxy list \fR[\fB\-l\fR|\fB\-\-latency\fR] [\fB\-\-json\fR]
-The proxies; a dot marks the one in use.
+.B proxy list \fR[\fB\-l\fR|\fB\-\-latency\fR] [\fB\-\-group\fR \fIGROUP\fR] [\fB\-\-json\fR]
+The proxies (or only those of \fIGROUP\fR); a dot marks the one in use.
+.TP
+.B proxy show \fINAME\fR [\fB\-\-json\fR]
+Everything known about one proxy: protocol, server, port, group, subscription, notes, favourite, in use.
 .TP
 .B proxy add \fISOURCE\fR... [\fB\-\-name\fR \fINAME\fR] [\fB\-\-group\fR \fIGROUP\fR]
 Add proxies. A \fISOURCE\fR is a share link (\fBvless://\fR, \fBvmess://\fR, \fBtrojan://\fR, \fBss://\fR), a file that
-holds links (or an Xray JSON config), or an \fBhttp(s)://\fR subscription address, which is downloaded as you (not by the
+holds links (or an Xray JSON config; \fB\-\fR reads standard input), or an \fBhttp(s)://\fR subscription address, which is downloaded as you (not by the
 daemon) and remembered so that \fBrefresh\fR can update it. \fB\-\-group\fR names the group the proxies go into
 (default: the subscription's host name). A proxy that is already present is not added twice; a line that cannot be
 understood is reported and does not stop the others.
 .TP
+.B proxy sources \fR[\fB\-\-json\fR]
+The subscription addresses, with how many proxies each holds.
+.TP
 .B proxy refresh \fR[\fIURL\fR...]
 Download the subscriptions again (all of them, or the given ones): new servers appear, changed ones are updated, servers
-that vanished from the list are removed.
+that vanished from the list are removed. New servers join the group the subscription's proxies are already in. When the
+proxy in use changed, Xray is restarted with its new settings.
 .TP
-.B proxy remove \fINAME\fR...   proxy edit \fINAME\fR \fIKEY=VALUE\fR...
-Delete proxies, or change \fBname\fR, \fBgroup\fR, \fBnotes\fR or \fBfavorite\fR.
+.B proxy remove \fINAME\fR... | \fB\-\-group\fR \fIGROUP\fR | \fB\-\-all\fR
+Delete the named proxies, every proxy of a group, or all of them. Removing the proxy in use switches the proxy off.
+.TP
+.B proxy edit \fINAME\fR \fIKEY=VALUE\fR...
+Change \fBname\fR, \fBgroup\fR, \fBnotes\fR or \fBfavorite\fR.
 .TP
 .B proxy use \fINAME\fR
 Choose the proxy to use.
@@ -256,11 +266,13 @@ How the proxy and the VPN are combined (see PROXIES).
 .B proxy mode local\fR|\fBsystem
 A proxy for applications, or all TCP and DNS of this computer (Linux).
 .TP
-.B proxy set \fIKEY\fR \fIVALUE
-\fBsocks_port\fR, \fBhttp_port\fR, \fBdns\fR, \fBudp\fR (\fBblock\fR or \fBdirect\fR), \fBorder\fR, \fBmode\fR.
+.B proxy set \fR[\fIKEY\fR \fIVALUE\fR]
+\fBsocks_port\fR, \fBhttp_port\fR, \fBdns\fR, \fBudp\fR (\fBblock\fR or \fBdirect\fR), \fBorder\fR, \fBmode\fR. Without
+arguments it prints their current values.
 .TP
-.B proxy status \fR[\fB\-\-json\fR]   \fBproxy ping \fR[\fINAME\fR...]
-Show whether it runs, with the addresses of the local proxies; or measure the connect time to the proxy servers.
+.B proxy status \fR[\fB\-\-json\fR]   \fBproxy ping \fR[\fINAME\fR...] [\fB\-\-json\fR]
+Show whether it runs, with the addresses of the local proxies and the settings; or measure the connect time to the proxy
+servers (16 at a time).
 .RE
 .TP
 .B networks \fR[\fIshow\fR|\fItrust\fR|\fIuntrust\fR] [\fINAME\fR]
@@ -305,8 +317,9 @@ separated. See
 Ask GitHub for the newest VPNMan release and compare it with the installed one. Runs as you (not through the
 daemon); nothing is downloaded or installed. Exit status 10 means a newer version exists.
 .TP
-.B protocols
-List every supported protocol, whether its programs are installed, and what to install if not.
+.B protocols \fR[\fB\-\-json\fR]
+List every supported protocol, whether its programs are installed, and what to install if not; then the helper programs
+\fBstunnel\fR (OpenVPN over TLS) and \fBxray\fR (proxies).
 .TP
 .B doctor \fR[\fB\-\-fix\fR]
 Report distribution, init system, daemon, firewall, the launcher and icons, tray support and available protocols.

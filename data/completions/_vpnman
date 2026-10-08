@@ -93,8 +93,8 @@ _vpnman() {
         menu) _arguments '*:: :' ;;
         networks) _arguments '1:action:(show trust untrust)' ;;
         ping) _arguments '*:profile:_vpnman_profiles' ;;
-        protocols) _arguments '*:: :' ;;
-        proxy) _arguments '--name[add: name for a single imported proxy]' '--group[add: group to put the imported proxies in (default: the subscription'\''s host)]' '(--latency -l)'{--latency,-l}'[list: measure every server]' '--json[print machine-readable JSON instead of text]' '1:action:(list add remove rm edit use on off order mode set status ping refresh)' ;;
+        protocols) _arguments '--json[print machine-readable JSON instead of text]' ;;
+        proxy) _arguments '--name[add: name for a single imported proxy]' '--group[add: group to put the imported proxies in (default: the subscription'\''s host); list, remove: only this group]' '--all[remove: every proxy]' '(--latency -l)'{--latency,-l}'[list: measure every server]' '--json[print machine-readable JSON instead of text]' '1:action:(list show add remove rm edit use on off order mode set status ping refresh sources)' ;;
         remove) _arguments '*:profile:_vpnman_profiles' ;;
         rm) _arguments '*:profile:_vpnman_profiles' ;;
         routes) _arguments '1:action:(list add remove rm)' ;;

@@ -12,8 +12,6 @@ Two modes: ``local`` gives applications a SOCKS5 and an HTTP proxy on 127.0.0.1;
 redirects all TCP and DNS of this machine into Xray with nftables.
 """
 
-import os
-import re
 import threading
 
 from . import paths
@@ -81,13 +79,17 @@ class ProxyService:
         if name and len(found) == 1:
             found[0]["name"] = name
         existing = self.store.list()
+        if source and not group:            # a refresh: new servers join the group the subscription already uses
+            group = next((p.get("group") for p in existing if p.get("source") == source and p.get("group")), "")
         by_id = {xray.identity(p): p for p in existing}
         added = updated = removed = skipped = 0
         keep = set()
+        sel, sel_changed = self.m.settings.get("proxy.selected"), False
         for f in found:
             key = xray.identity(f)
             cur = by_id.get(key)
             if cur and source and cur.get("source") == source:
+                sel_changed |= cur["id"] == sel and cur.get("outbound") != f["outbound"]   # e.g. new SNI or path
                 cur.update(name=f["name"], outbound=f["outbound"], link=f["link"], server=f["server"], port=f["port"])
                 self.store.save(cur)
                 keep.add(cur["id"])
@@ -106,6 +108,9 @@ class ProxyService:
         if source:
             stale = [p["id"] for p in existing if p.get("source") == source and p["id"] not in keep]
             removed = len(self.remove(stale)["removed"]) if stale else 0
+        if sel_changed:                     # the proxy in use got a new address or credentials: restart Xray with them
+            self.key = None
+            self.changed()
         self.m.log.add("info", "Proxies imported: %d new, %d updated, %d removed, %d already present"
                        % (added, updated, removed, skipped))
         return {"added": added, "updated": updated, "removed": removed, "skipped": skipped, "errors": errors}
@@ -133,7 +138,7 @@ class ProxyService:
         if removed:
             self.m.log.add("info", "Removed %d prox%s: %s" % (len(removed), "y" if len(removed) == 1 else "ies",
                                                               ", ".join(removed)))
-            self.sync()
+            self.changed()
         return {"removed": removed, "failed": failed}
 
     def update(self, ident, changes):
@@ -145,27 +150,29 @@ class ProxyService:
     def select(self, ident):
         p = self.store.find(ident)
         self.m.settings.update({"proxy": {"selected": p["id"]}})
-        self.sync()
+        self.changed()                      # the kill switch must let the new server through (proxy only)
         return _view(p)
 
     def latency(self, idents=None):
+        """TCP connect time to each server in ms (None: unreachable), 16 at a time so a long subscription stays quick."""
+        import concurrent.futures
+        import socket
         import time
-        out = {}
-        for p in self.store.list():
-            if idents and p["id"] not in idents:
-                continue
+
+        def probe(p):
             ips = self.ips(p)
-            ms = None
-            if ips:
-                t0 = time.time()
-                try:
-                    import socket
-                    with socket.create_connection((ips[0], int(p["port"])), timeout=3):
-                        ms = round((time.time() - t0) * 1000, 1)
-                except OSError:
-                    ms = None
-            out[p["id"]] = ms
-        return out
+            if not ips:
+                return p["id"], None
+            t0 = time.monotonic()
+            try:
+                with socket.create_connection((ips[0], int(p["port"])), timeout=3):
+                    return p["id"], round((time.monotonic() - t0) * 1000, 1)
+            except (OSError, ValueError):
+                return p["id"], None
+
+        todo = [p for p in self.store.list() if not idents or p["id"] in idents]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
+            return dict(ex.map(probe, todo))
 
     def ips(self, p, live=True):
         """The server's addresses: resolved now (and remembered), else the remembered ones - the kill switch may be
