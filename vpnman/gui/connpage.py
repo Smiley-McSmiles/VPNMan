@@ -256,6 +256,9 @@ class ConnectionsTable(Gtk.Box):
             act.connect("activate", cb)
             group.add_action(act)
         self.insert_action_group("conn", group)
+        # the Export button sits in the controls row, which is not inside this widget: it needs the actions too,
+        # or its menu items are greyed out
+        self.controls.insert_action_group("conn", group)
 
     # ---- actions
     @staticmethod

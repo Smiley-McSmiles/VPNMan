@@ -570,6 +570,11 @@ class App(A.Application):
         # export the rows shown as CSV
         tb.update({"rows": [r0, rl]})
         assert len(tb.shown_rows()) == 2
+        assert tb.export.activate_action("conn.export-copy", None), "the Export menu finds its actions (not greyed out)"
+        assert tb.controls.activate_action("conn.export-save", None) is not None
+        for win_ in A.Gtk.Window.list_toplevels():
+            if isinstance(win_, A.Gtk.FileChooserDialog):
+                win_.destroy()
         tb._act_export_copy()
         from vpnman.conntable import to_csv
         csv_text = to_csv(tb.shown_rows())
