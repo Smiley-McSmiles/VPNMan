@@ -67,7 +67,7 @@ All commands accept \fB\-h\fR/\fB\-\-help\fR, which prints the options and examp
 .SS Connecting
 .TP
 .B status \fR[\fB\-\-json\fR]
-Show the state (disconnected, connecting, connected, reconnecting, error), the profile, the interface,
+Show the state (disconnected, connecting, connected, reconnecting, disconnecting, error), the profile, the interface,
 the public IP, uptime, traffic and rates, the kill switch, and the proxy when it is switched on. The exit status is 0 when connected and 3
 otherwise, so \fBvpnman status >/dev/null\fR works as a test in scripts. \fB\-\-json\fR prints the raw status object.
 .TP
@@ -397,6 +397,10 @@ table opens the window where the blocks are added (with how long they last), swi
 .B Servers
 Two sub\-tabs. \fBVPN Servers\fR: all profiles, with a search box on top, grouped by group name and sorted by favourites, name or latency (\fBTest
 Latency\fR, or automatically every 5/15/30 minutes while the tab is open), and favourite and block buttons.
+Each server's button follows the connection: \fBConnected\fR (greyed out, with a green dot) on the server in use,
+\fBConnecting…\fR while it starts, and \fBConnect\fR on the others \- clicking another server switches to it (the old tunnel
+is shut down completely first) without leaving the list. While a disconnect is under way the buttons, and the
+Connection page's button, show \fBDisconnecting…\fR and cannot be clicked.
 Select several servers with Ctrl+click, Shift+click or Ctrl+A and remove or \fBEdit\fR them together (Delete key,
 or the selection bar). The \fBEdit\fR button next to a group's name renames the group and edits all its servers
 at once; the same dialog, opened from the selection bar, edits just the selected servers. In it you can set the group,

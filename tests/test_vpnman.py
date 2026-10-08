@@ -1659,6 +1659,37 @@ exit 0
             time.sleep(0.1)
         self.fail("never reached %s, last=%s" % (state, self.c.call("status")))
 
+    def test_disconnect_reports_disconnecting_while_the_tunnel_goes_down(self):
+        self.c.call("profiles.import", name="slowdown", text=OVPN.replace("auth-user-pass\n", ""), filename="slowdown.ovpn",
+                    files={})
+        try:
+            self.c.call("connect", ident="slowdown")
+            self.wait("connected")
+            real = self.mgr._cancel
+            seen = []
+
+            def slow_cancel(*a, **kw):          # a tunnel that takes a while to stop (as real ones do)
+                seen.append(self.c.call("status"))
+                time.sleep(1.0)
+                return real(*a, **kw)
+            self.mgr._cancel = slow_cancel
+            try:
+                t = threading.Thread(target=lambda: self.c.call("disconnect"))
+                t.start()
+                st = self.wait("disconnecting", secs=3)
+                self.assertEqual(st["profile"], "slowdown", "the server being left is named")
+                time.sleep(0.4)
+                self.assertEqual(self.c.call("status")["state"], "disconnecting", "no flicker back to connected")
+                t.join(10)
+            finally:
+                self.mgr._cancel = real
+            self.assertEqual(seen[0]["state"], "disconnecting")
+            self.assertEqual(self.c.call("status")["state"], "disconnected")
+            self.c.call("disconnect")                    # a second disconnect is harmless and quiet
+            self.assertEqual(self.c.call("status")["state"], "disconnected")
+        finally:
+            self.c.call("profiles.remove", ident="slowdown")
+
     def test_full_lifecycle(self):
         self.assertEqual(self.c.call("ping"), "pong")
         p = self.c.call("profiles.import", name="lab", text=OVPN.replace("auth-user-pass\n", ""),

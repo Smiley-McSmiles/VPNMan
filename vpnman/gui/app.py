@@ -29,6 +29,7 @@ from ..settings import DNS_PRESETS
 from ..ipc import Client, DaemonUnavailable, RpcError
 
 ACTIVE = ("connected", "connecting", "reconnecting")
+BUSY = ACTIVE + ("disconnecting",)              # a tunnel exists or is being torn down: the server cannot be changed here
 
 
 def human(n):
@@ -111,7 +112,7 @@ def ensure_icons():
 
 
 TRAY_ICONS = {"connected": "connected", "connecting": "connecting", "reconnecting": "connecting",
-              "error": "error", "disconnected": "disconnected"}
+              "disconnecting": "connecting", "error": "error", "disconnected": "disconnected"}
 
 
 class Hero(Gtk.Box):
@@ -675,6 +676,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._quiet = False
         self._daemon_ok = True
         self._last_state = None
+        self._pending = None                     # (profile id, deadline): a connect request on its way
+        self._disconnecting = False              # a disconnect request on its way (the daemon may take seconds)
         self._rows = {}
 
         self.toasts = Adw.ToastOverlay()
@@ -746,14 +749,16 @@ class MainWindow(Adw.ApplicationWindow):
         st = self.status or {}
         state = st.get("state", "disconnected")
         active = state in ACTIVE
+        leaving = self._disconnecting or state == "disconnecting"
         label = {"connected": "Connected to %s" % st.get("profile"), "connecting": "Connecting…",
-                 "reconnecting": "Reconnecting…", "error": "Connection failed"}.get(state, "Not connected")
+                 "reconnecting": "Reconnecting…", "disconnecting": "Disconnecting…",
+                 "error": "Connection failed"}.get(state, "Not connected")
         locked = (st.get("netlock") or {}).get("engaged")
         items = [
-            {"label": label, "enabled": False},
+            {"label": "Disconnecting…" if leaving else label, "enabled": False},
             {"separator": True},
-            {"label": "Disconnect" if active else "Connect", "enabled": self._daemon_ok,
-             "callback": self.on_main_button},
+            {"label": "Disconnecting…" if leaving else "Disconnect" if active else "Connect",
+             "enabled": self._daemon_ok and not leaving, "callback": self.on_main_button},
             {"label": "Turn Network Lock %s" % ("Off" if locked else "On"), "enabled": self._daemon_ok,
              "callback": lambda: rpc("netlock.disable" if locked else "netlock.enable",
                                      lambda *_: self.refresh(), self._fail)},
@@ -776,9 +781,9 @@ class MainWindow(Adw.ApplicationWindow):
         if not tray:
             return
         state = st["state"]
-        key = (state, st["netlock"]["engaged"], st.get("profile"))
+        key = (state, st["netlock"]["engaged"], st.get("profile"), self._disconnecting)
         tip = {"connected": "Connected to %s" % st.get("profile"), "disconnected": "Not connected",
-               "connecting": "Connecting…", "reconnecting": "Reconnecting…",
+               "connecting": "Connecting…", "reconnecting": "Reconnecting…", "disconnecting": "Disconnecting…",
                "error": "Connection failed"}.get(state, state)
         if st["netlock"]["engaged"]:
             tip += " · Network Lock on"
@@ -1140,11 +1145,50 @@ class MainWindow(Adw.ApplicationWindow):
         pop.set_child(pb)
         menu.set_popover(pop)
         row.add_suffix(menu)
-        go = Gtk.Button(label="Connect", valign=Gtk.Align.CENTER)
+        go = Gtk.Button(label="Connect", valign=Gtk.Align.CENTER, width_request=118)
         go.add_css_class("suggested-action")
-        go.connect("clicked", lambda *_: self.connect_to(p["id"]))
+        go.connect("clicked", lambda *_: self.connect_to(p["id"], stay=True))
+        row.go = go
         row.add_suffix(go)
+        row.dot = Gtk.Label(label="●", opacity=0)        # the server in use; always there so the names line up
+        row.add_prefix(row.dot)
+        self._sync_row(row)
         return row
+
+    def row_state(self, pid):
+        """(label, clickable) of a server's Connect button: it mirrors what the daemon is doing with that server."""
+        st = self.status or {}
+        state, live = st.get("state"), st.get("profile_id")
+        pend = self._pending if self._pending and time.monotonic() < self._pending[1] else None
+        if self._disconnecting or state == "disconnecting":
+            # nothing can start until the old tunnel is gone; the server being left says so
+            return ("Disconnecting…" if pid == live else "Connect"), False
+        if pend:
+            if pend[0] == pid:
+                return "Connecting…", False
+            if pid == live:
+                return "Connect", True                     # the server being switched away from
+        if pid == live:
+            if state == "connected":
+                return "Connected", False
+            if state in ("connecting", "reconnecting"):
+                return ("Connecting…" if state == "connecting" else "Reconnecting…"), False
+        return "Connect", True
+
+    def _sync_row(self, row):
+        label, clickable = self.row_state(row.profile["id"])
+        if row.go.get_label() != label:
+            row.go.set_label(label)
+        row.go.set_sensitive(clickable and self._daemon_ok)
+        (row.go.add_css_class if clickable else row.go.remove_css_class)("suggested-action")
+        row.dot.set_opacity(1 if not clickable and label != "Connect" else 0)
+        for cls, on in (("success", label == "Connected"), ("warning", label != "Connected")):
+            (row.dot.add_css_class if on else row.dot.remove_css_class)(cls)
+        row.dot.set_tooltip_text(label.rstrip("…"))
+
+    def _sync_rows(self):
+        for row in self._rows.values():
+            self._sync_row(row)
 
     def _edit(self, p):
         ProfileDialog(self, "edit", self.protocols, profile=p, on_done=lambda: self.refresh(full=True)).present()
@@ -1457,17 +1501,29 @@ class MainWindow(Adw.ApplicationWindow):
             ms = self.latency.get(pid)
             row.lat.set_label("%.0f ms" % ms if ms else ("timeout" if pid in self.latency else ""))
 
-    def connect_to(self, pid):
+    def connect_to(self, pid, stay=False):
         """Connect (or switch) to a server.  The daemon replaces a live tunnel itself; here we only make sure that a
         second click while the first request is in flight does not start a second one, and that the polling
-        refresh does not snap the selection back to the old server in the meantime."""
-        pend = getattr(self, "_pending", None)
+        refresh does not snap the selection back to the old server in the meantime.  ``stay``: the click came
+        from the server list, which shows the progress itself (no jump to the Connection page)."""
+        pend = self._pending
         if pend and pend[0] == pid and time.monotonic() < pend[1]:
             return
+        if self._disconnecting:
+            self.toast("Wait until the VPN is disconnected")
+            return
+        st = self.status or {}
+        if st.get("profile_id") == pid and st.get("state") in ACTIVE:
+            return                                         # already connected (or connecting) to it
         self.sel_id = pid
         self._user_pick = None
         self._pending = (pid, time.monotonic() + 90)
-        self.stack.set_visible_child_name("overview")
+        self._sync_rows()
+        if stay:
+            name = next((p["name"] for p in self.profiles if p["id"] == pid), "")
+            self.toast(("Switching to %s…" if st.get("state") in ACTIVE else "Connecting to %s…") % name)
+        else:
+            self.stack.set_visible_child_name("overview")
 
         def settled(*_):
             self._pending = None
@@ -1475,13 +1531,30 @@ class MainWindow(Adw.ApplicationWindow):
 
         def failed(msg, down=False):
             self._pending = None
+            self._sync_rows()
             self._fail(msg, down)
         rpc("connect", settled, failed, ident=pid)
 
     def on_main_button(self, *_):
         st = self.status or {}
+        if self._disconnecting or st.get("state") == "disconnecting":
+            return
         if st.get("state") in ACTIVE:
-            rpc("disconnect", lambda *_: self.refresh(), self._fail)
+            self._disconnecting = True
+            self._pending = None                           # a connect still on its way is cancelled by this, too
+            self._show_main_button()
+            self._sync_rows()
+            self._update_tray(st)
+
+            def done(*_):
+                self._disconnecting = False
+                self.refresh()
+
+            def failed(msg, down=False):
+                self._disconnecting = False
+                self._fail(msg, down)
+                self.refresh()
+            rpc("disconnect", done, failed)
         elif not self.profiles:
             self.stack.set_visible_child_name("servers")
             self.toast("Import a profile first")
@@ -1527,7 +1600,7 @@ class MainWindow(Adw.ApplicationWindow):
         hand while nothing is connecting; the last server that was connected; the first one."""
         ids = [p["id"] for p in self.profiles]
         st = self.status or {}
-        pend = getattr(self, "_pending", None)
+        pend = self._pending
         if pend and time.monotonic() < pend[1] and pend[0] in ids:
             return pend[0]
         if st.get("state") in ACTIVE and st.get("profile_id") in ids:
@@ -1674,14 +1747,17 @@ class MainWindow(Adw.ApplicationWindow):
         self._ensure_loaded()
         self.status = st
         state = st["state"]
-        active = state in ACTIVE
         self._quiet = True
         self.lock_switch.set_active(st["netlock"]["engaged"])
         self.lock_now.set_active(st["netlock"]["engaged"])
         self._quiet = False
-        self.server_row.set_sensitive(not active)
+        self.server_row.set_sensitive(state not in BUSY and not self._disconnecting)
         self._sync_selector()
-        if state == "connected":
+        if state == "disconnecting" or self._disconnecting:
+            self.hero.set_icon_name("network-vpn-acquiring-symbolic")
+            self.hero.set_title("Disconnecting…")
+            self.hero.set_description(st.get("profile") or "")
+        elif state == "connected":
             self.hero.set_icon_name("network-vpn-symbolic")
             self.hero.set_title("Connected")
             self.hero.set_description("%s · %s" % (st["profile"], st["protocol"]))
@@ -1698,11 +1774,11 @@ class MainWindow(Adw.ApplicationWindow):
             self.hero.set_title("Not Connected")
             self.hero.set_description("Your traffic is not protected." if not st["netlock"]["engaged"]
                                       else "Network lock is engaged - traffic is blocked.")
-        self.main_btn.set_label("Disconnect" if active else "Connect")
-        for cls, on in (("suggested-action", not active), ("destructive-action", active)):
-            (self.main_btn.add_css_class if on else self.main_btn.remove_css_class)(cls)
-        self.stats.set_visible(state == "connected")
-        self.graph_group.set_visible(state == "connected")
+        self._show_main_button()
+        self._sync_rows()
+        shown = state == "connected" and not self._disconnecting
+        self.stats.set_visible(shown)
+        self.graph_group.set_visible(shown)
         if state == "connected":
             self.graph.push(st.get("rx_rate", 0), st.get("tx_rate", 0))
         else:
@@ -1722,6 +1798,19 @@ class MainWindow(Adw.ApplicationWindow):
                 rpc("history", self.history_group.update, None, limit=8)       # a session just started or ended
                 self._notify(state, st)
             self._last_state = state
+
+    def _show_main_button(self):
+        """Connect / Disconnect, or a greyed-out "Disconnecting…" while the tunnel is being torn down."""
+        state = (self.status or {}).get("state")
+        if self._disconnecting or state == "disconnecting":
+            label, active, clickable = "Disconnecting…", False, False
+        else:
+            active = state in ACTIVE
+            label, clickable = ("Disconnect" if active else "Connect"), self._daemon_ok
+        self.main_btn.set_label(label)
+        self.main_btn.set_sensitive(clickable)
+        for cls, on in (("suggested-action", clickable and not active), ("destructive-action", clickable and active)):
+            (self.main_btn.add_css_class if on else self.main_btn.remove_css_class)(cls)
 
     def _ask_credentials(self, st):
         prof = next((p for p in self.profiles if p["id"] == st.get("profile_id")), None)

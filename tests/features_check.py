@@ -63,6 +63,14 @@ def prof(i, group="", fav=False):
 
 class App(A.Application):
     def do_activate(self):
+        try:
+            self.checks()
+        except BaseException:                    # a failed check ends the run at once (instead of a hanging app)
+            import traceback
+            traceback.print_exc()
+            os._exit(1)
+
+    def checks(self):
         super().do_activate()
         w = self.win
         A.rpc = fake_rpc
@@ -515,6 +523,87 @@ class App(A.Application):
         assert bw.banner.get_revealed()
         bw.close()
         # ---- update result dialog / import notes build without errors
+        # ---- the Connect buttons in the server list and Disconnecting… follow what the daemon does
+        held = {}
+
+        def hold_rpc(method, ok=None, fail=None, **kw):
+            CALLS.append((method, kw))
+            if method in ("connect", "disconnect"):
+                held[method] = (ok, fail)                 # answered later, like a slow daemon
+            else:
+                fake_rpc(method, ok, fail, **kw)
+        A.rpc = hold_rpc
+
+        def status(state, pid=None):
+            name = {"%012d" % 1: "srv1", "%012d" % 2: "srv2"}.get(pid)
+            return {"state": state, "profile_id": pid, "profile": name, "protocol": "openvpn" if pid else None,
+                    "message": "", "iface": "tun0" if state == "connected" else None, "public_ip": None, "since": 1,
+                    "rx": 0, "tx": 0, "rx_rate": 0, "tx_rate": 0, "uptime": 3, "error_kind": None,
+                    "netlock": {"engaged": False}, "last_profile": pid, "version": "x"}
+        p1, p2 = "%012d" % 1, "%012d" % 2
+        w._on_profiles([prof(1), prof(2)])
+        w._on_status(status("connected", p1))
+        r1, r2 = w._rows[p1], w._rows[p2]
+
+        def look(r):
+            return r.go.get_label(), r.go.get_sensitive()
+        assert look(r1) == ("Connected", False) and look(r2) == ("Connect", True), (look(r1), look(r2))
+        assert r1.dot.get_opacity() == 1 and r1.dot.has_css_class("success") and r2.dot.get_opacity() == 0
+        assert not r1.go.has_css_class("suggested-action") and r2.go.has_css_class("suggested-action")
+        w.stack.set_visible_child_name("servers")
+        CALLS.clear()
+        r1.go.emit("clicked")
+        assert not any(c[0] == "connect" for c in CALLS), "the connected server's button does nothing"
+        r2.go.emit("clicked")                                     # switch servers from the list
+        assert ("connect", {"ident": p2}) in CALLS and w.stack.get_visible_child_name() == "servers", "stays on the list"
+        assert look(r2) == ("Connecting…", False) and look(r1) == ("Connect", True), (look(r1), look(r2))
+        CALLS.clear()
+        r2.go.emit("clicked")
+        assert not any(c[0] == "connect" for c in CALLS), "no second request while one is on its way"
+        w._on_status(status("connected", p1))                     # an older poll answer must not undo the switch
+        assert look(r2) == ("Connecting…", False) and look(r1) == ("Connect", True)
+        w._on_status(status("connecting", p2))
+        held.pop("connect")[0]({"id": p2})
+        assert look(r2) == ("Connecting…", False)
+        w._on_status(status("connected", p2))
+        assert look(r2) == ("Connected", False) and look(r1) == ("Connect", True) and w.main_btn.get_label() == "Disconnect"
+        # disconnect: grey "Disconnecting…" until the daemon is done
+        CALLS.clear()
+        w.on_main_button()
+        assert w.main_btn.get_label() == "Disconnecting…" and not w.main_btn.get_sensitive()
+        assert look(r2) == ("Disconnecting…", False) and look(r1) == ("Connect", False), "nothing starts meanwhile"
+        assert not w.server_row.get_sensitive()
+        w._on_status(status("connected", p2))                     # the tunnel is still up for a few seconds
+        assert w.main_btn.get_label() == "Disconnecting…" and not w.main_btn.get_sensitive()
+        assert w.hero.title.get_label() == "Disconnecting…" and not w.stats.get_visible()
+        w.on_main_button()
+        assert [c[0] for c in CALLS].count("disconnect") == 1, "a second click does not send a second disconnect"
+        assert next(i for i in w.tray_menu() if "Disconnect" in i["label"])["enabled"] is False
+        w._on_status(status("disconnecting", p2))
+        assert w.main_btn.get_label() == "Disconnecting…"
+        held.pop("disconnect")[0](True)
+        w._on_status(status("disconnected"))
+        assert w.main_btn.get_label() == "Connect" and w.main_btn.get_sensitive()
+        assert look(r1) == ("Connect", True) and look(r2) == ("Connect", True) and r2.dot.get_opacity() == 0
+        # a disconnect started elsewhere (tray, CLI) shows up through the daemon's state alone
+        w._on_status(status("disconnecting", p1))
+        assert w.main_btn.get_label() == "Disconnecting…" and not w.main_btn.get_sensitive()
+        assert look(r1) == ("Disconnecting…", False)
+        # a failed disconnect request gives the button back
+        w._on_status(status("connected", p1))
+        w.on_main_button()
+        held.pop("disconnect")[1]("daemon gone", False)
+        w._on_status(status("connected", p1))
+        assert w.main_btn.get_label() == "Disconnect" and w.main_btn.get_sensitive()
+        # connecting from the list while disconnected; a failed connect gives the button back
+        w._on_status(status("disconnected"))
+        r1.go.emit("clicked")
+        assert look(r1) == ("Connecting…", False)
+        held.pop("connect")[1]("no such profile", False)
+        assert look(r1) == ("Connect", True)
+        w._on_status(status("error", p1))
+        assert look(r1) == ("Connect", True), "a failed connection can be retried"
+        A.rpc = fake_rpc
         w.show_warnings(["a: Will be ignored: 'register-dns'"])
         w._update_result({"current": "1.0.6", "latest": "9.9.9", "newer": True, "url": "https://github.com/x", "notes": "n"}, False)
         w._update_result({"error": "offline"}, True)

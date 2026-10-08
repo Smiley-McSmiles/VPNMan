@@ -38,7 +38,7 @@ def hms(sec):
     return "%d:%02d:%02d" % (sec // 3600, sec % 3600 // 60, sec % 60)
 
 
-STATE_STYLE = {"connected": green, "connecting": yellow, "reconnecting": yellow, "error": red,
+STATE_STYLE = {"connected": green, "connecting": yellow, "reconnecting": yellow, "disconnecting": yellow, "error": red,
                "disconnected": dim}
 
 

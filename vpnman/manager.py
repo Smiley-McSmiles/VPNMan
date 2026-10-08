@@ -365,9 +365,18 @@ class Manager:
 
     def disconnect(self, release_lock=True):
         with self._oplock:
-            self._cancel()
             with self._mlock:
                 was = self._status["state"]
+                old_stop = self._stop
+                if was != "disconnected":
+                    # Tearing a tunnel down can take seconds: say so, and start a new generation so the old
+                    # connection thread's last status updates cannot overwrite it ("connected" flickering back).
+                    self._stop = threading.Event()
+                    self._status = dict(self._blank_status(), state="disconnecting", message="Disconnecting",
+                                        profile_id=self._status.get("profile_id"),
+                                        profile=self._status.get("profile"), protocol=self._status.get("protocol"))
+            self._cancel(old_stop)
+            with self._mlock:
                 self._status = self._blank_status()
             if release_lock:
                 try:
