@@ -124,8 +124,9 @@ vpnman netproxy on
 
 #### Installing Xray
 
-`sudo ./install.sh --xray-only` downloads the official Xray release for your machine, checks its checksum and installs
-it as `/usr/local/bin/xray`. It works with any init system (systemd, runit, OpenRC, s6, BSD rc), because Xray needs no
+An interactive `sudo ./install.sh` asks whether to install Xray when it is missing (`--no-xray` skips the question;
+it is never asked for package builds or without a terminal). `sudo ./install.sh --xray-only` does only that: it
+downloads the official Xray release for your machine, checks its checksum and installs it as `/usr/local/bin/xray`. It works with any init system (systemd, runit, OpenRC, s6, BSD rc), because Xray needs no
 service: VPNMan starts it. The same steps as a standalone script, if you don't want to download VPNMan first (needs
 `bash`, `curl`, `unzip` and `sha256sum`; Linux):
 
@@ -282,8 +283,9 @@ install without reinstalling.
 ```sh
 sh install.sh --check              # no root needed: report what is missing on this machine (Python, GTK/libadwaita, VPN tools, firewall, init)
 sudo sh install.sh --install-deps  # optional: pulls dependencies via apt/dnf/pacman/xbps/apk/zypper/pkg_add/pkg
-sudo sh install.sh --xray-only     # optional: downloads Xray (checksum verified) for `vpnman proxy`; no service, any init system
+sudo sh install.sh --xray-only     # optional: downloads Xray (checksum verified) for the proxies; no service, any init system
 sudo sh install.sh                 # installs to /usr/local, sets up + starts the service for your init system
+                                   # (asks whether to install Xray when it is missing; --no-xray to skip)
                                    # (no sudo? use `doas sh install.sh` or `su -c 'sh install.sh'`)
 sudo ./install.sh --prefix /usr --uninstall [--purge]
 ```
@@ -304,9 +306,10 @@ Service control later: `sudo vpnman service enable|disable|start|stop|restart|st
 ### Packages
 
 ```sh
-./package.sh                   # everything this machine can build; a missing tool only skips that target
-./package.sh arch deb          # or pick targets: tar deb rpm arch void alpine openbsd recipes clean
-./package.sh --container rpm   # build the .rpm inside a Fedora container (podman/docker) from ANY distro
+./package.sh                     # everything this machine can build (--all); a missing tool only skips that target
+./package.sh --arch --deb        # or pick: --tar --deb --rpm --arch --void --alpine --openbsd --recipes --clean
+./package.sh --container --rpm   # build the .rpm inside a Fedora container (podman/docker) from ANY distro
+./package.sh --help              # the same options as GPGMan's package.sh (plain names like "deb" work too)
 ```
 
 | Target | Needs | Notes |
@@ -318,11 +321,15 @@ Service control later: `sudo vpnman service enable|disable|start|stop|restart|st
 | `void` | `xbps-create` (Void) | otherwise the template is written to `dist/recipes/void/` |
 | `alpine`, `openbsd` | - | recipes only (`APKBUILD`, port skeleton) in `dist/recipes/` |
 
-With no argument, `package.sh` builds every target it can and ends with a summary of what was built, skipped and failed.
+With no argument, `package.sh` builds every target it can and ends with a summary of what was built, skipped and failed,
+and every run writes `dist/SHA256SUMS` for this version's packages. The packages suggest `xray` (Arch `optdepends`,
+deb/rpm `Suggests`). There is no Flatpak or AppImage on purpose: VPNMan's root service, firewall rules and routing
+cannot run from a sandbox or a self-mounting image, and the tarball with `install.sh` already works on any
+distribution and init system.
 
 GitHub Actions (`.github/workflows`): CI runs the tests and builds every package on each push/PR; pushing a tag
-`vX.Y.Z` (which must match the version in the code - checked by `tools/check_version.py`) publishes a release with all
-packages, `SHA256SUMS` and notes taken from the metainfo file.
+`vX.Y.Z` (which must match the version in the code - checked by `tools/check_version.py`) publishes a release with every
+package `package.sh` built, its `SHA256SUMS` and notes taken from the metainfo file.
 
 ## Usage
 

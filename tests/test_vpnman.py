@@ -489,6 +489,66 @@ class XrayInstallTests(unittest.TestCase):
         return subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", "/usr", *args],
                               env=dict(os.environ, DESTDIR=dest, VPNMAN_XRAY_BASE=base), capture_output=True, text=True)
 
+    def run_in_terminal(self, base, dest, answer, *args):
+        """install.sh with a pseudo-terminal for stdin/stdout (as when a person runs it) answering ``answer``."""
+        import pty
+        import select
+        import subprocess
+        mfd, sfd = pty.openpty()
+        p = subprocess.Popen(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", "/usr", "--init", "none", *args],
+                             stdin=sfd, stdout=sfd, stderr=sfd,
+                             env=dict(os.environ, DESTDIR=dest, VPNMAN_XRAY_BASE=base, PATH=self.clean_path()))
+        os.close(sfd)
+        out, sent, end = b"", False, time.time() + 120
+        while time.time() < end:
+            r, _, _ = select.select([mfd], [], [], 0.2)
+            if r:
+                try:
+                    chunk = os.read(mfd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+                if not sent and b"[Y/n]" in out:
+                    os.write(mfd, answer.encode() + b"\n")
+                    sent = True
+            elif p.poll() is not None:
+                break
+        p.wait(30)
+        os.close(mfd)
+        return p.returncode, out.decode(errors="replace")
+
+    @staticmethod
+    def clean_path():
+        """PATH without the fake programs other tests put there (a fake xray would hide the question)."""
+        return os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep)
+                               if d and not os.path.abspath(d).startswith(os.path.abspath(TMP)))
+
+    def test_an_interactive_install_offers_xray(self):
+        import shutil
+        if shutil.which("xray", path=self.clean_path() + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin"):
+            self.skipTest("xray is installed on this machine, so there is nothing to offer")
+        asset = self.asset()
+        data, digest = self.zipped()
+        base = self.serve({asset + ".zip": data, asset + ".zip.dgst": ("SHA2-256= %s\n" % digest).encode()})
+        dest = tempfile.mkdtemp(dir=TMP)
+        rc, out = self.run_in_terminal(base, dest, "y")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Xray is not installed", out)
+        self.assertTrue(os.access(os.path.join(dest, "usr/bin/xray"), os.X_OK), out)
+        dest2 = tempfile.mkdtemp(dir=TMP)
+        rc, out = self.run_in_terminal(base, dest2, "n")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Skipped", out)
+        self.assertFalse(os.path.exists(os.path.join(dest2, "usr/bin/xray")))
+        for args in (("--no-xray",), ("--no-post",)):                   # never asked: opted out, or a package build
+            rc, out = self.run_in_terminal(base, tempfile.mkdtemp(dir=TMP), "y", *args)
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("[Y/n]", out, args)
+        r = self.run_install(base, tempfile.mkdtemp(dir=TMP), "--init", "none")   # no terminal: never asked
+        self.assertNotIn("[Y/n]", r.stdout)
+
     def test_downloads_verifies_and_installs(self):
         asset = self.asset()
         data, digest = self.zipped()
@@ -1003,6 +1063,37 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)             # 3 = skipped
         self.assertTrue(os.path.isfile(os.path.join(self.ROOT, "dist", "recipes", "alpine", "APKBUILD")))
         self.assertEqual(self._pkg("no-such-target").returncode, 2)
+
+    def test_gpgman_style_options_checksums_and_summary(self):
+        import hashlib
+        r = self._pkg("--help")
+        self.assertEqual(r.returncode, 0)
+        for opt in ("--all", "--tar", "--deb", "--rpm", "--arch", "--void", "--alpine", "--openbsd", "--container",
+                    "--clean", "--help"):
+            self.assertIn(opt, r.stdout)
+        self.assertIn("Flatpak", r.stdout, "the help says why there is no Flatpak/AppImage")
+        r = self._pkg("--arch", "--tar")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Packaging complete", r.stdout)
+        dist = os.path.join(self.ROOT, "dist")
+        lines = open(os.path.join(dist, "SHA256SUMS")).read().splitlines()
+        v = __import__("vpnman").__version__
+        names = [l.split("  ", 1)[1] for l in lines]
+        self.assertIn("vpnman-%s.tar.gz" % v, names)
+        self.assertTrue(all(v in n for n in names), "only this version's files are listed")
+        for line in lines:
+            digest, name = line.split("  ", 1)
+            self.assertEqual(hashlib.sha256(open(os.path.join(dist, name), "rb").read()).hexdigest(), digest, name)
+        self.assertEqual(self._pkg("--no-such-target").returncode, 2)
+
+    def test_packages_suggest_xray(self):
+        self._pkg("recipes")
+        rec = os.path.join(self.ROOT, "dist", "recipes")
+        self.assertIn("xray: proxies", open(os.path.join(rec, "arch", "PKGBUILD")).read())
+        self.assertIn("xray", open(os.path.join(rec, "vpnman.spec")).read().split("Suggests:", 1)[1].splitlines()[0])
+        pkg = open(os.path.join(self.ROOT, "package.sh")).read()
+        self.assertIn("Suggests: xray", pkg)
+        self.assertIn("--optdepend 'xray: proxies and the Network Proxy'", pkg)
 
     def test_void_template_has_no_duplicate_lines(self):
         self._pkg("recipes")
@@ -3108,6 +3199,10 @@ class ServersGuiTests(unittest.TestCase):
     def test_ctrl_and_shift_click_selection(self):
         r = self._run("select_check.py", need=("xdotool",))
         self.assertIn("SELECT-OK", r.stdout, r.stdout + r.stderr[-1500:])
+
+    def test_password_fields_warn_about_caps_lock(self):
+        r = self._run("capslock_check.py", need=("xdotool",))
+        self.assertIn("CAPSLOCK-OK", r.stdout, r.stdout + r.stderr[-1500:])
 
 
 class PagesGuiTests(unittest.TestCase):

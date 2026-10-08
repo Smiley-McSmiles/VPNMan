@@ -26,18 +26,17 @@ jobs:
       - name: Build packages
         run: ./package.sh
 
-      - name: Checksums and notes
-        run: |
-          cd dist
-          sha256sum *.tar.gz *.deb *.rpm *.pkg.tar.xz > SHA256SUMS
-          cd ..
-          python3 tools/release_notes.py "${GITHUB_REF_NAME}" > release-notes.md
+      - name: Release notes
+        run: python3 tools/release_notes.py "${GITHUB_REF_NAME}" > release-notes.md
 
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            dist/*.tar.gz dist/*.deb dist/*.rpm dist/*.pkg.tar.xz dist/SHA256SUMS \
+          # every package package.sh built for this version (whatever this runner could build) and its SHA256SUMS
+          version="${GITHUB_REF_NAME#v}"
+          mapfile -t files < <(find dist -maxdepth 1 -type f \( -name "*${version}*" -o -name SHA256SUMS \) | sort)
+          test -s dist/SHA256SUMS
+          gh release create "${GITHUB_REF_NAME}" "${files[@]}" \
             --title "VPNMan ${GITHUB_REF_NAME#v}" \
             --notes-file release-notes.md

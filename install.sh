@@ -2,6 +2,7 @@
 # VPNMan installer - POSIX sh, runs on Linux (systemd, runit, OpenRC, SysV) and the BSDs.
 #
 #   sudo ./install.sh                  install to /usr/local, set up the service for this machine
+#                                      (asks whether to install Xray too, when it is missing)
 #   sudo ./install.sh --prefix /usr    choose another prefix
 #   DESTDIR=/tmp/stage ./install.sh --init systemd --no-post    stage files for a package
 #   sudo ./install.sh --uninstall [--purge]
@@ -24,6 +25,7 @@ PURGE=0
 DEPS=0
 INSTALL_XRAY=0
 XRAY_ONLY=0
+NO_XRAY=0
 CHECK=0
 SYSLINKS=1
 GROUP=vpnman
@@ -46,6 +48,7 @@ Options:
                       PREFIX/bin/xray, replacing an older copy; needs curl or wget. Xray is the program behind
                       "vpnman proxy"; it needs no service of its own, so this works on any init system
   --xray-only         do only that, nothing else
+  --no-xray           do not offer to install Xray (an interactive install asks when it is missing)
   --check             only report what is missing on this machine; install nothing
   --no-system-links   do not link the launcher/icons into /usr/share when installing under another prefix
   -h, --help          show this help
@@ -64,6 +67,7 @@ while [ $# -gt 0 ]; do
         --install-deps) DEPS=1 ;;
         --install-xray) INSTALL_XRAY=1 ;;
         --xray-only) XRAY_ONLY=1; INSTALL_XRAY=1 ;;
+        --no-xray) NO_XRAY=1 ;;
         --check) CHECK=1 ;;
         --no-system-links) SYSLINKS=0 ;;
         -h|--help) usage; exit 0 ;;
@@ -206,7 +210,7 @@ preflight() {
         warn "no VPN client found yet - install openvpn and/or wireguard-tools (see: vpnman protocols)"
     fi
     if ! have xray; then
-        say "Optional: xray is not installed (only needed for 'vpnman proxy'). Install it with: sudo sh $0 --xray-only"
+        say "Optional: xray is not installed (needed for the proxies and the Network Proxy). Install it with: sudo sh $0 --xray-only"
     fi
     if ! have nft && ! have iptables && ! have pfctl; then
         warn "no firewall tool (nft, iptables or pfctl) - the kill switch will be unavailable until one is installed"
@@ -687,6 +691,20 @@ if [ "$DO_POST" -eq 1 ] && [ -z "$DESTDIR" ]; then
 fi
 
 if [ "$INSTALL_XRAY" -eq 1 ] && [ -z "$DESTDIR" ]; then install_xray || true; fi
+
+# An interactive install offers Xray when it is missing.  Never for package builds (--no-post), never without a
+# terminal to answer on (curl | sh, scripts, CI), never with --no-xray.
+if [ "$INSTALL_XRAY" -eq 0 ] && [ "$NO_XRAY" -eq 0 ] && [ "$DO_POST" -eq 1 ] && [ -t 0 ] && [ -t 1 ] \
+        && ! have xray && [ ! -x "$D$BINDIR/xray" ]; then
+    printf '\nXray is not installed. VPNMan uses it for the proxies (VLESS, VMess, Trojan, Shadowsocks) and for the\n'
+    printf 'Network Proxy. Download the official release (checksum verified) and install it as %s/xray? [Y/n] ' "$BINDIR"
+    ans=""
+    read -r ans || ans=n
+    case "$ans" in
+        ""|y|Y|yes|Yes|YES) install_xray || true ;;
+        *) say "Skipped. Install it later with: sudo sh $0 --xray-only" ;;
+    esac
+fi
 
 if [ -n "$WARNINGS" ]; then
     printf '\nVPNMan is installed, with warnings:%s\n' "$WARNINGS"

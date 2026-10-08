@@ -19,6 +19,7 @@ except (ImportError, ValueError) as exc:  # pragma: no cover
 import json
 
 from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof, updates
+from .caps_lock import attach_caps_lock_hint
 from .connpage import ConnectionsGroup
 from .files import choose_files, save_file
 from .keys import close_keys, restore_scroll
@@ -237,6 +238,7 @@ class BatchEditDialog(Adw.Window):
         g = Adw.PreferencesGroup(title="Login")
         self.user = Adw.EntryRow(title="Username")
         self.password = Adw.PasswordEntryRow(title="Password")
+        attach_caps_lock_hint(self.password)
         g.add(self.user)
         g.add(self.password)
         page.add(g)
@@ -354,6 +356,7 @@ class ProfileDialog(Adw.Window):
         self.port = Adw.EntryRow(title="Port")
         self.user = Adw.EntryRow(title="Username")
         self.password = Adw.PasswordEntryRow(title="Password" + (" (empty = keep)" if mode == "edit" else ""))
+        attach_caps_lock_hint(self.password)
         self.opts = Adw.EntryRow(title="Options (key=value, comma separated)")
         self.dns = Adw.EntryRow(title="DNS servers (comma separated)")
         self.notes = Adw.EntryRow(title="Notes")
@@ -580,6 +583,7 @@ class CredentialsPrompt(Adw.MessageDialog):
         self.user = Adw.EntryRow(title="Username")
         self.user.set_text(profile.get("username") or "")
         self.password = Adw.PasswordEntryRow(title="Password")
+        attach_caps_lock_hint(self.password)
         group.add(self.user)
         group.add(self.password)
         self.set_extra_child(group)
