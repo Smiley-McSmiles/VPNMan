@@ -1198,7 +1198,7 @@ class Cli:
 
     def cmd_protocols(self, a):
         info = self.call("protocols") if self.client.alive() else backends.describe()
-        if a.json:
+        if getattr(a, "json", False):                 # `doctor` shows the same list and has no --json
             print(json.dumps({"protocols": info, "helpers": backends.helpers()}, indent=2))
             return 0
         for p in info + [None] + backends.helpers():
