@@ -708,6 +708,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.settings = {}
         self.latency = {}
         self.sel_id = None
+        self._synced = False      # profiles and settings have been loaded from the daemon (again after it was away)
+        self._sync_try = 0.0
         self._user_pick = None    # a server chosen by hand while nothing is connecting (until a connection starts)
         self._log_seq = 0
         self._quiet = False
@@ -1381,6 +1383,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _set_daemon(self, ok, msg=""):
         self._daemon_ok = ok
+        if not ok:
+            self._synced = False                  # whatever the daemon says next must be loaded afresh
         self.banner.set_title("The VPNMan background service is not running" if not ok else "")
         self.banner.set_revealed(not ok)
         for w in (self.main_btn, self.lock_switch, self.lock_now):
@@ -1635,6 +1639,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._append_log(res["entries"])
 
     def _on_profiles(self, profiles):
+        self._synced = True
         self.profiles = profiles
         self._quiet = True
         names = [p["name"] for p in profiles]
@@ -1673,8 +1678,16 @@ class MainWindow(Adw.ApplicationWindow):
                 row.set_text(", ".join(val))
         self._quiet = False
 
+    def _ensure_loaded(self):
+        """The daemon answered but the lists were never loaded (the window opened while it was still starting, as
+        after a reinstall): load them now instead of waiting for the user to change something."""
+        if not self._synced and time.monotonic() - self._sync_try > 2:
+            self._sync_try = time.monotonic()
+            self.refresh(full=True)
+
     def _on_status(self, st):
         self._set_daemon(True)
+        self._ensure_loaded()
         old = self.status
         self.status = st
         state = st["state"]

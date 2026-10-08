@@ -34,6 +34,8 @@ def fake_rpc(method, ok=None, fail=None, **kw):
         "blocks.status": BLOCK_STATUS, "blocks.add": {"id": "abcd1234", "kind": "address", "value": "x", "proto": "any", "closed": 2},
         "blocks.remove": {"removed": ["aaaa1111"]}, "blocks.set": BLOCK_STATUS, "blocks.update": {"id": "aaaa1111"},
         "connections.close": {"closed": True}, "connections": {"rows": [], "supported": True},
+        "profiles.list": [{"id": "%012d" % i, "name": "srv%d" % i, "favorite": False, "blacklisted": False, "protocol": "openvpn",
+                           "server": "h", "port": 1, "group": "", "username": ""} for i in (1, 2)],
         "leaktest": {"checks": [{"id": "tunnel", "name": "VPN tunnel", "status": "ok", "detail": "Connected"},
                                 {"id": "dns", "name": "DNS servers", "status": "fail", "detail": "leak <&> test"},
                                 {"id": "ipv6", "name": "IPv6", "status": "warn", "detail": "maybe"}], "summary": "fail"},
@@ -204,6 +206,21 @@ class App(A.Application):
         bd._apply()
         call = [kw for m, kw in CALLS if m == "profiles.update_many"]
         assert call and call[0]["ids"] == [p["id"] for p in members] and call[0]["changes"]["group"] == "Beta", call
+        # ---- the lists load even if the daemon was not up yet when the window opened (e.g. right after a reinstall)
+        w.profiles, w._synced, w._sync_try = [], False, 0.0
+        CALLS.clear()
+        w._on_status(dict(base, state="disconnected", error_kind=None, message=""))
+        assert any(c[0] == "profiles.list" for c in CALLS), "an answering daemon with no lists loaded must trigger a load"
+        assert w._synced and len(w.profiles) == 2
+        CALLS.clear()
+        w._on_status(dict(base, state="disconnected", error_kind=None, message=""))
+        assert not any(c[0] == "profiles.list" for c in CALLS), "once loaded, status updates do not reload the lists"
+        w._set_daemon(False)
+        assert not w._synced, "a daemon that went away means: load again when it is back"
+        w._sync_try = 0.0
+        CALLS.clear()
+        w._on_status(dict(base, state="disconnected", error_kind=None, message=""))
+        assert any(c[0] == "profiles.list" for c in CALLS)
         # ---- Connection tab selector: current / last connected server, predictable
         w.profiles = [prof(1), prof(2), prof(3)]
         ids = [p["id"] for p in w.profiles]
