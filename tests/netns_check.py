@@ -7,7 +7,8 @@ The namespace's loopback device gets the addresses of a "website" (10.99.0.2 and
 carries (10.99.0.3:8080) and a DNS server that only speaks TCP (10.99.0.6:53).  Then:
 * a plain connection to the website must arrive through the proxy (system-wide redirect -> xray -> HTTP proxy),
 * a DNS query sent over UDP to any address must be answered - over TCP through the HTTP proxy,
-* an ignored address must be reached directly.
+* an ignored address must be reached directly,
+* with xray dead and the kill switch's block rules in place, nothing but ignored hosts gets out.
 (That other UDP and IPv6 are blocked is checked on the ruleset text: on loopback the guard lets everything pass.)
 """
 import os
@@ -175,6 +176,42 @@ def main(xray_bin):
         assert any(l.startswith("CONNECT 10.99.0.6:53") for l in LOG[n:]), ("DNS went through the proxy", LOG)
         n = len(LOG)
         assert fetch("10.99.0.5") == b"site" and len(LOG) == n, ("an ignored address goes direct", LOG)
+        # the kill switch: xray dies, the block rules replace the redirect in one step - nothing gets out.  This needs
+        # a real second network (on loopback the guard lets everything pass): a veth pair to another namespace.
+        proc.terminate()
+        proc.wait(5)
+        remote = subprocess.Popen(["unshare", "-n", "sleep", "120"])
+        try:
+            time.sleep(0.5)
+            sh("ip", "link", "add", "v0", "type", "veth", "peer", "name", "v1")
+            sh("ip", "link", "set", "v1", "netns", str(remote.pid))
+            sh("ip", "addr", "add", "10.98.0.1/24", "dev", "v0")
+            sh("ip", "link", "set", "v0", "up")
+            ns = ["nsenter", "-t", str(remote.pid), "-n"]
+            sh(*ns, "ip", "addr", "add", "10.98.0.2/24", "dev", "v1")
+            sh(*ns, "ip", "link", "set", "v1", "up")
+            sh(*ns, "ip", "link", "set", "lo", "up")
+            srv = subprocess.Popen(ns + ["python3", "-c", "import http.server;http.server.HTTPServer(('10.98.0.2',80),"
+                                                           "http.server.SimpleHTTPRequestHandler).serve_forever()"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(1.0)
+
+            def reach():
+                try:
+                    socket.create_connection(("10.98.0.2", 80), timeout=2).close()
+                    return True
+                except OSError:
+                    return False
+            xray.remove_ruleset()
+            assert reach(), "the second network works before the block rules"
+            subprocess.run(["nft", "-f", "-"], input=xray.blocked_ruleset(allow_lan=False).encode(), check=True)
+            assert not reach(), "the kill switch must stop traffic while the proxy is down"
+            subprocess.run(["nft", "-f", "-"], input=xray.blocked_ruleset(exclude=["10.98.0.0/24"], allow_lan=False).encode(),
+                           check=True)
+            assert reach(), "ignored hosts still go direct"
+            srv.terminate()
+        finally:
+            remote.terminate()
         ok = True
         print("NETNS-OK")
     finally:

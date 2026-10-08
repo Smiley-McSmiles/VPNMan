@@ -917,6 +917,73 @@ class NetworkTests(unittest.TestCase):
         m.network_tick(self.net("tunnel", dev="tun0", gw="10.8.0.1"))      # def1-less redirect: default is the tunnel
         self.assertEqual(len(seen), n)
 
+    def _profile(self, m, name="lab"):
+        from vpnman.profiles import new_profile
+        p = new_profile(name, "openvpn")
+        m.store.save(p)
+        return p
+
+    def test_per_network_rules(self):
+        m = self._mgr(untrusted_action="connect", profile="fastest", trusted=["Home"])
+        p = self._profile(m)
+        net_calls = []
+        m.proxy.net_configure = lambda **kw: net_calls.append(kw)
+        m._net = self.net("Cafe")
+        st = m.network_rule_set(None, server="lab", netproxy="on")
+        self.assertEqual(st["rule"], {"network": "Cafe", "server": p["id"], "netproxy": "on", "xray": ""})
+        m.network_tick(self.net("Cafe"))
+        self.assertEqual(m.calls, [("connect", p["id"], False, False)], "the rule's server wins over 'fastest'")
+        self.assertEqual(net_calls, [{"enabled": True}])
+        m._status.update(state="connected", profile_id=p["id"])
+        m.calls.clear()
+        m.network_tick(self.net("Other"))                          # a network without a rule: the generic action
+        self.assertEqual(m.calls, [])                              # (already connected)
+        m.network_tick(self.net("Cafe"))                           # back on the Cafe network
+        self.assertEqual([c for c in m.calls if c[0] == "connect"], [], "already on the rule's server: nothing to do")
+        m.network_tick(self.net("Home"))                           # trusted: rules do not apply
+        self.assertEqual(len(net_calls), 2)
+        m.network_rule_set("Cafe", netproxy="off")                 # replaces the rule
+        self.assertEqual(len(m.settings.get("network.rules")), 1)
+        m.network_rule_set("Cafe")                                 # nothing asked: the rule is removed
+        self.assertEqual(m.settings.get("network.rules"), [])
+        for bad in ({"netproxy": "maybe"}, {"server": "no-such-profile"}):
+            with self.assertRaises(Exception):
+                m.network_rule_set("Cafe", **bad)
+
+    def test_reconnects_after_a_network_change_and_after_waking_up(self):
+        from vpnman import manager as mg, network as nw
+        m = self._mgr()
+        p = self._profile(m)
+        m._status.update(state="connected", profile_id=p["id"], profile="lab")
+
+        def settle():
+            end = time.time() + 3
+            while time.time() < end and not any(c[0] == "connect" for c in m.calls):
+                time.sleep(0.05)
+        m.network_tick(self.net("A", dev="eno1"))                  # first look
+        m.network_tick(self.net("A", dev="wlan0", gw="10.1.1.1"))  # the gateway and device changed under the tunnel
+        settle()
+        self.assertEqual([c for c in m.calls if c[0] == "connect"], [("connect", p["id"], False, False)])
+        m.calls.clear()
+        self.assertFalse(m.reconnect_if_up("again"), "at most once every 15 seconds")
+        m._reconnected_at = -1e9
+        m.settings.update({"connection": {"reconnect_on_change": False}})
+        self.assertFalse(m.reconnect_if_up("x"))
+        m.settings.update({"connection": {"reconnect_on_change": True}})
+        m._status.update(state="disconnected")
+        self.assertFalse(m.reconnect_if_up("x"), "nothing to reconnect")
+        # waking up: the monitor loop notices the long gap
+        m._status.update(state="connected")
+        real = nw.current
+        nw.current = lambda: {"device": "wlan0"}
+        try:
+            self.assertTrue(m.reconnect_if_up("the computer woke up", wait_for_network=True))
+            settle()
+        finally:
+            nw.current = real
+        self.assertEqual([c for c in m.calls if c[0] == "connect"], [("connect", p["id"], False, False)])
+        self.assertGreater(mg.RESUME_GAP, 3, "the loop wakes every 3 s")
+
     def test_trust_toggle_and_listing(self):
         m = self._mgr()
         m._net = self.net("Home")
@@ -1583,6 +1650,26 @@ class ProxyLeakTests(unittest.TestCase):
         self.assertIn("Cloudflare", r["detail"])
         r = lt.proxy_check(dict(self.PX, server_ips=["104.21.89.88"]), "198.51.100.1", lambda: "104.21.89.88")
         self.assertIn("Cloudflare", r["detail"])
+
+    def test_network_proxy_checks(self):
+        from vpnman import leaktest as lt
+        base = {"enabled": True, "active": True, "blocked": False, "killswitch": True, "error": "",
+                "servers": {"http": "203.0.113.30"}}
+        self.assertEqual(lt.netproxy_check(None, "1.2.3.4", lambda: True, False), [])
+        self.assertEqual(lt.netproxy_check(dict(base, enabled=False), "1.2.3.4", lambda: True, False), [])
+        r = {c["id"]: c for c in lt.netproxy_check(base, "203.0.113.30", lambda: True, False)}
+        self.assertEqual([r[k]["status"] for k in ("netproxy", "netproxy-ip", "netproxy-dns", "netproxy-ipv6")],
+                         ["ok", "ok", "ok", "ok"])
+        r = {c["id"]: c for c in lt.netproxy_check(base, "104.21.89.88", lambda: False, True)}
+        self.assertIn("Cloudflare", r["netproxy-ip"]["detail"])
+        self.assertEqual((r["netproxy-dns"]["status"], r["netproxy-ipv6"]["status"]), ("fail", "fail"))
+        self.assertEqual(lt.netproxy_check(base, "198.51.100.77", lambda: True, False)[1]["status"], "info")
+        blocked = lt.netproxy_check(dict(base, active=False, blocked=True, error="could not resolve p"), None, None, None)
+        self.assertEqual((len(blocked), blocked[0]["status"]), (1, "fail"))
+        self.assertIn("kill switch is blocking", blocked[0]["detail"])
+        off = lt.netproxy_check(dict(base, active=False, killswitch=False, error="boom"), None, None, None)
+        self.assertIn("goes out directly", off[0]["detail"])
+        self.assertIn("kill switch is off", lt.netproxy_check(dict(base, killswitch=False), None, lambda: True, False)[0]["detail"])
 
     def test_csv_export(self):
         from vpnman import conntable
@@ -2406,6 +2493,66 @@ AAAA
         finally:
             blocks.supported = real
 
+    def test_group_order_and_network_rules_from_the_command_line(self):
+        ids = []
+        for name, group in (("a1", "Alpha"), ("b1", "Beta"), ("g1", "Gamma")):
+            p = self.c.call("profiles.import", name=name, filename=name + ".ovpn", files={},
+                            text=OVPN.replace("auth-user-pass\n", ""))
+            self.c.call("profiles.update", ident=p["id"], changes={"group": group})
+            ids.append(p["id"])
+        try:
+            rc, out, _ = self._cli("group", "order")
+            self.assertIn("Alpha, Beta, Gamma", out)
+            rc, out, _ = self._cli("group", "order", "gam", "Alpha")
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(self.c.call("settings.get", key="ui")["group_order"], ["Gamma", "Alpha"])
+            rc, out, _ = self._cli("group", "order")
+            self.assertIn("Gamma, Alpha, Beta", out, "unlisted groups follow, by name")
+            self.assertEqual(self._cli("group", "order", "nosuch")[0], 1)
+            self.assertEqual(self._cli("group", "order", "--reset")[0], 0)
+            self.assertEqual(self.c.call("settings.get", key="ui")["group_order"], [])
+            # per-network rules
+            rc, out, _ = self._cli("networks", "rule", "Cafe", "--server", "b1", "--netproxy", "on")
+            self.assertEqual(rc, 0, out)
+            self.assertIn("connect to the chosen server", out)
+            rc, out, _ = self._cli("networks")
+            self.assertIn("Cafe", out)
+            self.assertIn("connect to b1", out)
+            self.assertEqual(self.c.call("network.status")["rules"][0]["server"], ids[1])
+            self.assertEqual(self._cli("networks", "rule", "Cafe", "--server", "nosuch")[0], 1)
+            rc, out, _ = self._cli("networks", "rule", "Cafe", "--clear")
+            self.assertIn("removed", out)
+            self.assertEqual(self.c.call("network.status")["rules"], [])
+        finally:
+            for i in ids:
+                self.c.call("profiles.remove", ident=i)
+
+    def test_diagnostics_report_hides_the_private_parts(self):
+        from vpnman import diagnostics as dg
+        self.assertEqual(dg.redact("8.8.4.4 10.0.0.2 2606:4700::1111 fe80::1 u@example.org", {"Corp": "<p>"}),
+                         "8.8.x.x 10.0.0.2 2606:4700::x fe80::1 <email>")
+        p = self.c.call("profiles.import", name="Corp-Secret", filename="c.ovpn", files={},
+                        text=OVPN.replace("vpn.example.net", "vpn.topsecret-host.example").replace("auth-user-pass\n", ""))
+        self.c.call("profiles.update", ident=p["id"], changes={"username": "hunter-the-user", "password": "pa55w0rd-secret"})
+        self.c.call("netproxy.set", http={"host": "203.0.113.30", "port": 3128, "user": "prx-user", "password": "prx-secret"})
+        self.c.call("netproxy.set", enabled=False)
+        self.mgr.log.add("info", "connecting Corp-Secret at vpn.topsecret-host.example as hunter-the-user from 8.8.4.4")
+        try:
+            text = self.c.call("diagnostics")
+            for secret in ("Corp-Secret", "topsecret-host", "hunter-the-user", "pa55w0rd", "prx-secret", "prx-user", "8.8.4.4"):
+                self.assertNotIn(secret, text, secret)
+            for want in ("VPNMan %s" % __import__("vpnman").__version__, "== Profiles ==", "1 profiles: openvpn" if False else "openvpn",
+                         "== Recent log", "<profile-", "8.8.x.x"):
+                self.assertIn(want, text, want)
+            out = os.path.join(tempfile.mkdtemp(dir=TMP), "r.txt")
+            rc, o, _ = self._cli("diagnostics", "-o", out)
+            self.assertEqual(rc, 0, o)
+            self.assertEqual(self._cli("diagnostics", "-o", out)[0], 1, "an existing file is not overwritten")
+            self.assertIn("VPNMan", open(out).read())
+        finally:
+            self.c.call("profiles.remove", ident=p["id"])
+            self.c.call("netproxy.set", http={"host": "", "port": 0, "user": "", "password": ""})
+
     def test_proxy_latency_probes_in_parallel(self):
         self._proxy_reset()
         self.c.call("proxy.import", text="\n".join(self.LINK.replace("203.0.113.7", "127.0.0.%d" % i).replace("#Home", "#P%d" % i)
@@ -2581,6 +2728,28 @@ AAAA
             self.assertEqual((rc, self.mgr.settings.get("netproxy")["https"]["host"]), (0, "proxy.example.net"))
             self._cli("netproxy", "clear", "https")
             self.assertEqual(self._cli("netproxy", "set", "https", "noport")[0], 1)
+            # the kill switch: a proxy that cannot start leaves a block-everything rule set, never an open network
+            self.assertTrue(st["killswitch"] if (st := self.c.call("netproxy.status")) else False)
+            st = self.c.call("netproxy.set", http={"host": "nonexistent.invalid", "port": 3128})
+            self.assertFalse(st["active"])
+            self.assertTrue(st["blocked"], st)
+            self.assertIn("could not resolve", st["error"])
+            self.assertIn("guard_out", applied[-1])
+            self.assertNotIn("redirect", applied[-1])
+            self.assertTrue(applied[-1].rstrip().endswith("}") and "    drop" in applied[-1])
+            rc, out, _ = self._cli("netproxy")
+            self.assertIn("BLOCKING all traffic", out)
+            self.assertIn("kill switch: on", out)
+            st = self.c.call("netproxy.set", killswitch=False)
+            self.assertEqual(applied[-1], "REMOVED", "with the kill switch off a failing proxy leaves no rules")
+            self.assertFalse(st["blocked"])
+            rc, out, _ = self._cli("netproxy", "killswitch", "on")
+            self.assertIn("Kill switch is on", out)
+            self.assertTrue(self.c.call("netproxy.status")["blocked"])
+            self.c.call("netproxy.set", http={"host": "203.0.113.30", "port": 3128})
+            self.assertTrue(self.c.call("netproxy.status")["active"], "fixing the address brings it back")
+            self.assertFalse(self.c.call("netproxy.status")["blocked"])
+            self.assertIn("redirect to :", applied[-1], "the redirect rules are back")
             # switching it off hands Xray back to the proxy
             st = self.c.call("netproxy.set", enabled=False)
             self.assertFalse(st["active"])

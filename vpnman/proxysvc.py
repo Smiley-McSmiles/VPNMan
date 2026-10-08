@@ -97,6 +97,7 @@ class ProxyService:
         self._deaths = []
         self.last_failover = None
         self.net_error = ""
+        self.net_blocked = False      # the kill switch is holding all traffic back
         self.net_ips = {}             # kind -> resolved address of the network proxy's servers
         self.exempt = ProxyExempt(lambda: list(self.net_settings().get("apps") or []),
                                   lambda level, text: mgr.log.add(level, text))
@@ -413,7 +414,8 @@ class ProxyService:
                 "installed": bool(xray.binary()), "system_ok": self.system_supported()[0],
                 "socks_port": cfg["socks_port"], "http_port": cfg["http_port"], "dns": cfg["dns"], "udp": cfg["udp"],
                 "failover": bool(cfg.get("failover")), "last_failover": self.last_failover,
-                "server_ip": self.server_ip if running else "", "net": self.net_status()}
+                "server_ip": self.server_ip if running else "", "net": self.net_status(),
+                "paused": bool(cfg["enabled"]) and self.net_wanted()}
 
     # ------------------------------------------------------------------ local proxy (proxy_only, vpn_proxy)
     def _wanted(self, vpn_up):
@@ -489,11 +491,31 @@ class ProxyService:
             self._stop_local()
             self.error = str(e)
 
-    def _stop_local(self):
+    def _stop_local(self, keep_block=False):
+        """Stop Xray and take the redirect away.  ``keep_block``: with the network proxy's kill switch, put the
+        block-everything rules in its place instead (in one step), so nothing goes out directly in between."""
         was = self.runner.alive() or self._fw_on
-        if self._fw_on:
+        block = keep_block and self.net_wanted() and bool(self.net_settings().get("killswitch")) \
+            and self.system_supported()[0]
+        if block:
+            try:
+                cfg = self.net_settings()
+                v4, _v6, _d = xray.split_ignore(cfg.get("ignore"))
+                xray.apply_ruleset(xray.blocked_ruleset(
+                    exclude=sorted(self.m._lock_endpoints) + self.m._route_nets() + v4,
+                    allow_lan=bool(self.m.settings.get("netlock.allow_lan")),
+                    split_mark=split.MARK if self.m._split.active else 0,
+                    skip_cgroup=blocks.NOPROXY_CGROUP if self.exempt.active else ""))
+                self._fw_on = True
+                self.net_blocked = True
+            except xray.ProxyError as e:
+                self.m.log.add("error", "Network proxy kill switch: %s" % e)
+                block = False
+        elif self._fw_on:
             xray.remove_ruleset()
             self._fw_on = False
+        if not block:
+            self.net_blocked = False
         self.runner.stop()
         if self.exempt.active:
             self.exempt.stop()
@@ -570,6 +592,7 @@ class ProxyService:
         out = {"enabled": bool(cfg.get("enabled")), "active": self.owner == "net" and self.runner.alive(),
                "error": self.net_error, "ignore": list(cfg.get("ignore") or []), "apps": list(cfg.get("apps") or []),
                "dns": cfg.get("dns"), "udp": cfg.get("udp"), "servers": dict(self.net_ips),
+               "killswitch": bool(cfg.get("killswitch")), "blocked": self.net_blocked,
                "supported": self.system_supported()[0], "installed": bool(xray.binary())}
         for k in xray.NET_KINDS:
             e = dict(cfg.get(k) or {})
@@ -635,6 +658,8 @@ class ProxyService:
                 if v not in ("block", "direct"):
                     raise ProfileError("udp must be block or direct")
                 tree[k] = v
+            elif k == "killswitch":
+                tree[k] = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
             else:
                 raise ProfileError("unknown network proxy setting: %s" % k)
         if tree.get("enabled") and not self.system_supported()[0]:
@@ -654,7 +679,7 @@ class ProxyService:
                bool(self.m._split.active))
         if key == self.key and self.owner == "net" and self.runner.alive():
             return
-        self._stop_local()
+        self._stop_local(keep_block=True)
         self.net_error = ""
         try:
             ok, why = self.system_supported()
@@ -677,6 +702,7 @@ class ProxyService:
                 "%s %s:%d" % (k.upper(), servers[k][0], servers[k][1]) for k in xray.NET_KINDS if k in servers))
             self.runner.start(conf, [redirect, dns])
             self.owner, self.key, self.server_ip = "net", key, next(iter(ips.values()))
+            self.net_blocked = False
             skip = ""
             if cfg.get("apps"):
                 if split.cgroup_root():
@@ -696,8 +722,10 @@ class ProxyService:
             self.m.log.add("info", "Network proxy up: this computer's TCP and DNS go through it")
         except xray.ProxyError as e:
             self.m.log.add("error", "Network proxy: %s" % e)
-            self._stop_local()
+            self._stop_local(keep_block=True)
             self.net_error = str(e)
+            if self.net_blocked:
+                self.m.log.add("warn", "Network proxy kill switch: all traffic is blocked until the proxy works again")
 
     def carrier_ips(self):
         """Resolve the proxy server before the kill switch is raised."""

@@ -147,6 +147,8 @@ METHODS = {
         bool(listening), bool(local), resolve=bool(resolve)),
     "network.status": lambda m: m.network_status(),
     "network.trust": lambda m, name=None, trusted=True: m.network_trust(name, trusted),
+    "network.rule": lambda m, network=None, server="", netproxy="", xray_proxy="":
+        m.network_rule_set(network, server, netproxy, xray_proxy),
     "backup.export": lambda m: m.backup_export(),
     "backup.import": lambda m, data, replace=False, restore_settings=None: m.backup_import(data, replace, restore_settings),
     "history": lambda m, limit=50: m.history.list(limit),
@@ -156,6 +158,7 @@ METHODS = {
     "schedule.set": lambda m, entries=None, enabled=None: m.schedule_set(entries, enabled),
     "logs": lambda m, since=0, limit=1000: dict(zip(("entries", "last"), m.log.since(since, limit))),
     "discover.networkmanager": lambda m: backends.NetworkManager.discover(),
+    "diagnostics": lambda m: __import__("vpnman.diagnostics", fromlist=["build"]).build(m),
     "system": lambda m: {"os": plat.os_family(), "distro": plat.distro()[1], "init": plat.init_system(),
                          "firewall": _fw_name()},
 }

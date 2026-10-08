@@ -43,6 +43,8 @@ def summary(st):
     servers = ["%s %s:%s" % (k.upper(), st[k]["host"], st[k]["port"]) for k, _t in KINDS if (st.get(k) or {}).get("host")]
     if not st.get("enabled"):
         return "Off" + (" – " + ", ".join(servers) if servers else "")
+    if st.get("blocked"):
+        return "Blocking all traffic until the proxy works again: %s" % (st.get("error") or "not running")
     if st.get("error") and not st.get("active"):
         return "Not running: %s" % st["error"]
     text = "All traffic goes through " + (", ".join(servers) or "–")
@@ -120,6 +122,16 @@ class ProxyPreferences:
                         "below go direct. Needs Linux (nftables) and Xray.")
         self.switch = NetworkProxySwitch(model, icon=False, fail=self.toast)
         top.add(self.switch.row)
+        self.kill = Adw.SwitchRow(title="Block traffic if the proxy fails",
+                                  subtitle="If the proxy stops working, nothing goes out directly - it waits until the "
+                                           "proxy is back (ignored hosts and the local network still work)")
+        self.kill.connect("notify::active", self._on_kill)
+        top.add(self.kill)
+        self.test = Adw.ActionRow(title="Test the proxy", subtitle="Checks that traffic, DNS and IPv6 really go through it")
+        self.test_btn = Gtk.Button(label="Test", valign=Gtk.Align.CENTER)
+        self.test_btn.connect("clicked", self._run_test)
+        self.test.add_suffix(self.test_btn)
+        top.add(self.test)
         imp = Adw.ActionRow(title="Copy from the desktop settings",
                             subtitle="Fill in the proxies set in GNOME, Cinnamon or KDE Plasma")
         btn = Gtk.Button(label="Import", valign=Gtk.Align.CENTER)
@@ -153,9 +165,30 @@ class ProxyPreferences:
         model.listen(self.sync)
         model.refresh()
 
+    def _on_kill(self, *_):
+        if not self._quiet:
+            self.model.set(fail=lambda msg, *_: (self.toast(msg), self.model.refresh()), killswitch=self.kill.get_active())
+
+    def _run_test(self, *_):
+        self.test_btn.set_sensitive(False)
+        self.test.set_subtitle("Testing…")
+
+        def done(res):
+            self.test_btn.set_sensitive(True)
+            rows = [c for c in res["checks"] if c["id"].startswith("netproxy")]
+            if not rows:
+                self.test.set_subtitle("Switch the Network Proxy on first")
+                return
+            mark = {"ok": "✔", "warn": "!", "fail": "✘", "info": "·"}
+            self.test.set_subtitle(GLib.markup_escape_text("\n".join("%s %s: %s" % (mark.get(c["status"], "?"), c["name"], c["detail"])
+                                                                     for c in rows)))
+        self.model.rpc("leaktest", done, lambda msg, *_: (self.test_btn.set_sensitive(True), self.test.set_subtitle(
+            GLib.markup_escape_text(msg))))
+
     # ---- model -> widgets
     def sync(self, st):
         self._quiet = True
+        self.kill.set_active(bool(st.get("killswitch", True)))
         for kind, _t in KINDS:
             e = st.get(kind) or {}
             if kind not in self._dirty:

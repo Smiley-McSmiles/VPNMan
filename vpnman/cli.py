@@ -812,7 +812,10 @@ class Cli:
                 print(dim("  no proxy server set - e.g.: vpnman netproxy set http proxy.example.com:3128"))
             print("  ignored: %s" % (", ".join(st["ignore"]) or "-"))
             print("  programs that skip it: %s" % (", ".join(st["apps"]) or "-"))
-            print(dim("  dns %s (over TCP through the proxy), other UDP: %s" % (st["dns"], st["udp"])))
+            print(dim("  dns %s (over TCP through the proxy), other UDP: %s, kill switch: %s" % (
+                st["dns"], st["udp"], "on" if st["killswitch"] else "off")))
+            if st.get("blocked"):
+                print(red("  BLOCKING all traffic until the proxy works again"))
             if st["error"]:
                 print(red("  %s" % st["error"]))
             if not st["supported"]:
@@ -851,6 +854,15 @@ class Cli:
             st = self.call("netproxy.set", **{act: vals})
             print("%s: %s" % ("Ignored hosts" if act == "ignore" else "Programs that skip the proxy",
                               ", ".join(st[act]) or "none"))
+            return 0
+        if act == "killswitch":
+            if len(items) > 1 or (items and items[0] not in ("on", "off")):
+                raise RpcError("usage: vpnman netproxy killswitch [on|off]")
+            if items:
+                self.call("netproxy.set", killswitch=items[0] == "on")
+            on = self.call("netproxy.status")["killswitch"]
+            print("Kill switch is %s%s." % ("on" if on else "off", ": while the proxy cannot work, all traffic is blocked" if on
+                                           else ": if the proxy fails, traffic goes out directly"))
             return 0
         if act in ("dns", "udp"):
             if len(items) != 1:
@@ -955,8 +967,25 @@ class Cli:
             if not groups:
                 print("No groups yet. Importing a folder makes one per sub-folder, or: vpnman edit PROFILE group=NAME")
             return 0
+        if act == "order":
+            names = ([a.group] if a.group else []) + list(a.changes)
+            cur = self.call("settings.get", key="ui")["group_order"]
+            if not names and not a.reset:
+                shown = [g for g in cur if g in groups] + sorted((g for g in groups if g not in cur), key=str.lower)
+                print("Group order: %s" % (", ".join(shown) or "-"))
+                return 0
+            order = []
+            for n in names:
+                hit = [g for g in groups if g.lower() == n.lower()] or [g for g in groups if n.lower() in g.lower()]
+                if len(hit) != 1:
+                    raise RpcError("no such group: %s" % n if not hit else "'%s' is ambiguous: %s" % (n, ", ".join(hit)))
+                if hit[0] not in order:
+                    order.append(hit[0])
+            self.call("settings.update", tree={"ui": {"group_order": [] if a.reset else order}})
+            print("Group order: %s" % (", ".join(order) if order else "alphabetical"))
+            return 0
         if act != "edit":
-            raise RpcError("unknown action %r (list, edit)" % act)
+            raise RpcError("unknown action %r (list, edit, order)" % act)
         if not a.group or not a.changes and not a.ask_password:
             raise RpcError("usage: vpnman group edit GROUP KEY=VALUE...  (keys: name, username, password, stunnel, "
                            "stunnel_sni, stunnel_verify)")
@@ -1034,14 +1063,36 @@ class Cli:
             print("VPNMan %s is the latest version." % res["current"])
         return 0 if not res["newer"] else 10
 
+    def cmd_diagnostics(self, a):
+        text = self.call("diagnostics")
+        if not a.output or a.output == "-":
+            sys.stdout.write(text)
+            return 0
+        if os.path.exists(a.output) and not a.force:
+            raise RpcError("%s exists (use --force to overwrite it)" % a.output)
+        with open(a.output, "w") as fh:
+            fh.write(text)
+        print("Saved %s. Read it before you share it - passwords, user names, server and network names and public "
+              "addresses are removed, but check." % a.output)
+        return 0
+
     def cmd_networks(self, a):
         act = a.action or "show"
         if act in ("trust", "untrust"):
             st = self.call("network.trust", name=a.name, trusted=(act == "trust"))
             print("%s %s" % ("Trusted:" if act == "trust" else "No longer trusted:", a.name or st["id"]))
             return 0
+        if act == "rule":
+            st = self.call("network.rule", network=a.name, server="" if a.clear else (a.server or ""),
+                           netproxy="" if a.clear else (a.netproxy or ""), xray_proxy="" if a.clear else (a.xray or ""))
+            r = next((x for x in st.get("rules") or [] if x["network"].lower() == (a.name or st["id"] or "").lower()), None)
+            print("Rule of %s: %s" % (a.name or st["id"], "removed" if not r else ", ".join(
+                x for x in ("connect to the chosen server" if r.get("server") else "", "network proxy " + r["netproxy"]
+                            if r.get("netproxy") else "", "Xray proxy " + (r["xray"] if r["xray"] == "off" else "chosen")
+                            if r.get("xray") else "") if x)))
+            return 0
         if act != "show":
-            raise RpcError("unknown action %r (show, trust, untrust)" % act)
+            raise RpcError("unknown action %r (show, trust, untrust, rule)" % act)
         st = self.call("network.status")
         cfg = self.call("settings.get", key="network")
         if st["id"]:
@@ -1050,6 +1101,14 @@ class Cli:
         else:
             print("Current network: none detected")
         print("Trusted:   %s" % (", ".join(cfg["trusted"]) or "-"))
+        if st.get("rules"):
+            profs = {p["id"]: p["name"] for p in self.call("profiles.list")}
+            print("Rules:")
+            for r in st["rules"]:
+                bits = ([("connect to " + profs.get(r["server"], r["server"]))] if r.get("server") else []) + \
+                       (["network proxy " + r["netproxy"]] if r.get("netproxy") else []) + \
+                       (["Xray proxy " + ("off" if r["xray"] == "off" else "chosen")] if r.get("xray") else [])
+                print("  %-24s %s" % (r["network"], ", ".join(bits)))
         print("On an untrusted network: %s    On a trusted network: %s    Server: %s"
               % (cfg["untrusted_action"], cfg["trusted_action"], cfg["profile"]))
         print(dim("Change with: vpnman set network.untrusted_action connect | vpnman set network.trusted_action disconnect"))
@@ -1659,6 +1718,13 @@ def build_parser():
     s.add_argument("--qr", action="store_true", help="link: also print a QR code")
     s.add_argument("--latency", "-l", action="store_true", help="list: measure every server")
     s.add_argument("--json", action="store_true", help=JSON)
+    s = add("diagnostics", "a report for bug reports, with the private parts removed",
+            "Print (or save with -o FILE) a report of this installation: versions, system, tools, state, profiles and\n"
+            "settings, firewall tables and the recent log. Passwords, user names, server and network names and public\n"
+            "addresses are removed (local addresses stay); share it in a bug report after reading it.",
+            ["vpnman diagnostics -o vpnman-report.txt", "vpnman diagnostics | less"])
+    s.add_argument("-o", "--output", help="write the report to this file (default: standard output)")
+    s.add_argument("--force", action="store_true", help="overwrite an existing file")
     s = add("netproxy", "a proxy server all traffic goes through (after the VPN while one is connected)",
             "Send this computer's traffic through an HTTP or SOCKS5 proxy (Linux, nftables; the engine is xray). With\n"
             "no VPN, programs reach the internet through the proxy; while a VPN is connected, through the VPN to the\n"
@@ -1672,11 +1738,14 @@ def build_parser():
             "  ignore HOST...              hosts that go direct: addresses, networks, domains (replaces the list)\n"
             "  apps NAME...                programs that go direct (replaces the list; needs cgroup v2)\n"
             "  dns IP                      the DNS server asked through the proxy (default 1.1.1.1)\n"
-            "  udp block|direct            UDP other than DNS: drop it, or let it out directly",
+            "  udp block|direct            UDP other than DNS: drop it, or let it out directly\n"
+            "  killswitch [on|off]         while the proxy cannot work (down, restarting, a wrong address) block all\n"
+            "                              traffic instead of letting it out directly (default on; ignored hosts and\n"
+            "                              the local network still work)",
             ["vpnman netproxy set http proxy.example.com:3128", "vpnman netproxy set https proxy.example.com:3128",
              "vpnman netproxy set socks 10.0.0.5:1080 --user me --ask-password", "vpnman netproxy on",
              "vpnman netproxy ignore localhost 127.0.0.0/8 ::1 '*.corp.example'", "vpnman netproxy apps steam"])
-    s.add_argument("action", nargs="?", choices=["status", "on", "off", "set", "clear", "ignore", "apps", "dns", "udp"],
+    s.add_argument("action", nargs="?", choices=["status", "on", "off", "set", "clear", "ignore", "apps", "dns", "udp", "killswitch"],
                    help="default: status")
     s.add_argument("items", nargs="*", metavar="ARG", help="see the actions above")
     s.add_argument("--user", help="set: user name for a proxy that needs a login")
@@ -1725,10 +1794,13 @@ def build_parser():
             "password, stunnel=HOST[:PORT] (or off), stunnel_sni, stunnel_verify. Whatever you do not name stays\n"
             "as it is. The SSL tunnel applies to the OpenVPN servers of the group only.",
             ["vpnman group", "vpnman group edit Germany name=DE", "vpnman group edit DE username=bob --ask-password",
-             "vpnman group edit DE stunnel=vpn.example.com:443", "vpnman group edit DE stunnel=off"])
-    s.add_argument("action", nargs="?", choices=["list", "edit"], help="default: list")
+             "vpnman group edit DE stunnel=vpn.example.com:443", "vpnman group edit DE stunnel=off",
+             "vpnman group order Work Home Streaming", "vpnman group order --reset"])
+    s.add_argument("action", nargs="?", choices=["list", "edit", "order"], help="default: list")
     s.add_argument("group", nargs="?", help="group name (or a unique part of it)")
-    s.add_argument("changes", nargs="*", metavar="KEY=VALUE", help="what to change on every server of the group")
+    s.add_argument("changes", nargs="*", metavar="KEY=VALUE", help="edit: what to change on every server of the group; "
+                                                                 "order: more group names, in the order you want")
+    s.add_argument("--reset", action="store_true", help="order: back to alphabetical")
     s.add_argument("--ask-password", action="store_true", help="prompt for a new password for all of them")
     s = add("failover", "servers to try, in order, when a profile keeps failing",
             "Show or set the servers tried, in order, when PROFILE keeps failing (after connection.retry_max\n"
@@ -1748,9 +1820,15 @@ def build_parser():
             "'vpnman set network.untrusted_action connect' to connect automatically everywhere else and\n"
             "'vpnman set network.trusted_action disconnect' to disconnect on trusted ones. Wi-Fi is identified\n"
             "by its name (SSID), wired networks by the gateway's hardware address.",
-            ["vpnman networks", "vpnman networks trust", "vpnman networks trust \"Home WiFi\"", "vpnman networks untrust"])
-    s.add_argument("action", nargs="?", choices=["show", "trust", "untrust"], help="default: show")
-    s.add_argument("name", nargs="?", help="network to trust / untrust (default: the current one)")
+            ["vpnman networks", "vpnman networks trust", "vpnman networks trust \"Home WiFi\"", "vpnman networks untrust",
+             "vpnman networks rule --server \"Work\" --netproxy on", "vpnman networks rule \"Cafe\" --server fastest-one",
+             "vpnman networks rule --clear"])
+    s.add_argument("action", nargs="?", choices=["show", "trust", "untrust", "rule"], help="default: show")
+    s.add_argument("name", nargs="?", help="network to trust / untrust / set a rule for (default: the current one)")
+    s.add_argument("--server", help="rule: connect to this server when joining the network")
+    s.add_argument("--netproxy", choices=["on", "off"], help="rule: turn the network proxy on or off when joining it")
+    s.add_argument("--xray", metavar="PROXY|off", help="rule: use this Xray proxy (or turn it off) when joining it")
+    s.add_argument("--clear", action="store_true", help="rule: remove the rule of the network")
     s = add("routes", "addresses, networks or domains that skip the VPN",
             "Destinations that always use your normal connection instead of the VPN, and that the kill switch\n"
             "never blocks. Give IP addresses, networks (CIDR) or domain names (re-resolved when needed).",

@@ -32,6 +32,7 @@ DEFAULTS = {
         "failover": True,          # try another server when one keeps failing
         "failover_group": True,    # ... preferring the servers in the same group
         "timeout": 60,
+        "reconnect_on_change": True,   # reconnect at once when the computer wakes up or the network (gateway) changes
         "openvpn_args": [],        # extra raw arguments appended to OpenVPN
     },
     "access": {
@@ -43,6 +44,7 @@ DEFAULTS = {
         "untrusted_action": "off", # off | connect  (when joining a network that is not trusted)
         "trusted_action": "off",   # off | disconnect  (when joining a trusted one - only if we connected automatically)
         "profile": "last",         # what to connect to: last | fastest | <profile id or name>
+        "rules": [],               # per network: [{network, server (profile id or ""), netproxy ("", on, off), xray ("", off, <proxy id>)}]
     },
     "schedule": {
         "enabled": True,
@@ -80,6 +82,7 @@ DEFAULTS = {
         "apps": [],                # programs that go direct
         "dns": "1.1.1.1",          # answers this computer's DNS, asked over TCP through the proxy
         "udp": "block",            # block | direct - UDP other than DNS (a proxy cannot carry it)
+        "killswitch": True,        # while the proxy cannot work (down, restarting, a wrong address) block all traffic
     },
     "events": {
         "pre_connect": "",
@@ -92,6 +95,7 @@ DEFAULTS = {
     },
     "ui": {
         "notifications": True,
+        "group_order": [],         # server groups in this order (ungrouped servers first, unlisted groups after, by name)
     },
 }
 

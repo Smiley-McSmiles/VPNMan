@@ -115,6 +115,10 @@ Port 80 goes to the HTTP proxy, 443 to the HTTPS proxy, 21 to the FTP proxy, eve
 asked over TCP through the proxy. Ignored hosts (addresses, networks, `*.example.com`) and a list of programs go
 direct. **Copy from the desktop settings** fills it in from GNOME, Cinnamon or KDE Plasma. Linux (nftables) and Xray.
 
+**Kill switch:** if the proxy cannot work (Xray down or restarting, an address that does not resolve), traffic is
+*blocked* until it does instead of going out directly (`vpnman netproxy killswitch off` to change that). The connection
+test checks the proxy too: which address websites see, DNS and IPv6.
+
 ```sh
 vpnman netproxy set http proxy.example.com:3128
 vpnman netproxy set https proxy.example.com:3128
@@ -194,7 +198,10 @@ installed it).
 | Credentials per profile (stored root-only) | ✔ |
 | Desktop notifications | ✔ |
 | Auto-connect at system start (daemon-side: waits for the network, keeps retrying; `last` / `fastest` / a profile) | ✔ |
-| System tray (StatusNotifierItem): status icon, Connect/Disconnect, Network Lock toggle, Proxy on/off, Show, Quit | ✔ |
+| System tray (StatusNotifierItem): status icon, Connect/Disconnect, quick-connect to the last server and favourites, Network Lock toggle, Proxy on/off, Show, Quit | ✔ |
+| **Reconnects at once** when the computer wakes up or the network changes; **per-network rules** (connect to this server / turn the network proxy on or off on this Wi-Fi) (`vpnman networks rule`) | ✔ |
+| **Group order and folding** in the server list (▲ ▼ ▾ in a group's heading, `vpnman group order`) | ✔ |
+| **Diagnostics report** for bug reports with passwords, names and public addresses removed (`vpnman diagnostics`, main menu → Save Diagnostics) | ✔ |
 | Start the tray app at login (XDG autostart; GNOME, KDE, XFCE, …) | ✔ |
 | Proxy / Tor / SSH / SSL tunnels as transports | ✘ |
 

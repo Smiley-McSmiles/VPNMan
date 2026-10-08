@@ -540,6 +540,24 @@ def redirect_ruleset(tcp_port, dns_port, *, exclude=(), allow_lan=True, split_ma
     return "\n".join(lines) + "\n"
 
 
+def blocked_ruleset(*, exclude=(), allow_lan=True, split_mark=0, skip_cgroup=""):
+    """The network proxy's kill switch: while the proxy cannot work, nothing leaves this computer except loopback,
+    Xray's own marked connections (none while it is down), the networks in ``exclude`` (ignored hosts, the VPN server),
+    the local network when ``allow_lan``, the programs that skip the proxy, and DHCP.  Replaces the redirect rules
+    in one step, so there is no moment in which traffic goes out directly."""
+    skip = sorted(set(["127.0.0.0/8"] + (LAN4 if allow_lan else []) + [str(ipaddress.ip_network(e, strict=False))
+                                                                      for e in exclude if ":" not in str(e)]))
+    marks = ["0x%x" % MARK] + (["0x%x" % split_mark] if split_mark else [])
+    lines = ["table inet %s" % NFT_TABLE, "delete table inet %s" % NFT_TABLE, "table inet %s {" % NFT_TABLE,
+             "  chain guard_out {", "    type filter hook output priority -105; policy accept;"]
+    lines += ["    meta mark %s accept" % m for m in marks]
+    if skip_cgroup:
+        lines.append('    socket cgroupv2 level 1 "%s" accept' % skip_cgroup)
+    lines += ['    oifname "lo" accept', "    ip daddr { %s } accept" % ", ".join(skip),
+              "    udp dport { 67, 68 } accept", "    drop", "  }", "}"]
+    return "\n".join(lines) + "\n"
+
+
 def apply_ruleset(text):
     rc, out = plat.run([plat.which("nft") or "nft", "-f", "-"], input=text)
     if rc:

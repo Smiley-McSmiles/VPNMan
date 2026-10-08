@@ -706,6 +706,7 @@ class MainWindow(Adw.ApplicationWindow):
         backup_menu.append("Restore Backup…", "win.backup-import")
         main_menu.append_section(None, backup_menu)
         main_menu.append("Check for Updates…", "win.check-updates")
+        main_menu.append("Save Diagnostics…", "win.diagnostics")
         main_menu.append("About VPNMan", "app.about")
         main_menu.append("Quit", "app.quit")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=main_menu,
@@ -734,7 +735,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         for name, cb in (("import", self.on_import), ("add", self.on_add),
                          ("backup-export", self.on_backup_export), ("backup-import", self.on_backup_import),
-                         ("check-updates", self.on_check_updates)):
+                         ("check-updates", self.on_check_updates), ("diagnostics", self.on_diagnostics)):
             act = Gio.SimpleAction.new(name, None)
             act.connect("activate", cb)
             self.add_action(act)
@@ -751,6 +752,14 @@ class MainWindow(Adw.ApplicationWindow):
             return True
         return False
 
+    def tray_servers(self):
+        """The servers the tray offers to connect to: the last one used, then up to five favourites."""
+        last = (self.status or {}).get("last_profile")
+        by_id = {p["id"]: p for p in self.profiles if not p.get("blacklisted")}
+        out = [by_id[last]] if last in by_id else []
+        out += [p for p in self.profiles if p.get("favorite") and p["id"] in by_id and p["id"] != last][:5]
+        return out
+
     def tray_menu(self):
         st = self.status or {}
         state = st.get("state", "disconnected")
@@ -765,10 +774,26 @@ class MainWindow(Adw.ApplicationWindow):
             {"separator": True},
             {"label": "Disconnecting…" if leaving else "Disconnect" if active else "Connect",
              "enabled": self._daemon_ok and not leaving, "callback": self.on_main_button},
-            {"label": "Turn Network Lock %s" % ("Off" if locked else "On"), "enabled": self._daemon_ok,
-             "callback": lambda: rpc("netlock.disable" if locked else "netlock.enable",
-                                     lambda *_: self.refresh(), self._fail)},
         ]
+        servers = self.tray_servers()
+        if servers:
+            items.append({"separator": True})
+            live = st.get("profile_id") if state in ACTIVE else None
+            last = st.get("last_profile")
+            for p in servers:
+                name = p["name"] if len(p["name"]) <= 38 else p["name"][:37] + "…"
+                if p["id"] == live:
+                    items.append({"label": "✔ %s (%s)" % (name, "connected" if state == "connected" else "connecting"),
+                                  "enabled": False})
+                else:
+                    items.append({"label": "%s %s%s" % ("Switch to" if live else "Connect to", name,
+                                                       "  (last used)" if p["id"] == last else ""),
+                                  "enabled": self._daemon_ok and not leaving,
+                                  "callback": lambda pid=p["id"]: self.connect_to(pid, stay=True)})
+        items += [{"separator": True},
+                  {"label": "Turn Network Lock %s" % ("Off" if locked else "On"), "enabled": self._daemon_ok,
+                   "callback": lambda: rpc("netlock.disable" if locked else "netlock.enable",
+                                           lambda *_: self.refresh(), self._fail)}]
         px = self.proxy_page.status or {}
         if px.get("name"):                          # a proxy is chosen: offer to switch it on or off
             on = bool(px.get("enabled"))
@@ -787,7 +812,8 @@ class MainWindow(Adw.ApplicationWindow):
         if not tray:
             return
         state = st["state"]
-        key = (state, st["netlock"]["engaged"], st.get("profile"), self._disconnecting)
+        key = (state, st["netlock"]["engaged"], st.get("profile"), self._disconnecting,
+               tuple(p["id"] for p in self.tray_servers()))
         tip = {"connected": "Connected to %s" % st.get("profile"), "disconnected": "Not connected",
                "connecting": "Connecting…", "reconnecting": "Reconnecting…", "disconnecting": "Disconnecting…",
                "error": "Connection failed"}.get(state, state)
@@ -990,7 +1016,7 @@ class MainWindow(Adw.ApplicationWindow):
     def _build_vpn_servers(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.search = Gtk.SearchEntry(placeholder_text="Search servers")
-        self.search.connect("search-changed", lambda *_: self.listbox.invalidate_filter())
+        self.search.connect("search-changed", lambda *_: (self._apply_collapse(), self.listbox.invalidate_headers()))
         top = Gtk.Box(spacing=6)
         self.search.set_hexpand(True)
         self.sort_modes = [("favourites", "Favourites first"), ("name", "Name"), ("latency", "Fastest first")]
@@ -1072,6 +1098,8 @@ class MainWindow(Adw.ApplicationWindow):
         return box
 
     def _filter(self, row):
+        if getattr(row, "folded", False):
+            return False
         q = self.search.get_text().lower()
         return not q or q in row.profile["name"].lower() or q in row.profile["protocol"] or \
             q in (row.profile.get("server") or "").lower()
@@ -1079,9 +1107,92 @@ class MainWindow(Adw.ApplicationWindow):
     def sort_mode(self):
         return self.sort_modes[self.sort_drop.get_selected()][0]
 
+    def group_order(self):
+        return [g.lower() for g in (self.settings.get("ui") or {}).get("group_order") or []]
+
+    def _group_key(self, group):
+        """Ungrouped servers first, then the groups in the saved order, then the others by name."""
+        if not group:
+            return (-1, "")
+        order, g = self.group_order(), group.lower()
+        return (order.index(g) if g in order else len(order), g)
+
+    def shown_groups(self):
+        """The groups as listed now, top to bottom."""
+        return sorted({p.get("group") for p in self.profiles if p.get("group")}, key=self._group_key)
+
+    def _move_group(self, group, delta):
+        groups = self.shown_groups()
+        i = groups.index(group)
+        j = i + delta
+        if not 0 <= j < len(groups):
+            return
+        groups[i], groups[j] = groups[j], groups[i]
+        tree = {"ui": {"group_order": groups}}
+        self.settings.setdefault("ui", {})["group_order"] = groups        # the list follows at once
+        self.listbox.invalidate_sort()
+        self.listbox.invalidate_headers()
+        rpc("settings.update", None, self._fail, tree=tree)
+
+    def collapsed_groups(self):
+        app = self.get_application()
+        return {g.lower() for g in (app.userconfig.get("collapsed_groups") or [])} if app else set()
+
+    def _toggle_group(self, group):
+        app = self.get_application()
+        cur = self.collapsed_groups()
+        cur ^= {group.lower()}
+        if app:
+            app.userconfig.set("collapsed_groups", sorted(cur))
+        self._apply_collapse()
+        self.listbox.invalidate_headers()
+
+    def _apply_collapse(self):
+        """Fold the servers of collapsed groups into one "N servers" row under the group's heading.  The server in use
+        stays visible, and a search shows everything again."""
+        q = self.search.get_text().strip()
+        collapsed = set() if q else self.collapsed_groups()
+        live = (self.status or {}).get("profile_id") if (self.status or {}).get("state") in BUSY else None
+        self._collapse_key = (frozenset(collapsed), live)
+        hidden = {}
+        for row in sorted(self._rows.values(), key=self._sort_key):
+            g = (row.profile.get("group") or "").lower()
+            row.folded = False
+            self._summarize(row, None)
+            if g and g in collapsed and row.profile["id"] != live:
+                hidden.setdefault(g, []).append(row)
+        for g, rows in hidden.items():
+            rows[0].folded = False
+            self._summarize(rows[0], len(rows))
+            for r in rows[1:]:
+                r.folded = True
+        self.listbox.invalidate_filter()
+
+    @staticmethod
+    def _summarize(row, count):
+        """``count`` servers folded into this row (None: show the server itself again)."""
+        if count is None:
+            if getattr(row, "orig", None):
+                row.set_title(row.orig[0])
+                row.set_subtitle(row.orig[1])
+                row.orig = None
+            for w in row.parts:
+                w.set_visible(True)
+            row.dot.set_visible(True)
+            row.set_selectable(True)
+            return
+        if not getattr(row, "orig", None):
+            row.orig = (row.get_title(), row.get_subtitle())
+        row.set_title("%d server%s" % (count, "" if count == 1 else "s"))
+        row.set_subtitle("Folded - use ▸ in the heading to show them")
+        for w in row.parts:
+            w.set_visible(False)
+        row.dot.set_visible(False)
+        row.set_selectable(False)
+
     def _sort_key(self, row):
         p = row.profile
-        group = (p.get("group") or "").lower()          # ungrouped servers first, then each group together
+        group = self._group_key(p.get("group"))
         name = p["name"].lower()
         mode = self.sort_mode()
         if mode == "name":
@@ -1106,9 +1217,24 @@ class MainWindow(Adw.ApplicationWindow):
             btn = Gtk.Button(label="Edit…", valign=Gtk.Align.CENTER, tooltip_text="Rename this group or edit all its servers")
             btn.add_css_class("flat")
             btn.connect("clicked", lambda *_, g=group: self._edit_group(g))
+            folded = group.lower() in self.collapsed_groups() and not self.search.get_text().strip()
+            fold = Gtk.Button(label="▸" if folded else "▾", valign=Gtk.Align.CENTER, margin_start=6, width_request=34,
+                              tooltip_text="Show the servers of this group" if folded else "Fold the servers of this group")
+            fold.add_css_class("flat")
+            fold.connect("clicked", lambda *_, g=group: self._toggle_group(g))
             box = Gtk.Box(spacing=6, margin_top=10, margin_bottom=4)
+            box.append(fold)
             box.append(lbl)
             box.append(btn)
+            box.append(Gtk.Box(hexpand=True))
+            groups = self.shown_groups()
+            for text, delta, tip in (("▲", -1, "Move this group up"), ("▼", 1, "Move this group down")):
+                mv = Gtk.Button(label=text, valign=Gtk.Align.CENTER, tooltip_text=tip)
+                mv.add_css_class("flat")
+                mv.set_sensitive(group in groups and 0 <= groups.index(group) + delta < len(groups))
+                mv.connect("clicked", lambda *_, g=group, d=delta: self._move_group(g, d))
+                box.append(mv)
+            lbl.set_margin_start(0)
             row.set_header(box)
         else:
             row.set_header(None)
@@ -1165,6 +1291,7 @@ class MainWindow(Adw.ApplicationWindow):
         row.add_suffix(go)
         row.dot = Gtk.Label(label="●", opacity=0)        # the server in use; always there so the names line up
         row.add_prefix(row.dot)
+        row.parts, row.folded, row.orig = [lat, fav, menu, go], False, None     # what a folded group row hides
         self._sync_row(row)
         return row
 
@@ -1202,6 +1329,10 @@ class MainWindow(Adw.ApplicationWindow):
     def _sync_rows(self):
         for row in self._rows.values():
             self._sync_row(row)
+        live = (self.status or {}).get("profile_id") if (self.status or {}).get("state") in BUSY else None
+        if getattr(self, "_collapse_key", None) != (frozenset(self.collapsed_groups() if not self.search.get_text().strip() else ()),
+                                                    live):
+            self._apply_collapse()                        # the server in use moved: it must stay visible
 
     def _edit(self, p):
         ProfileDialog(self, "edit", self.protocols, profile=p, on_done=lambda: self.refresh(full=True)).present()
@@ -1466,6 +1597,20 @@ class MainWindow(Adw.ApplicationWindow):
         d.connect("response", lambda d, r: r == "export" and save_file(
             self, "Save backup", "vpnman-backup-%s.tar.gz" % time.strftime("%Y%m%d"), chosen))
         d.present()
+
+    def on_diagnostics(self, *_):
+        """Save a report for bug reports (private parts removed by the daemon)."""
+        def chosen(path):
+            def write(text):
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "w") as fh:
+                        fh.write(text)
+                    self.toast("Diagnostics saved - read it before you share it")
+                except OSError as e:
+                    self.toast("Could not save the report: %s" % e)
+            rpc("diagnostics", write, self._fail)
+        save_file(self, "Save diagnostics", "vpnman-diagnostics-%s.txt" % time.strftime("%Y%m%d-%H%M"), chosen)
 
     def on_backup_import(self, *_):
         def picked(files):
@@ -1733,6 +1878,7 @@ class MainWindow(Adw.ApplicationWindow):
                 self.listbox.select_row(row)
         self._update_latency()
         self.srv_stack.set_visible_child_name("list" if profiles else "empty")
+        self._apply_collapse()
         restore_scroll(adj, pos)                      # the rebuilt list must not throw the user back to the top
         self._sync_auto()
 
@@ -1867,6 +2013,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
                            "When one keeps failing: its failover list, then its group, then favourites"))
         g.add(self._switch("connection.failover_group", "Prefer servers in the same group"))
         g.add(self._spin("connection.timeout", "Connection timeout (s)", 10, 300))
+        g.add(self._switch("connection.reconnect_on_change", "Reconnect when the network changes",
+                           "Reconnect at once after the computer wakes up or you switch Wi-Fi / Ethernet"))
         page.add(g)
         g = Adw.PreferencesGroup(title="OpenVPN")
         g.add(self._entry("connection.openvpn_args", "Extra arguments", "comma separated"))
@@ -1906,6 +2054,21 @@ class PreferencesWindow(Adw.PreferencesWindow):
         self.net_combo(g, "network.profile", "Connect to",
                        [("last", "Last used server"), ("fastest", "Fastest server")]
                        + [(p["id"], p["name"]) for p in parent.profiles])
+        page.add(g)
+        g = Adw.PreferencesGroup(title="Rules for This Network",
+                                 description="What to do when you join the network you are on now. A server rule wins over "
+                                             "the automation above. Trusted networks have no rules.")
+        self.rule_server = Adw.ComboRow(title="Connect to", model=Gtk.StringList.new(
+            ["Don't change"] + [p["name"] for p in parent.profiles]))
+        self.rule_ids = [""] + [p["id"] for p in parent.profiles]
+        self.rule_netproxy = Adw.ComboRow(title="Network Proxy", model=Gtk.StringList.new(["Don't change", "Turn on", "Turn off"]))
+        self.rule_xray = Adw.ComboRow(title="Proxy (Xray)", model=Gtk.StringList.new(
+            ["Don't change", "Turn off"] + [p["name"] for p in getattr(parent.proxy_page, "proxies", [])]))
+        self.rule_xray_ids = ["", "off"] + [p["id"] for p in getattr(parent.proxy_page, "proxies", [])]
+        for r in (self.rule_server, self.rule_netproxy, self.rule_xray):
+            r.connect("notify::selected", self._save_rule)
+            g.add(r)
+        self.rule_quiet = False
         page.add(g)
         self.add(page)
         rpc("network.status", self._on_network, None)
@@ -1976,8 +2139,25 @@ class PreferencesWindow(Adw.PreferencesWindow):
         group.add(row)
         return row
 
+    def _save_rule(self, *_):
+        st = getattr(self, "_net", {})
+        if self.rule_quiet or not st.get("id"):
+            return
+        rpc("network.rule", self._on_network, lambda m, *_: self.add_toast(Adw.Toast(title=m)),
+            network=st["id"], server=self.rule_ids[max(0, self.rule_server.get_selected())],
+            netproxy=["", "on", "off"][max(0, self.rule_netproxy.get_selected())],
+            xray_proxy=self.rule_xray_ids[max(0, self.rule_xray.get_selected())])
+
     def _on_network(self, st):
         self._net = st
+        rule = st.get("rule") or {}
+        self.rule_quiet = True
+        self.rule_server.set_selected(self.rule_ids.index(rule.get("server", "")) if rule.get("server", "") in self.rule_ids else 0)
+        self.rule_netproxy.set_selected({"": 0, "on": 1, "off": 2}.get(rule.get("netproxy", ""), 0))
+        self.rule_xray.set_selected(self.rule_xray_ids.index(rule.get("xray", "")) if rule.get("xray", "") in self.rule_xray_ids else 0)
+        for r in (self.rule_server, self.rule_netproxy, self.rule_xray):
+            r.set_sensitive(bool(st.get("id")) and not st.get("trusted"))
+        self.rule_quiet = False
         if st.get("id"):
             self.net_row.set_subtitle(GLib.markup_escape_text("%s%s" % (st["name"], " - trusted" if st["trusted"] else "")))
             self.net_btn.set_label("Stop Trusting" if st["trusted"] else "Trust This Network")

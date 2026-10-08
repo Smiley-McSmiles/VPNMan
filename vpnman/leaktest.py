@@ -228,12 +228,54 @@ def proxy_check(px, direct_ip, via_proxy):
         px.get("http"), px.get("socks"), via, "; others as %s" % direct_ip if direct_ip else "", cf_exit, cf_note))
 
 
+def netproxy_check(net, exit_ip, resolves, v6_leaks):
+    """The network proxy (all traffic through an HTTP/SOCKS5 proxy).  ``net``: ProxyService.net_status(); ``exit_ip``:
+    what websites see; ``resolves``: whether a name lookup works; ``v6_leaks``: whether IPv6 gets out around it.
+    Returns a list of checks (empty when the proxy is off)."""
+    if not net or not net.get("enabled"):
+        return []
+    out = []
+    servers = list((net.get("servers") or {}).values())
+    if net.get("blocked"):
+        out.append(check("netproxy", "Network proxy", "fail", "The proxy is not working (%s) and the kill switch is blocking "
+                         "all traffic until it does." % (net.get("error") or "no reason given")))
+        return out
+    if not net.get("active"):
+        out.append(check("netproxy", "Network proxy", "fail", "Switched on but not running: %s%s" % (
+            net.get("error") or "unknown reason", "" if net.get("killswitch") else
+            ". The kill switch is off, so traffic goes out directly.")))
+        return out
+    out.append(check("netproxy", "Network proxy", "ok", "Running; this computer's traffic goes through %s%s." % (
+        ", ".join(servers) or "the proxy", "" if net.get("killswitch") else
+        " (the kill switch is off: if it fails, traffic would go out directly)")))
+    if exit_ip:
+        if exit_ip in servers:
+            out.append(check("netproxy-ip", "Address websites see", "ok", "%s - the proxy server's own address." % exit_ip))
+        elif is_cloudflare(exit_ip):
+            out.append(check("netproxy-ip", "Address websites see", "ok", "%s - a Cloudflare address (the proxy sends traffic "
+                             "out through Cloudflare)." % exit_ip))
+        else:
+            out.append(check("netproxy-ip", "Address websites see", "info", "%s - where the proxy server sends traffic out "
+                             "(not this computer's own address as long as it differs from what you had without the proxy)."
+                             % exit_ip))
+    dns_ok = resolves() if callable(resolves) else bool(resolves)
+    leaks = v6_leaks() if callable(v6_leaks) else bool(v6_leaks)
+    out.append(check("netproxy-dns", "DNS through the proxy", "ok" if dns_ok else "fail",
+                     "Name lookups go through the proxy." if dns_ok else "Name lookups fail - the proxy cannot resolve "
+                     "names (check its DNS setting)."))
+    out.append(check("netproxy-ipv6", "IPv6", "fail" if leaks else "ok",
+                     "IPv6 gets out around the proxy." if leaks else "IPv6 is blocked, so nothing goes around the proxy."))
+    return out
+
+
 def run(status, settings, locked_blocks_ipv6, resolv_path="/etc/resolv.conf", proxy=None):
     """Run every check for the live `status` (Manager.status()); ``proxy``: see proxy_check."""
     results = []
     tunnel = status.get("iface")
     connected = status.get("state") == "connected" and tunnel
-    proxied = bool(proxy and proxy.get("running"))
+    net = (proxy or {}).get("net") or {}
+    net_on = bool(net.get("enabled") and net.get("active"))
+    proxied = bool(proxy and proxy.get("running")) or net_on
     ip = None
     if not connected:
         results.append(check("tunnel", "VPN tunnel", "info" if proxied else "warn",
@@ -247,17 +289,26 @@ def run(status, settings, locked_blocks_ipv6, resolv_path="/etc/resolv.conf", pr
                                  "Websites see %s" % ip if ip else "Could not read the IP lookup response."))
         except Exception as e:  # noqa: BLE001
             results.append(check("ip", "Public IP", "warn", "IP lookup failed: %s" % e))
-    pc = proxy_check(proxy, ip, lambda: public_ip(settings.get("checks.url"),
-                                                  proxy="http://127.0.0.1:%s" % (proxy or {}).get("http")))
+    pc = None if (proxy or {}).get("paused") else proxy_check(
+        proxy, ip, lambda: public_ip(settings.get("checks.url"), proxy="http://127.0.0.1:%s" % (proxy or {}).get("http")))
     if pc:
         results.append(pc)
+    if net.get("enabled"):
+        def resolves():
+            try:
+                socket.getaddrinfo("example.com", 443)
+                return True
+            except OSError:
+                return False
+        results += netproxy_check(net, ip, resolves if net_on else False,
+                                  (lambda: connect_via(None, PROBE6, 2.0)) if net_on else False)
     gw, physical = plat.default_gateway()
     if physical == tunnel:
         physical = None
     linux = plat.os_family() == "linux"
     engaged = bool(status.get("netlock", {}).get("engaged"))
     if linux:
-        mark = 0x5658 if proxied and proxy.get("mode") == "system" else 0     # xray.MARK
+        mark = 0x5658 if net_on or (proxied and proxy.get("mode") == "system") else 0     # xray.MARK
         results.append(killswitch_check(engaged, physical, lambda: connect_via(physical, PROBE4, mark=mark)))
     else:
         results.append(check("killswitch", "Kill switch", "info", "The kill switch self-test needs Linux."))

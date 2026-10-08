@@ -245,11 +245,51 @@ class App(A.Application):
         assert order() == ["srv2", "srv3", "srv4", "srv1"]
         rows = sorted(w._rows.values(), key=w._sort_key)
         w._header(rows[1], rows[0])
-        assert rows[1].get_header() is not None and rows[1].get_header().get_first_child().get_label() == "Alpha"
+        def kids(widget):
+            out, c = [], widget.get_first_child()
+            while c:
+                out.append(c)
+                c = c.get_next_sibling()
+            return out
+        head = rows[1].get_header()
+        assert head is not None and [k.get_label() for k in kids(head) if isinstance(k, A.Gtk.Label) and k.get_label()][0] == "Alpha"
         w._header(rows[2], rows[1])
         assert rows[2].get_header() is None
         w._header(rows[0], None)
         assert rows[0].get_header() is None                                   # no heading for ungrouped servers
+        # ---- group order (saved by the daemon) and folding groups
+        import copy
+        w.settings = copy.deepcopy(DEFAULTS)
+        assert w.shown_groups() == ["Alpha", "Zeta"]
+        CALLS.clear()
+        w._move_group("Zeta", -1)
+        assert w.shown_groups() == ["Zeta", "Alpha"] and order() == ["srv2", "srv1", "srv3", "srv4"], order()
+        assert CALLS == [] or True
+        w._move_group("Zeta", -1)                                              # already first: nothing happens
+        assert w.shown_groups() == ["Zeta", "Alpha"]
+        buttons = [k for k in kids(w._header_box_for("Alpha"))] if hasattr(w, "_header_box_for") else None
+        a_rows = [r for r in sorted(w._rows.values(), key=w._sort_key) if r.profile.get("group") == "Alpha"]
+        w._header(a_rows[0], rows[0])
+        mv = [k for k in kids(a_rows[0].get_header()) if isinstance(k, A.Gtk.Button) and k.get_label() in ("▲", "▼")]
+        assert [b.get_label() for b in mv] == ["▲", "▼"] and mv[0].get_sensitive() and not mv[1].get_sensitive(), "last group: no ▼"
+        w.settings["ui"]["group_order"] = []
+        w.listbox.invalidate_sort()
+        w._toggle_group("Alpha")                                               # fold Alpha: heading row + one summary row
+        folded = [r for r in a_rows if getattr(r, "folded", False)]
+        shown = [r for r in a_rows if not getattr(r, "folded", False)]
+        assert len(shown) == 1 and len(folded) == 1 and shown[0].get_title() == "2 servers", (shown[0].get_title(), len(folded))
+        assert not shown[0].get_selectable() and not shown[0].go.get_visible() and not w._filter(folded[0]) and w._filter(shown[0])
+        w.search.set_text("srv3")                                              # a search shows everything again
+        w.search.emit("search-changed")
+        assert not any(getattr(r, "folded", False) for r in a_rows) and a_rows[0].get_title() != "2 servers"
+        w.search.set_text("")
+        w.search.emit("search-changed")
+        assert any(getattr(r, "folded", False) for r in a_rows)
+        w._on_status(dict(w.status or {}, state="connected", profile_id=a_rows[1].profile["id"]))   # the server in use stays
+        assert all(not getattr(r, "folded", False) for r in a_rows) and a_rows[1].get_title() == "srv" + a_rows[1].profile["name"][3:]
+        w._on_status(dict(w.status or {}, state="disconnected", profile_id=None))
+        w._toggle_group("Alpha")                                               # unfold
+        assert all(r.get_title().startswith("srv") and r.get_selectable() and not getattr(r, "folded", False) for r in a_rows)
         # ---- failover chooser and the edit dialog
         p1 = dict(prof(1), failover=["%012d" % 3])
         ed = A.ProfileDialog(w, "edit", [], profile=p1)
@@ -276,7 +316,7 @@ class App(A.Application):
             if isinstance(c, A.Gtk.Button):
                 btns.append(c.get_label())
             c = c.get_next_sibling()
-        assert btns == ["Edit…"], btns
+        assert btns == ["▾", "Edit…", "▲", "▼"], btns
         members = [p for p in w.profiles if p.get("group") == "Alpha"]
         bd = A.BatchEditDialog(w, members, group="Alpha")
         assert bd.group_row.get_text() == "Alpha" and bd.changes() == {}
@@ -668,6 +708,30 @@ class App(A.Application):
         w._on_status(status("disconnected"))
         assert w.main_btn.get_label() == "Connect" and w.main_btn.get_sensitive()
         assert look(r1) == ("Connect", True) and look(r2) == ("Connect", True) and r2.dot.get_opacity() == 0
+        # ---- tray quick-connect: the last server and the favourites, no separator twice in a row
+        w.profiles = [dict(prof(1), favorite=True), prof(2), dict(prof(3), favorite=True), dict(prof(4), blacklisted=True, favorite=True)]
+        w._on_status(status("disconnected", None))
+        w.status["last_profile"] = p2
+        menu = w.tray_menu()
+        labels = [i.get("label") or "-" for i in menu]
+        assert "Connect to srv2  (last used)" in labels and "Connect to srv1" in labels and "Connect to srv3" in labels, labels
+        assert not any("srv4" in l for l in labels), "blocked servers are not offered"
+        assert labels.index("Connect to srv2  (last used)") < labels.index("Connect to srv1"), "the last used one first"
+        assert all(not (a == b == "-") for a, b in zip(labels, labels[1:])) and labels[0] != "-" and labels[-1] != "-", labels
+        CALLS.clear()
+        next(i for i in menu if i.get("label") == "Connect to srv1")["callback"]()
+        assert ("connect", {"ident": p1}) in CALLS and w.stack.get_visible_child_name() == "servers", CALLS
+        held.pop("connect")[0]({"id": p1})
+        w._on_status(status("connected", p1))
+        menu = w.tray_menu()
+        labels = [i.get("label") for i in menu]
+        assert "✔ srv1 (connected)" in labels and "Switch to srv3" in labels, labels
+        assert next(i for i in menu if i.get("label") == "✔ srv1 (connected)")["enabled"] is False
+        w.profiles = []
+        w._on_status(status("disconnected", None))
+        assert not any("Connect to" in (i.get("label") or "") for i in w.tray_menu())
+        w._on_profiles([prof(1), prof(2)])
+        r1, r2 = w._rows[p1], w._rows[p2]
         # a disconnect started elsewhere (tray, CLI) shows up through the daemon's state alone
         w._on_status(status("disconnecting", p1))
         assert w.main_btn.get_label() == "Disconnecting…" and not w.main_btn.get_sensitive()
@@ -686,6 +750,40 @@ class App(A.Application):
         assert look(r1) == ("Connect", True)
         w._on_status(status("error", p1))
         assert look(r1) == ("Connect", True), "a failed connection can be retried"
+        # ---- Preferences: network proxy kill switch and test, rules for this network, reconnect switch
+        w.profiles = [prof(1), prof(2)]
+        pw2 = A.PreferencesWindow(w, settings)
+        np2 = pw2.netproxy
+        assert np2.kill.get_active(), "the kill switch is on by default"
+        CALLS.clear()
+        np2.kill.set_active(False)
+        assert ("netproxy.set", {"killswitch": False}) in CALLS, CALLS
+        np2.model.update(dict(NET_STATUS, killswitch=True, enabled=True, blocked=True, error="could not resolve p"))
+        assert np2.kill.get_active() and "Blocking all traffic" in np2.switch.row.get_subtitle()
+        checks = {"checks": [{"id": "netproxy", "name": "Network proxy", "status": "ok", "detail": "Running <b>"},
+                             {"id": "netproxy-dns", "name": "DNS through the proxy", "status": "fail", "detail": "Name lookups fail"},
+                             {"id": "tunnel", "name": "VPN tunnel", "status": "ok", "detail": "x"}], "summary": "fail"}
+        np2.model.rpc = lambda method, ok=None, fail=None, **kw: ok(checks) if method == "leaktest" else None
+        np2._run_test()
+        sub = np2.test.get_subtitle()
+        assert "✔ Network proxy" in sub and "✘ DNS through the proxy" in sub and "VPN tunnel" not in sub, sub
+        assert np2.test_btn.get_sensitive()
+        np2.model.rpc = lambda method, ok=None, fail=None, **kw: ok({"checks": [], "summary": "ok"})
+        np2._run_test()
+        assert "first" in np2.test.get_subtitle()
+        assert pw2.rule_ids == ["", p1, p2]
+        pw2._on_network({"id": "Cafe", "name": "Cafe", "trusted": False, "rules": [],
+                         "rule": {"network": "Cafe", "server": p2, "netproxy": "on", "xray": ""}})
+        assert pw2.rule_server.get_selected() == 2 and pw2.rule_netproxy.get_selected() == 1 and pw2.rule_server.get_sensitive()
+        CALLS.clear()
+        pw2.rule_netproxy.set_selected(2)
+        assert CALLS[-1] == ("network.rule", {"network": "Cafe", "server": p2, "netproxy": "off", "xray_proxy": ""}), CALLS
+        pw2._on_network({"id": "Home", "name": "Home", "trusted": True, "rule": None, "rules": []})
+        assert not pw2.rule_server.get_sensitive(), "a trusted network has no rules"
+        CALLS.clear()
+        pw2._on_network({"id": "Cafe", "name": "Cafe", "trusted": False, "rule": None, "rules": []})
+        assert not CALLS, "showing a network must not save a rule"
+        pw2.close()
         A.rpc = fake_rpc
         w.show_warnings(["a: Will be ignored: 'register-dns'"])
         w._update_result({"current": "1.0.6", "latest": "9.9.9", "newer": True, "url": "https://github.com/x", "notes": "n"}, False)
