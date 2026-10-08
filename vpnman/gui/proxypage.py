@@ -10,6 +10,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 
 from .. import qr  # noqa: E402
+from ..leaktest import is_cloudflare  # noqa: E402
 from ..xray import fetch  # noqa: E402
 from .keys import close_keys, restore_scroll  # noqa: E402
 
@@ -369,7 +370,8 @@ class ProxyPage(Gtk.Box):
 
     def update_list(self, proxies):
         self.proxies = proxies
-        sig = [(p["id"], p["name"], p["protocol"], p["server"], p["port"], p.get("group", "")) for p in proxies]
+        sig = [(p["id"], p["name"], p["protocol"], p["server"], p["port"], p.get("group", ""), tuple(p.get("ips") or ()))
+               for p in proxies]
         if sig == self._sig:
             # nothing but, perhaps, the chosen proxy changed: leave the rows (and the scroll position) alone
             for pid, row in self._rows.items():
@@ -445,8 +447,14 @@ class ProxyPage(Gtk.Box):
 
     # ---- rows
     def _make_row(self, p):
+        ips = p.get("ips") or []
+        cf = bool(ips) and all(is_cloudflare(i) for i in ips)
         row = Adw.ActionRow(title=GLib.markup_escape_text(p["name"]),
-                            subtitle=GLib.markup_escape_text("%s  ·  %s:%s" % (p["protocol"], p["server"], p["port"])))
+                            subtitle=GLib.markup_escape_text("%s  ·  %s:%s%s" % (p["protocol"], p["server"], p["port"],
+                                                                                "  ·  via Cloudflare" if cf else "")))
+        if cf:
+            row.set_tooltip_text("%s resolves to %s, a Cloudflare address: the server is behind Cloudflare's CDN or runs "
+                                 "on Cloudflare, so Cloudflare is what this computer connects to." % (p["server"], ips[0]))
         row.proxy = p
         use = Gtk.CheckButton(valign=Gtk.Align.CENTER, tooltip_text="Use this proxy")
         use.set_active(bool(p.get("selected")))

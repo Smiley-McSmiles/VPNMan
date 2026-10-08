@@ -713,8 +713,9 @@ class Cli:
                 raise RpcError("usage: vpnman proxy show NAME")
             pid = self._proxy_ident(items[0])
             p = next(p for p in self.call("proxy.list") if p["id"] == pid)
+            info = self.call("proxy.info", ident=pid)
             if a.json:
-                print(json.dumps(p, indent=2))
+                print(json.dumps(dict(p, info=info), indent=2))
                 return 0
             for k, label in (("name", "Name"), ("protocol", "Protocol"), ("server", "Server"), ("port", "Port"),
                              ("group", "Group"), ("source", "Subscription"), ("notes", "Notes")):
@@ -722,6 +723,14 @@ class Cli:
                     print("%s %s" % (bold("%-13s" % (label + ":")), p[k]))
             print("%s %s" % (bold("Favorite:    "), "yes" if p.get("favorite") else "no"))
             print("%s %s" % (bold("In use:      "), green("yes") if p.get("selected") else "no"))
+            print("%s %s" % (bold("Connects to: "), ", ".join(info["ips"]) or yellow("could not resolve %s" % info["address"])))
+            print("%s %s%s%s" % (bold("Transport:   "), info["network"], " + %s" % info["security"]
+                                 if info["security"] != "none" else " (no encryption layer)",
+                                 "".join("  %s=%s" % (k, info[k]) for k in ("sni", "host", "path") if info[k])))
+            if info["cloudflare"]:
+                print(yellow("Cloudflare:   these are Cloudflare addresses - the server is behind Cloudflare's CDN or runs "
+                             "on Cloudflare,\n              so Cloudflare (not the server itself) is what this computer "
+                             "talks to."))
             return 0
         if act == "sources":
             srcs = self.call("proxy.sources")

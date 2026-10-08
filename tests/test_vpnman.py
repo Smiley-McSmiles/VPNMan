@@ -1450,6 +1450,24 @@ class ProxyLeakTests(unittest.TestCase):
         self.assertEqual(lt.proxy_check(system, "192.0.2.50", None)["status"], "warn")
         self.assertEqual(lt.proxy_check(dict(self.PX, carrier=True, order="proxy_vpn"), None, None)["status"], "ok")
 
+    def test_ip_answers_and_cloudflare(self):
+        from vpnman import leaktest as lt
+        self.assertEqual(lt.parse_ip_answer('{"ip":"198.51.100.4"}'), "198.51.100.4")
+        self.assertEqual(lt.parse_ip_answer("2001:db8::7\n"), "2001:db8::7")
+        for junk in ("<html><body style='color:#ffffff'>Error 1.2.3.4</body></html>", '{"ip":"nope"}', "", None):
+            self.assertIsNone(lt.parse_ip_answer(junk), junk)
+        self.assertTrue(lt.is_cloudflare("104.21.89.88") and lt.is_cloudflare("172.67.1.1")
+                        and lt.is_cloudflare("2606:4700::6810:1"))
+        self.assertFalse(lt.is_cloudflare("203.0.113.7") or lt.is_cloudflare("8.8.8.8") or lt.is_cloudflare("x"))
+        cf = dict(self.PX, mode="system", server_ips=["104.21.89.88"])
+        r = lt.proxy_check(cf, "198.51.100.1", None)
+        self.assertEqual(r["status"], "ok", "behind Cloudflare the exit address is not the server address")
+        self.assertIn("Cloudflare", r["detail"])
+        r = lt.proxy_check(dict(self.PX, mode="system"), "104.28.1.1", None)
+        self.assertIn("Cloudflare", r["detail"])
+        r = lt.proxy_check(dict(self.PX, server_ips=["104.21.89.88"]), "198.51.100.1", lambda: "104.21.89.88")
+        self.assertIn("Cloudflare", r["detail"])
+
     def test_csv_export(self):
         from vpnman import conntable
         rows = [{"dir": "out", "proto": "tcp", "v6": False, "local": "10.0.0.2", "lport": 40000, "remote": "93.184.216.34",
@@ -2184,6 +2202,12 @@ AAAA
                 self.c.call("proxy.fastest")
         finally:
             svc.probe = real
+        info = self.c.call("proxy.info", ident="P12")
+        self.assertEqual((info["address"], info["ips"], info["cloudflare"], info["network"], info["security"], info["sni"]),
+                         ("203.0.113.12", ["203.0.113.12"], False, "tcp", "reality", "example.com"))
+        self.assertNotIn("11111111", json.dumps(info), "no secrets in the info")
+        rc, out, _ = self._cli("proxy", "show", "P12")
+        self.assertRegex(out, r"Connects to:\S*\s+203\.0\.113\.12")
         link = self.c.call("proxy.link", ident="P12")
         self.assertTrue(link["link"].startswith("vless://") and "203.0.113.12" in link["link"])
         rc, out, _ = self._cli("proxy", "link", "P12", "--qr")

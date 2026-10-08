@@ -200,6 +200,31 @@ class ProxyService:
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
             return dict(ex.map(probe, todo))
 
+    def info(self, ident, resolve=True):
+        """What a proxy really connects to (without its secrets): the server name and the addresses it resolves to,
+        the transport, TLS name and Host header - and whether those addresses belong to Cloudflare."""
+        from . import leaktest
+        p = self.store.find(ident)
+        ob = p.get("outbound") or {}
+        st = ob.get("settings") or {}
+        node = (st.get("vnext") or st.get("servers") or [{}])[0]
+        ss = ob.get("streamSettings") or {}
+        net = ss.get("network") or "tcp"
+        sec = ss.get("security") or "none"
+        tls = ss.get("tlsSettings") or ss.get("realitySettings") or {}
+        nets = {"ws": "wsSettings", "httpupgrade": "httpupgradeSettings", "xhttp": "xhttpSettings",
+                "splithttp": "xhttpSettings", "grpc": "grpcSettings", "h2": "httpSettings", "http": "httpSettings"}
+        tp = ss.get(nets.get(net, ""), {}) or {}
+        host = (tp.get("headers") or {}).get("Host") or tp.get("host") or ""
+        if isinstance(host, list):
+            host = ", ".join(host)
+        ips = self.ips(p, live=resolve)
+        cf = [ip for ip in ips if leaktest.is_cloudflare(ip)]
+        return {"id": p["id"], "name": p["name"], "protocol": p["protocol"], "address": node.get("address") or "",
+                "port": node.get("port") or p.get("port"), "ips": ips, "cloudflare": bool(ips) and len(cf) == len(ips),
+                "network": net, "security": sec, "sni": tls.get("serverName") or "", "host": host,
+                "path": tp.get("path") or tp.get("serviceName") or ""}
+
     def link(self, ident):
         """The share link of one proxy (to move it to another device).  Empty for proxies imported from an Xray config."""
         p = self.store.find(ident)

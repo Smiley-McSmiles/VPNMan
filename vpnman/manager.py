@@ -1116,10 +1116,13 @@ class Manager:
             req = urllib.request.Request(url, headers={"User-Agent": "vpnman/" + __version__})
             with urllib.request.urlopen(req, timeout=10, context=ssl.create_default_context()) as r:
                 body = r.read(2048).decode("utf-8", "replace")
-            m = re.search(r'"ip"\s*:\s*"([^"]+)"', body) or re.search(r"(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]{6,})", body)
-            if m and not stop.is_set() and stop is self._stop:
-                self._set(public_ip=m.group(1))
-                self.log.add("info", "Public IP is now %s" % m.group(1))
+            ip = leaktest.parse_ip_answer(body)
+            if not ip:
+                self.log.add("warn", "Public IP check: %s did not answer with an address" % url)
+            elif not stop.is_set() and stop is self._stop:
+                self._set(public_ip=ip)
+                self.log.add("info", "Public IP is now %s%s" % (ip, " (a Cloudflare address)" if leaktest.is_cloudflare(ip)
+                                                                else ""))
         except Exception as e:  # noqa: BLE001
             self.log.add("warn", "Public IP check failed: %s" % e)
 

@@ -242,7 +242,12 @@ Proxies served through Xray, alone or together with the VPN. See
 The proxies (or only those of \fIGROUP\fR); a dot marks the one in use.
 .TP
 .B proxy show \fINAME\fR [\fB\-\-json\fR]
-Everything known about one proxy: protocol, server, port, group, subscription, notes, favourite, in use.
+Everything known about one proxy: protocol, server, port, group, subscription, notes, favourite, in use, the
+addresses the server name resolves to (what this computer really connects to) and the transport, TLS name, Host header
+and path (no secrets). When those addresses belong to Cloudflare it says so: such proxies sit behind Cloudflare's CDN or
+run on Cloudflare (Workers), so this computer talks to Cloudflare, and websites may see a Cloudflare address (WARP)
+instead of the server's. The app shows the same as "via Cloudflare" under the proxy's name, and the connection test
+names Cloudflare when it is involved.
 .TP
 .B proxy link \fINAME\fR [\fB\-\-qr\fR]
 Print the proxy's share link, to move it to a phone or another computer; \fB\-\-qr\fR also draws it as a QR code in the
