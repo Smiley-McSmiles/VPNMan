@@ -71,6 +71,7 @@ complete -c vpnman -n '__fish_seen_subcommand_from connect' -l timeout -d 'how l
 complete -c vpnman -n '__fish_seen_subcommand_from connect' -a '(vpnman list --names 2>/dev/null)'
 complete -c vpnman -n '__fish_seen_subcommand_from connections' -l listening -s l -d 'also show sockets that wait for connections'
 complete -c vpnman -n '__fish_seen_subcommand_from connections' -l local -d 'also show connections within this computer (loopback)'
+complete -c vpnman -n '__fish_seen_subcommand_from connections' -l resolve -s r -d 'show host names instead of addresses where reverse DNS knows them (sends DNS queries)'
 complete -c vpnman -n '__fish_seen_subcommand_from connections' -l watch -s w -d 'refresh every 2 seconds'
 complete -c vpnman -n '__fish_seen_subcommand_from connections' -l json -d 'print machine-readable JSON instead of text'
 complete -c vpnman -n '__fish_seen_subcommand_from doctor' -l fix -d 'link launcher/icons into /usr/share and rebuild icon caches (root)'

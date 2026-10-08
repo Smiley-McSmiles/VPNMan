@@ -225,6 +225,7 @@ install without reinstalling.
 ```sh
 sh install.sh --check              # no root needed: report what is missing on this machine (Python, GTK/libadwaita, VPN tools, firewall, init)
 sudo sh install.sh --install-deps  # optional: pulls dependencies via apt/dnf/pacman/xbps/apk/zypper/pkg_add/pkg
+sudo sh install.sh --xray-only     # optional: downloads Xray (checksum verified) for `vpnman proxy`; no service, any init system
 sudo sh install.sh                 # installs to /usr/local, sets up + starts the service for your init system
                                    # (no sudo? use `doas sh install.sh` or `su -c 'sh install.sh'`)
 sudo ./install.sh --prefix /usr --uninstall [--purge]

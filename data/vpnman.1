@@ -203,12 +203,14 @@ Test the live connection: that the tunnel is up, the public IP, that traffic out
 while the kill switch is engaged, that the DNS servers sit behind the tunnel and that IPv6 cannot bypass it.
 Prints a mark for each check (ok, warning, fail, info). Exit status 1 if a check fails. Connect first.
 .TP
-.B connections \fR[\fB\-l\fR|\fB\-\-listening\fR] [\fB\-\-local\fR] [\fB\-w\fR|\fB\-\-watch\fR] [\fB\-\-json\fR]
+.B connections \fR[\fB\-l\fR|\fB\-\-listening\fR] [\fB\-\-local\fR] [\fB\-r\fR|\fB\-\-resolve\fR] [\fB\-w\fR|\fB\-\-watch\fR] [\fB\-\-json\fR]
 The network connections of this computer as the daemon sees them: the way (\fBin\fR, \fBout\fR, \fBlisten\fR), the
 application and its pid, the protocol (TCP, UDP, with a 6 for IPv6), the local and remote address and port, and the TCP
 state. A TCP connection is \fBin\fR when a local listener accepted it. Sockets that only wait for connections
 (\fB\-\-listening\fR) and connections that never leave this computer (\fB\-\-local\fR) are hidden unless asked for.
-\fB\-\-watch\fR refreshes every two seconds. Linux reads \fI/proc/net\fR and finds the owner of every socket through
+\fB\-\-resolve\fR shows host names instead of addresses where reverse DNS knows them (the lookups are done in the
+background by the daemon, so names appear a moment later; they are cached for ten minutes and cost DNS queries, which is
+why it is off by default). \fB\-\-watch\fR refreshes every two seconds. Linux reads \fI/proc/net\fR and finds the owner of every socket through
 \fI/proc/PID/fd\fR; FreeBSD uses \fBsockstat\fR; other BSD systems use \fBnetstat\fR and show no application names.
 The same table is on the Connection page of the application.
 .TP
@@ -347,7 +349,7 @@ pycairo (without it a text line is shown instead). Its pages are:
 .B Connection
 Choose a server and connect or disconnect; status, public IP, uptime and a live traffic graph; a live
 \fBConnections\fR table (way, application and pid, protocol, local and remote address and port, state, refreshed every two
-seconds while the page is open, with a filter box and switches for listening sockets and local connections; a
+seconds while the page is open, with a filter box and switches for listening sockets, local connections and \fBResolve names\fR; a
 \fBPop out\fR button opens the same table in a window of its own with a \fBPause\fR button for reading it; right\-click a
 row to \fBcopy\fR its remote or local address, the application or the whole row, to \fBforce\-close\fR the connection, to
 \fBstop\fR or \fBforce\-kill\fR the application (only your own programs) and to \fBblock\fR the remote address, the address
@@ -535,7 +537,7 @@ VPNMan can use VLESS, VMess, Trojan and Shadowsocks servers (including Reality, 
 mKCP and HTTP/2 transports) through \fBXray\fR (https://github.com/XTLS/Xray\-core), a single self\-contained program
 that is not part of VPNMan: install the \fBxray\fR package of your distribution if it has one, or the release binary for
 your system (Xray publishes builds for Linux, FreeBSD, OpenBSD and others) and put it where \fBPATH\fR finds it
-(\fI/usr/local/bin\fR is searched too). \fBvpnman doctor\fR reports whether it is found.
+(\fI/usr/local/bin\fR is searched too). \fBvpnman doctor\fR reports whether it is found. \fBsudo ./install.sh \-\-xray\-only\fR (from the source directory) downloads and installs it for you.
 .PP
 Proxies are stored like VPN profiles, root\-only in \fI/etc/vpnman/proxies/\fR, and are managed in the \fBProxy\fR
 sub\-tab of the Servers page or with \fBvpnman proxy\fR. Share links and subscriptions are converted to Xray's
@@ -816,14 +818,20 @@ by \fBpackage.sh\fR), or from the source tarball:
 tar xf vpnman-VERSION.tar.gz && cd vpnman-VERSION
 sudo ./install.sh                       # to /usr/local, service enabled for this machine
 sudo ./install.sh \-\-prefix /usr         # another prefix (recommended on desktops)
-sudo ./install.sh \-\-install\-deps        # also install dependencies with the native package manager
+sudo ./install.sh \-\-install\-deps        # also install dependencies with the native package manager (and Xray)
+sudo ./install.sh \-\-xray\-only           # only download and install Xray, the engine of "vpnman proxy"
 \&./install.sh \-\-check                   # only report what is missing
 .fi
 .PP
 \fBinstall.sh\fR options: \fB\-\-prefix DIR\fR; \fB\-\-init SYSTEM\fR (\fIauto\fR, \fIsystemd\fR, \fIsysv\fR, \fIopenrc\fR,
 \fIrunit\fR, \fIopenbsd\fR, \fIfreebsd\fR, \fIall\-linux\fR, \fInone\fR); \fB\-\-no\-post\fR (do not create the group, touch
-caches or enable the service); \fB\-\-no\-system\-links\fR; \fB\-\-install\-deps\fR; \fB\-\-check\fR; \fB\-\-uninstall\fR and
-\fB\-\-purge\fR. With \fBDESTDIR\fR set it stages files for packaging. It supports apt, dnf, pacman, xbps, apk, zypper,
+caches or enable the service); \fB\-\-no\-system\-links\fR; \fB\-\-install\-deps\fR; \fB\-\-install\-xray\fR; \fB\-\-xray\-only\fR; \fB\-\-check\fR; \fB\-\-uninstall\fR and
+\fB\-\-purge\fR. \fB\-\-install\-xray\fR downloads the official Xray release for this machine (Linux, FreeBSD or OpenBSD; it needs curl or
+wget), verifies it against the checksum published next to it (a mismatch aborts, a missing checksum file only warns) and installs the
+single program as \fIPREFIX\fR/bin/xray, replacing an older copy. Xray needs no service of its own, so this works on any init
+system. \fB\-\-xray\-only\fR does just that (as a normal user if \fIPREFIX\fR/bin is writable); \fB\-\-install\-deps\fR does it
+when Xray is missing. \fB\-\-uninstall\fR removes an Xray that this installer put there and leaves any other copy alone.
+With \fBDESTDIR\fR set it stages files for packaging. It supports apt, dnf, pacman, xbps, apk, zypper,
 pkg_add and pkg for dependencies, installs wrapper scripts that choose a Python interpreter that really has
 PyGObject (so desktop launchers work even when another Python comes first in \fBPATH\fR), copies the launcher and
 icons into \fI/usr/share\fR when installing elsewhere (some desktops ignore \fI/usr/local/share\fR), restores SELinux

@@ -444,6 +444,101 @@ class InstallTests(unittest.TestCase):
             self.assertIn(key, text)
 
 
+class XrayInstallTests(unittest.TestCase):
+    """`install.sh --xray-only` against a local web server that stands in for GitHub."""
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def asset(self):
+        import platform
+        m = platform.machine().lower()
+        arch = {"x86_64": "64", "amd64": "64", "aarch64": "arm64-v8a", "arm64": "arm64-v8a"}.get(m)
+        if sys.platform != "linux" or not arch:
+            self.skipTest("no Xray release asset name is assumed for this machine")
+        return "Xray-linux-" + arch
+
+    def serve(self, files):
+        import http.server
+        import functools
+        root = tempfile.mkdtemp(dir=TMP)
+        for name, data in files.items():
+            with open(os.path.join(root, name), "wb") as fh:
+                fh.write(data)
+
+        class Quiet(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=root))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        return "http://127.0.0.1:%d" % srv.server_address[1]
+
+    def zipped(self):
+        import hashlib
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("xray", "#!/bin/sh\necho 'Xray 9.9.9 (fake)'\n")
+            z.writestr("geoip.dat", "x")
+        data = buf.getvalue()
+        return data, hashlib.sha256(data).hexdigest()
+
+    def run_install(self, base, dest, *args):
+        import subprocess
+        return subprocess.run(["sh", os.path.join(self.ROOT, "install.sh"), "--prefix", "/usr", *args],
+                              env=dict(os.environ, DESTDIR=dest, VPNMAN_XRAY_BASE=base), capture_output=True, text=True)
+
+    def test_downloads_verifies_and_installs(self):
+        asset = self.asset()
+        data, digest = self.zipped()
+        base = self.serve({asset + ".zip": data, asset + ".zip.dgst": ("MD5= abc\nSHA2-256= %s\n" % digest).encode()})
+        dest = tempfile.mkdtemp(dir=TMP)
+        r = self.run_install(base, dest, "--xray-only")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        exe = os.path.join(dest, "usr/bin/xray")
+        self.assertTrue(os.access(exe, os.X_OK))
+        self.assertIn("Checksum verified", r.stdout)
+        self.assertIn("Xray 9.9.9", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(dest, "usr/bin/geoip.dat")))      # only the program is installed
+        self.assertFalse(os.path.exists(os.path.join(dest, "usr/bin/xray.new")))
+        # --uninstall removes the Xray this installer put there ...
+        r = self.run_install(base, dest, "--uninstall")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(exe))
+
+    def test_uninstall_leaves_an_xray_it_did_not_install(self):
+        dest = tempfile.mkdtemp(dir=TMP)
+        os.makedirs(dest + "/usr/bin")
+        with open(dest + "/usr/bin/xray", "w") as fh:
+            fh.write("mine")
+        r = self.run_install("http://127.0.0.1:9", dest, "--uninstall")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(dest + "/usr/bin/xray"))
+
+    def test_a_wrong_checksum_is_refused(self):
+        asset = self.asset()
+        data, _digest = self.zipped()
+        base = self.serve({asset + ".zip": data, asset + ".zip.dgst": ("SHA2-256= %s\n" % ("0" * 64)).encode()})
+        dest = tempfile.mkdtemp(dir=TMP)
+        r = self.run_install(base, dest, "--xray-only")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("does not match", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(dest, "usr/bin/xray")))
+
+    def test_missing_checksum_file_only_warns_and_a_bad_download_fails(self):
+        asset = self.asset()
+        data, _ = self.zipped()
+        base = self.serve({asset + ".zip": data})
+        dest = tempfile.mkdtemp(dir=TMP)
+        r = self.run_install(base, dest, "--xray-only")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("without verifying", r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(dest, "usr/bin/xray")))
+        r = self.run_install(self.serve({}), tempfile.mkdtemp(dir=TMP), "--xray-only")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("could not download", r.stderr)
+
+
 class DesktopIntegrationTests(unittest.TestCase):
     ROOT = os.path.join(os.path.dirname(__file__), "..")
 
@@ -2271,6 +2366,50 @@ class SplitTests(unittest.TestCase):
         st._release()                                    # everything goes back where it came from (fake fs: no-op moves)
         self.assertEqual(st.moved, {})
         self.assertEqual(split.names_from_settings({"apps": [{"match": ["a", "b"]}, {"match": ["b", "c"]}]}), ["a", "b", "c"])
+
+
+class ResolverTests(unittest.TestCase):
+    def test_reverse_lookups_are_cached_and_only_for_real_remotes(self):
+        from vpnman import conntable as ct
+        asked = []
+
+        def lookup(ip):
+            asked.append(ip)
+            if ip == "203.0.113.9":
+                return "host.example.net."
+            raise OSError("no PTR")
+        r = ct.Resolver(lookup=lookup, sync=True)
+        got = r.names(["203.0.113.9", "198.51.100.4", "127.0.0.1", "::", "224.0.0.251", "not an ip"])
+        self.assertEqual(got, {"203.0.113.9": "host.example.net"})           # trailing dot removed, failures left out
+        self.assertEqual(sorted(asked), ["198.51.100.4", "203.0.113.9"])      # loopback, multicast, junk never looked up
+        r.names(["203.0.113.9", "198.51.100.4"])
+        self.assertEqual(len(asked), 2, "answers and failures are cached")
+
+    def test_snapshot_adds_names_only_when_asked(self):
+        from vpnman import conntable as ct
+        real = ct.RESOLVER
+        ct.RESOLVER = ct.Resolver(lookup=lambda ip: "peer.example", sync=True)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                os.makedirs(d + "/net")
+                for name, text in (("tcp", ConnTableTests.TCP), ("udp", "h\n"), ("tcp6", "h\n"), ("udp6", "h\n")):
+                    with open(d + "/net/" + name, "w") as fh:
+                        fh.write(text)
+                plain = ct.snapshot(proc=d)["rows"]
+                named = ct.snapshot(proc=d, resolve=True)["rows"]
+        finally:
+            ct.RESOLVER = real
+        self.assertTrue(plain and all("rname" not in r for r in plain))
+        self.assertTrue(named and all(r["rname"] == "peer.example" for r in named if r["rport"]))
+
+    def test_worker_threads_fill_the_cache_for_the_next_snapshot(self):
+        from vpnman import conntable as ct
+        r = ct.Resolver(lookup=lambda ip: "bg.example")
+        self.assertEqual(r.names(["203.0.113.50"]), {})                       # not known yet: queued
+        end = time.time() + 5
+        while time.time() < end and not r.names(["203.0.113.50"]):
+            time.sleep(0.05)
+        self.assertEqual(r.names(["203.0.113.50"]), {"203.0.113.50": "bg.example"})
 
 
 class BlocksTests(unittest.TestCase):

@@ -717,7 +717,7 @@ class Cli:
 
     def cmd_connections(self, a):
         def show():
-            res = self.call("connections", listening=a.listening, local=a.local)
+            res = self.call("connections", listening=a.listening, local=a.local, resolve=a.resolve)
             if a.json:
                 print(json.dumps(res, indent=2))
                 return
@@ -728,7 +728,7 @@ class Cli:
                 way = {"in": "in", "out": "out", "listen": "listen"}[r["dir"]]
                 app = ("%s (%d)" % (r["app"], r["pid"])) if r["pid"] else (r["app"] or "-")
                 loc = "%s:%d" % (r["local"], r["lport"])
-                rem = "%s:%d" % (r["remote"], r["rport"]) if r["rport"] else "-"
+                rem = "%s:%d" % (r.get("rname") or r["remote"], r["rport"]) if r["rport"] else "-"
                 print("%-6s %-22s %-5s %-24s %-24s %s" % (way, app[:22], r["proto"].upper() + ("6" if r["v6"] else ""),
                                                           loc[:24], rem[:24], r["state"]))
             if res.get("truncated"):
@@ -983,7 +983,7 @@ class Cli:
         from . import xray
         print("Proxy engine:")
         print("  %s xray %s" % (green("✔") if xray.binary() else yellow("!"),
-                               xray.binary() or "is not installed (needed for 'vpnman proxy'; https://github.com/XTLS/Xray-core)"))
+                               xray.binary() or "is not installed (needed for 'vpnman proxy'; install it with: sudo ./install.sh --xray-only, or see https://github.com/XTLS/Xray-core)"))
         print()
         return self.cmd_protocols(a)
 
@@ -1463,6 +1463,8 @@ def build_parser():
             ["vpnman connections", "vpnman connections --listening", "vpnman connections --watch", "vpnman connections --json"])
     s.add_argument("--listening", "-l", action="store_true", help="also show sockets that wait for connections")
     s.add_argument("--local", action="store_true", help="also show connections within this computer (loopback)")
+    s.add_argument("--resolve", "-r", action="store_true",
+                   help="show host names instead of addresses where reverse DNS knows them (sends DNS queries)")
     s.add_argument("--watch", "-w", action="store_true", help="refresh every 2 seconds")
     s.add_argument("--json", action="store_true", help=JSON)
     s = add("group", "list groups; rename a group or edit all its servers at once",

@@ -120,7 +120,8 @@ METHODS = {
     "blocks.remove": lambda m, ids: m.blocks.remove(ids),
     "blocks.set": lambda m, enabled: m.blocks.set_enabled(enabled),
     "connections.close": lambda m, proto, local, lport, remote, rport: m.blocks.close_row(proto, local, lport, remote, rport),
-    "connections": lambda m, listening=False, local=False: conntable.snapshot(bool(listening), bool(local)),
+    "connections": lambda m, listening=False, local=False, resolve=False: conntable.snapshot(
+        bool(listening), bool(local), resolve=bool(resolve)),
     "network.status": lambda m: m.network_status(),
     "network.trust": lambda m, name=None, trusted=True: m.network_trust(name, trusted),
     "backup.export": lambda m: m.backup_export(),

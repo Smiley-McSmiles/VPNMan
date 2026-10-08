@@ -827,6 +827,7 @@ class MainWindow(Adw.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, halign=Gtk.Align.CENTER)
         self.server_names = Gtk.StringList.new([])
         self.server_row = Adw.ComboRow(title="Server", model=self.server_names)
+        self.server_row.set_use_subtitle(True)          # the chosen server's name sits under "Server", not squeezed to the right
         self.server_row.connect("notify::selected", self._on_server_selected)
         # a ComboRow only reacts to clicks inside a GtkListBox (the list delivers the activation)
         pick = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)

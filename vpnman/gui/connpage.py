@@ -18,7 +18,7 @@ COLUMNS = (
     ("Application", 140, True, lambda r: ("%s (%d)" % (r["app"], r["pid"])) if r["pid"] else (r["app"] or "–")),
     ("Protocol", 66, False, lambda r: r["proto"].upper() + ("6" if r["v6"] else "")),
     ("Local", 175, True, lambda r: "%s:%d" % (r["local"], r["lport"])),
-    ("Remote", 175, True, lambda r: ("%s:%d" % (r["remote"], r["rport"])) if r["rport"] else "–"),
+    ("Remote", 175, True, lambda r: ("%s:%d" % (r.get("rname") or r["remote"], r["rport"])) if r["rport"] else "–"),
     ("State", 110, False, lambda r: r["state"] or "–"),
 )
 KIND_LABELS = {"address": "Address", "endpoint": "Address and port", "port": "Port", "app": "Application"}
@@ -48,10 +48,13 @@ class ConnectionsTable(Gtk.Box):
         self.listening = Gtk.CheckButton(label="Listening")
         self.local = Gtk.CheckButton(label="Local")
         self.local.set_tooltip_text("Include connections that stay inside this computer")
+        self.resolve = Gtk.CheckButton(label="Resolve names")
+        self.resolve.set_tooltip_text("Show host names instead of addresses where reverse DNS knows them.\n"
+                                      "This sends DNS queries for the remote addresses.")
         self.search = Gtk.SearchEntry(placeholder_text="Filter", width_chars=14)
         self.search.connect("search-changed", lambda *_: self.refilter())
         self.controls = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER)
-        for w in (self.search, self.listening, self.local):
+        for w in (self.search, self.listening, self.local, self.resolve):
             self.controls.append(w)
         self.filter = Gtk.CustomFilter.new(self._match)
         self.filtered = Gtk.FilterListModel(model=self.store, filter=self.filter)
@@ -108,21 +111,22 @@ class ConnectionsTable(Gtk.Box):
         if not q:
             return True
         r = item.data
-        return q in " ".join(str(fn(r)) for _t, _w, _g, fn in COLUMNS).lower()
+        return q in (" ".join(str(fn(r)) for _t, _w, _g, fn in COLUMNS) + " " + r["remote"]).lower()
 
     def refilter(self):
         self.filter.changed(Gtk.FilterChange.DIFFERENT)
         self._summary()
 
     def params(self):
-        return {"listening": self.listening.get_active(), "local": self.local.get_active()}
+        return {"listening": self.listening.get_active(), "local": self.local.get_active(),
+                "resolve": self.resolve.get_active()}
 
     def update(self, res):
         if self.paused:
             return
         rows = res.get("rows", [])
-        keys = [(r["dir"], r["proto"], r["v6"], r["local"], r["lport"], r["remote"], r["rport"], r["state"], r["pid"])
-                for r in rows]
+        keys = [(r["dir"], r["proto"], r["v6"], r["local"], r["lport"], r["remote"], r["rport"], r["state"], r["pid"],
+                 r.get("rname", "")) for r in rows]
         if keys != self._keys:                          # leave the table (and its scroll position) alone when nothing changed
             self._keys = keys
             adj = self.scroll.get_vadjustment()
@@ -194,6 +198,8 @@ class ConnectionsTable(Gtk.Box):
         if has_remote(r):
             self._item(cp, "Copy remote address (%s:%d)" % (r["remote"], r["rport"]), "copy", "remote")
             self._item(cp, "Copy remote IP", "copy", "remote_ip")
+            if r.get("rname"):
+                self._item(cp, "Copy remote host name (%s)" % r["rname"], "copy", "remote_host")
         self._item(cp, "Copy local address (%s:%d)" % (r["local"], r["lport"]), "copy", "local")
         if r["app"]:
             self._item(cp, "Copy application name", "copy", "app")
@@ -234,6 +240,7 @@ class ConnectionsTable(Gtk.Box):
     @staticmethod
     def text_for(r, what):
         return {"remote": "%s:%d" % (r["remote"], r["rport"]), "remote_ip": r["remote"],
+                "remote_host": r.get("rname") or r["remote"],
                 "local": "%s:%d" % (r["local"], r["lport"]), "app": r["app"] or "",
                 "row": "\t".join(str(fn(r)) for _t, _w, _g, fn in COLUMNS)}[what]
 

@@ -5,7 +5,8 @@
 #   sudo ./install.sh --prefix /usr    choose another prefix
 #   DESTDIR=/tmp/stage ./install.sh --init systemd --no-post    stage files for a package
 #   sudo ./install.sh --uninstall [--purge]
-#   sudo ./install.sh --install-deps   install dependencies with the native package manager first
+#   sudo ./install.sh --install-deps   install dependencies with the native package manager first (and Xray)
+#   sudo ./install.sh --xray-only      only download and install Xray (the engine of `vpnman proxy`)
 #   ./install.sh --check               only check this machine (Python, GTK/libadwaita, VPN tools, firewall, init)
 set -eu
 
@@ -21,6 +22,8 @@ DO_POST=1
 UNINSTALL=0
 PURGE=0
 DEPS=0
+INSTALL_XRAY=0
+XRAY_ONLY=0
 CHECK=0
 SYSLINKS=1
 GROUP=vpnman
@@ -37,7 +40,12 @@ Options:
   --init SYSTEM       auto | systemd | sysv | openrc | runit | openbsd | freebsd | all-linux | none
   --no-post           do not create the group, touch caches or enable the service
   --uninstall         remove VPNMan (add --purge to also delete /etc/vpnman profiles/settings)
-  --install-deps      install runtime dependencies first (apt, dnf, pacman, xbps, apk, zypper, pkg_add, pkg)
+  --install-deps      install runtime dependencies first (apt, dnf, pacman, xbps, apk, zypper, pkg_add, pkg);
+                      also downloads Xray when it is missing (see --install-xray)
+  --install-xray      download the official Xray release for this machine (checksum verified) and install it as
+                      PREFIX/bin/xray, replacing an older copy; needs curl or wget. Xray is the program behind
+                      "vpnman proxy"; it needs no service of its own, so this works on any init system
+  --xray-only         do only that, nothing else
   --check             only report what is missing on this machine; install nothing
   --no-system-links   do not link the launcher/icons into /usr/share when installing under another prefix
   -h, --help          show this help
@@ -54,6 +62,8 @@ while [ $# -gt 0 ]; do
         --uninstall) UNINSTALL=1 ;;
         --purge) PURGE=1 ;;
         --install-deps) DEPS=1 ;;
+        --install-xray) INSTALL_XRAY=1 ;;
+        --xray-only) XRAY_ONLY=1; INSTALL_XRAY=1 ;;
         --check) CHECK=1 ;;
         --no-system-links) SYSLINKS=0 ;;
         -h|--help) usage; exit 0 ;;
@@ -74,16 +84,18 @@ warn() {
 try() { "$@" || warn "command failed: $*"; }
 
 OS=$(uname -s)
-if [ -z "$DESTDIR" ] && [ "$CHECK" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
-    die "run as root (try: sudo sh $0 $*   or: doas sh $0 $*   or: su -c 'sh $0 $*')"
-fi
-
 LIBDIR=$PREFIX/lib/vpnman
 SHAREDIR=$PREFIX/share
 BINDIR=$PREFIX/bin
 MANDIR=$SHAREDIR/man/man1
 [ "$OS" = OpenBSD ] && MANDIR=$PREFIX/man/man1
 D=$DESTDIR
+if [ -z "$DESTDIR" ] && [ "$CHECK" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
+    # installing only Xray into a directory the user can write needs no root
+    if [ "$XRAY_ONLY" -eq 1 ] && mkdir -p "$BINDIR" 2>/dev/null && [ -w "$BINDIR" ]; then :; else
+        die "run as root (try: sudo sh $0 $*   or: doas sh $0 $*   or: su -c 'sh $0 $*')"
+    fi
+fi
 
 detect_init() {
     case "$OS" in
@@ -194,7 +206,7 @@ preflight() {
         warn "no VPN client found yet - install openvpn and/or wireguard-tools (see: vpnman protocols)"
     fi
     if ! have xray; then
-        say "Optional: xray is not installed (only needed for 'vpnman proxy'; https://github.com/XTLS/Xray-core)"
+        say "Optional: xray is not installed (only needed for 'vpnman proxy'). Install it with: sudo sh $0 --xray-only"
     fi
     if ! have nft && ! have iptables && ! have pfctl; then
         warn "no firewall tool (nft, iptables or pfctl) - the kill switch will be unavailable until one is installed"
@@ -202,6 +214,91 @@ preflight() {
     if [ -z "$(detect_init | grep -v none)" ]; then
         warn "could not detect your init system; the service will not be set up automatically (use --init to choose one)"
     fi
+}
+
+# ---------------------------------------------------------------- Xray (the engine behind `vpnman proxy`)
+# Xray is one static program; it needs no service, so the official release archive is all there is to install.
+XRAY_BASE=${VPNMAN_XRAY_BASE:-https://github.com/XTLS/Xray-core/releases/latest/download}
+
+xray_asset() {  # the release archive name for this machine (without .zip), or failure
+    case "$OS" in
+        Linux) xo=linux ;;
+        FreeBSD) xo=freebsd ;;
+        OpenBSD) xo=openbsd ;;
+        *) return 1 ;;
+    esac
+    case "$(uname -m)" in
+        x86_64|amd64) xa=64 ;;
+        i386|i486|i586|i686) xa=32 ;;
+        aarch64|arm64) xa=arm64-v8a ;;
+        armv7*|armv8l) xa=arm32-v7a ;;
+        armv6*) xa=arm32-v6 ;;
+        armv5*) xa=arm32-v5 ;;
+        riscv64) xa=riscv64 ;;
+        s390x) xa=s390x ;;
+        ppc64le) xa=ppc64le ;;
+        loongarch64) xa=loong64 ;;
+        *) return 1 ;;
+    esac
+    echo "Xray-$xo-$xa"
+}
+
+fetch() {  # fetch <url> <file>
+    if have curl; then curl -fsSL --retry 2 --connect-timeout 15 -o "$2" "$1"
+    elif have wget; then wget -q -T 30 -O "$2" "$1"
+    else return 1
+    fi
+}
+
+install_xray() {
+    asset=$(xray_asset) || { warn "no Xray build is known for $OS/$(uname -m) - install xray by hand (https://github.com/XTLS/Xray-core/releases)"; return 1; }
+    have curl || have wget || { warn "curl or wget is needed to download Xray"; return 1; }
+    xpy=$(find_python) || { warn "Python is needed to unpack Xray"; return 1; }
+    xtmp=$(mktemp -d "${TMPDIR:-/tmp}/vpnman-xray.XXXXXX") || { warn "cannot create a temporary directory"; return 1; }
+    say "Downloading Xray ($asset)"
+    if ! fetch "$XRAY_BASE/$asset.zip" "$xtmp/xray.zip"; then
+        warn "could not download $XRAY_BASE/$asset.zip - download it from https://github.com/XTLS/Xray-core/releases and copy xray to $BINDIR"
+        rm -rf "$xtmp"; return 1
+    fi
+    # the release publishes a checksum file next to the archive: verify it (a mismatch is fatal)
+    if fetch "$XRAY_BASE/$asset.zip.dgst" "$xtmp/xray.dgst" 2>/dev/null; then
+        xrc=0
+        "$xpy" - "$xtmp/xray.zip" "$xtmp/xray.dgst" <<'XRAYPY' || xrc=$?
+import hashlib, re, sys
+data = open(sys.argv[1], "rb").read()
+want = None
+for line in open(sys.argv[2], errors="replace"):
+    if "256" in line:
+        m = re.search(r"\b([0-9a-fA-F]{64})\b", line)
+        if m:
+            want = m.group(1).lower()
+            break
+if want is None:
+    sys.exit(2)
+sys.exit(0 if hashlib.sha256(data).hexdigest() == want else 1)
+XRAYPY
+        case "$xrc" in
+            0) say "Checksum verified" ;;
+            1) warn "the downloaded Xray does not match its published checksum - not installing it"; rm -rf "$xtmp"; return 1 ;;
+            *) warn "could not read the published checksum - continuing without verifying it" ;;
+        esac
+    else
+        warn "no checksum file was published next to the Xray archive - continuing without verifying it"
+    fi
+    if ! "$xpy" -m zipfile -e "$xtmp/xray.zip" "$xtmp/out" >/dev/null 2>&1 || [ ! -f "$xtmp/out/xray" ]; then
+        warn "the downloaded archive does not contain xray"; rm -rf "$xtmp"; return 1
+    fi
+    mkdir -p "$D$BINDIR"
+    cp "$xtmp/out/xray" "$D$BINDIR/xray.new" && chmod 755 "$D$BINDIR/xray.new" && mv -f "$D$BINDIR/xray.new" "$D$BINDIR/xray" \
+        || { warn "could not write $D$BINDIR/xray"; rm -rf "$xtmp"; return 1; }
+    rm -rf "$xtmp"
+    if [ -z "$DESTDIR" ] && [ "$OS" = Linux ] && have restorecon && [ -d /sys/fs/selinux ]; then
+        restorecon "$BINDIR/xray" >/dev/null 2>&1 || true
+    fi
+    # remember that we installed it, so --uninstall removes it again (and leaves a copy somebody else installed alone)
+    mkdir -p "$D$SHAREDIR/vpnman" 2>/dev/null && printf '%s\n' "$BINDIR/xray" > "$D$SHAREDIR/vpnman/xray-installed" 2>/dev/null || true
+    say "Installed $BINDIR/xray ($("$D$BINDIR/xray" version 2>/dev/null | head -n 1 || echo 'version unknown'))"
+    return 0
 }
 
 wrapper() {  # wrapper <path> <python args...>
@@ -349,6 +446,10 @@ uninstall() {
     esac
     # firewall rules, routing rule/table and cgroup created by the daemon (while the program still exists)
     if [ -z "$DESTDIR" ] && [ -x "$BINDIR/vpnman" ]; then "$BINDIR/vpnman" cleanup --force >/dev/null 2>&1 || true; fi
+    if [ -f "$D$SHAREDIR/vpnman/xray-installed" ]; then      # Xray is removed only when this installer put it there
+        xbin=$(cat "$D$SHAREDIR/vpnman/xray-installed" 2>/dev/null)
+        [ -n "$xbin" ] && rm -f "$D$xbin"
+    fi
     rm -rf "$D$LIBDIR" "$D$SHAREDIR/vpnman"
     rm -f "$D$BINDIR/vpnman" "$D$BINDIR/vpnmand" "$D$BINDIR/vpnman-gtk"
     rm -f "$D$SHAREDIR/applications/io.github.smiley_mcsmiles.VPNMan.desktop" \
@@ -380,13 +481,20 @@ uninstall() {
 }
 
 if [ "$UNINSTALL" -eq 1 ]; then uninstall; fi
+if [ "$XRAY_ONLY" -eq 1 ]; then
+    install_xray || exit 1
+    exit 0
+fi
 if [ "$CHECK" -eq 1 ]; then
     say "Checking this machine ($OS, init: $(detect_init))"
     preflight
     if [ -z "$WARNINGS" ]; then say "Everything looks good."; else printf '\nTo fix:%s\n' "$WARNINGS"; fi
     exit 0
 fi
-if [ "$DEPS" -eq 1 ]; then install_deps; fi
+if [ "$DEPS" -eq 1 ]; then
+    install_deps
+    if ! have xray && [ -z "$DESTDIR" ]; then install_xray || true; fi
+fi
 
 [ -d "$SRC/vpnman" ] && [ -d "$SRC/data" ] || die "run install.sh from the extracted VPNMan directory (vpnman/ and data/ must be next to it)"
 if [ -z "$DESTDIR" ]; then preflight; fi        # staging for a package must not depend on the build machine
@@ -577,6 +685,8 @@ if [ "$DO_POST" -eq 1 ] && [ -z "$DESTDIR" ]; then
         *) warn "$SHAREDIR is not in XDG_DATA_DIRS, so your desktop may not show the VPNMan launcher/icon. Reinstall with --prefix /usr, or add it to XDG_DATA_DIRS" ;;
     esac
 fi
+
+if [ "$INSTALL_XRAY" -eq 1 ] && [ -z "$DESTDIR" ]; then install_xray || true; fi
 
 if [ -n "$WARNINGS" ]; then
     printf '\nVPNMan is installed, with warnings:%s\n' "$WARNINGS"

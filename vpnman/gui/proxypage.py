@@ -184,7 +184,7 @@ class ProxyPage(Gtk.Box):
         self._rows = {}
 
         # ---- controls
-        self.banner = Adw.Banner(title="xray is not installed, so proxies cannot start. Install it (see: vpnman doctor).",
+        self.banner = Adw.Banner(title="xray is not installed, so proxies cannot start. Install it with: sudo ./install.sh --xray-only",
                                  revealed=False)
         self.append(self.banner)
         ctl = Adw.PreferencesGroup()

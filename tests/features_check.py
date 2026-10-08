@@ -320,7 +320,7 @@ class App(A.Application):
                  "state": "ESTABLISHED", "pid": 7, "app": "firefox"},
                 {"dir": "in", "proto": "udp", "v6": True, "local": "::1", "lport": 53, "remote": "::", "rport": 0, "state": "", "pid": 0, "app": ""}]
         cg.update({"rows": rows})
-        assert cg.table.store.get_n_items() == 2 and cg.params() == {"listening": False, "local": False}
+        assert cg.table.store.get_n_items() == 2 and cg.params() == {"listening": False, "local": False, "resolve": False}
         assert "2 connections" in cg.table.summary.get_label()
         cg.table.search.set_text("firefox")
         cg.table.refilter()
@@ -354,6 +354,22 @@ class App(A.Application):
                      "Block 93.184.216.34:443 (TCP)", "Block remote port 443 (TCP)", "Block application “firefox”"):
             assert want in got, (want, got)
         assert not any("local port" in x for x in got), "an outgoing connection has no local service to block"
+        named = dict(r0, rname="example.net")
+        assert "Copy remote host name (example.net)" in labels(tb.menu_for(named))
+        assert "Copy remote host name" not in " ".join(labels(tb.menu_for(r0)))
+        assert tb.text_for(named, "remote_host") == "example.net" and tb.text_for(r0, "remote_host") == "93.184.216.34"
+        cg.table.update({"rows": [named]})
+        cg.table.search.set_text("93.184")                       # the address still finds the row when a name is shown
+        cg.table.refilter()
+        assert cg.table.filtered.get_n_items() == 1
+        cg.table.search.set_text("example.net")
+        cg.table.refilter()
+        assert cg.table.filtered.get_n_items() == 1
+        cg.table.search.set_text("")
+        cg.table.refilter()
+        cg.table.resolve.set_active(True)
+        assert cg.params()["resolve"] is True
+        cg.table.resolve.set_active(False)
         got = labels(tb.menu_for(rl))
         assert "Block local port 5353 (UDP)" in got and not any(x.startswith(("Force-close", "Stop", "Copy remote")) for x in got), got
         assert tb.block_spec(r0, "endpoint") == ("endpoint", "93.184.216.34:443", "tcp")

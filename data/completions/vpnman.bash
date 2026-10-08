@@ -46,7 +46,7 @@ _vpnman() {
             choices=""
             names=1 ;;
         connections)
-            opts="--listening -l --local --watch -w --json"
+            opts="--listening -l --local --resolve -r --watch -w --json"
             choices=""
             names=0 ;;
         daemon)

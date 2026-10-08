@@ -10,6 +10,9 @@ import os
 import re
 import socket
 import struct
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from . import platform as plat
 
@@ -104,7 +107,80 @@ def classify(rows):
     return out
 
 
-def snapshot(listening=False, local=False, limit=LIMIT, proc="/proc"):
+class Resolver:
+    """Reverse DNS for the Remote column.  Lookups can take seconds, so they run in a few worker threads and the
+    answer shows up in a later snapshot; results (and failures) are cached.  Nothing is looked up unless asked for."""
+    TTL, NEG_TTL, MAX = 600, 120, 4096
+
+    def __init__(self, lookup=None, sync=False):
+        self.lookup = lookup or self._gethostbyaddr
+        self.sync = sync                          # tests: do the lookup in the calling thread
+        self._cache, self._pending = {}, set()
+        self._lock = threading.Lock()
+        self._pool = None
+
+    @staticmethod
+    def _gethostbyaddr(ip):
+        return socket.gethostbyaddr(ip)[0]
+
+    @staticmethod
+    def eligible(ip):
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return not (a.is_loopback or a.is_unspecified or a.is_multicast)
+
+    def names(self, ips):
+        """{ip: host name} for what is known now; unknown addresses are queued."""
+        now, out = time.time(), {}
+        for ip in set(ips):
+            if not self.eligible(ip):
+                continue
+            with self._lock:
+                hit = self._cache.get(ip)
+            if hit and hit[1] > now:
+                if hit[0]:
+                    out[ip] = hit[0]
+                continue
+            if hit and hit[0]:
+                out[ip] = hit[0]                  # stale but better than nothing while it is refreshed
+            self._queue(ip)
+            if self.sync:
+                with self._lock:
+                    hit = self._cache.get(ip)
+                if hit and hit[0]:
+                    out[ip] = hit[0]
+        return out
+
+    def _queue(self, ip):
+        with self._lock:
+            if ip in self._pending:
+                return
+            self._pending.add(ip)
+            if not self.sync and self._pool is None:
+                self._pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="rdns")
+        if self.sync:
+            self._work(ip)
+        else:
+            self._pool.submit(self._work, ip)
+
+    def _work(self, ip):
+        try:
+            name = str(self.lookup(ip) or "").rstrip(".")
+        except (OSError, ValueError, UnicodeError):
+            name = ""
+        with self._lock:
+            if len(self._cache) >= self.MAX:
+                self._cache.clear()
+            self._cache[ip] = (name, time.time() + (self.TTL if name else self.NEG_TTL))
+            self._pending.discard(ip)
+
+
+RESOLVER = Resolver()
+
+
+def snapshot(listening=False, local=False, limit=LIMIT, proc="/proc", resolve=False):
     """{"rows": [...], "supported": bool, "note": str, "truncated": bool}.  ``listening``: include sockets that wait
     for connections; ``local``: include connections that never leave this machine (loopback)."""
     fam = plat.os_family()
@@ -138,7 +214,12 @@ def snapshot(listening=False, local=False, limit=LIMIT, proc="/proc"):
         res.append(r)
     res.sort(key=lambda r: ((r["app"] or "~").lower(), r["dir"], r["lport"], r["rport"]))
     truncated = len(res) > limit
-    return {"rows": res[:limit], "supported": bool(rows) or fam == "linux", "note": note, "truncated": truncated}
+    res = res[:limit]
+    if resolve:
+        names = RESOLVER.names(r["remote"] for r in res if r["rport"])
+        for r in res:
+            r["rname"] = names.get(r["remote"], "")
+    return {"rows": res, "supported": bool(rows) or fam == "linux", "note": note, "truncated": truncated}
 
 
 # ---------------------------------------------------------------------- BSD
