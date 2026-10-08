@@ -114,8 +114,11 @@ METHODS = {
     "proxy.select": lambda m, ident: m.proxy.select(ident),
     "proxy.set": lambda m, **kw: m.proxy.configure(**kw),
     "proxy.latency": lambda m, ids=None: m.proxy.latency(ids),
+    "proxy.fastest": lambda m, group=None: m.proxy.fastest(group),
+    "proxy.link": lambda m, ident: m.proxy.link(ident),
     "blocks.status": lambda m: m.blocks.status(),
-    "blocks.add": lambda m, kind, value, proto="any", note="": m.blocks.add(kind, value, proto, note),
+    "blocks.add": lambda m, kind, value, proto="any", note="", minutes=0, until_reboot=False:
+        m.blocks.add(kind, value, proto, note, minutes, until_reboot),
     "blocks.update": lambda m, ident, enabled=None, note=None: m.blocks.update(ident, enabled, note),
     "blocks.remove": lambda m, ids: m.blocks.remove(ids),
     "blocks.set": lambda m, enabled: m.blocks.set_enabled(enabled),

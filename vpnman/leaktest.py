@@ -90,12 +90,15 @@ def ipv6_check(tunnel, dev_of6, reachable6, locked, blocked_by_lock):
                  "Turn on 'Block IPv6' to be safe." % dev)
 
 
-def connect_via(dev, target, timeout=3.0):
-    """True if a TCP connection bound to interface `dev` succeeds (needs root + Linux)."""
+def connect_via(dev, target, timeout=3.0, mark=0):
+    """True if a TCP connection bound to interface `dev` succeeds (needs root + Linux).  ``mark``: socket mark, so the
+    proxy's system-wide redirect lets the probe reach the kill switch instead of catching it."""
     fam = socket.AF_INET6 if ":" in target[0] else socket.AF_INET
     s = socket.socket(fam, socket.SOCK_STREAM)
     try:
         s.settimeout(timeout)
+        if mark:
+            s.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_MARK", 36), mark)
         if dev:
             s.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_BINDTODEVICE", 25), dev.encode() + b"\0")
         s.connect(target)
@@ -118,9 +121,11 @@ def killswitch_check(engaged, physical, can_leave):
     return check("killswitch", "Kill switch", "ok", "Traffic through %s outside the tunnel is blocked." % physical)
 
 
-def public_ip(url, timeout=8):
+def public_ip(url, timeout=8, proxy=None):
+    """The address websites see; ``proxy`` ("http://127.0.0.1:PORT") asks through that HTTP proxy."""
     req = urllib.request.Request(url, headers={"User-Agent": "vpnman-leaktest"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {}))
+    with opener.open(req, timeout=timeout) as r:
         body = r.read(2048).decode("utf-8", "replace")
     m = re.search(r'"ip"\s*:\s*"([^"]+)"', body) or re.search(r"(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f:]{6,})", body)
     return m.group(1) if m else None
@@ -140,28 +145,75 @@ def resolved_dns_map():
     return res
 
 
-def run(status, settings, locked_blocks_ipv6, resolv_path="/etc/resolv.conf"):
-    """Run every check for the live `status` (Manager.status())."""
+def proxy_check(px, direct_ip, via_proxy):
+    """Is the proxy doing its job?  ``px``: ProxyService.status() plus ``server_ips``; ``direct_ip``: what websites see
+    from this computer; ``via_proxy()``: what they see through the local HTTP proxy (local mode).  None when the proxy
+    is off."""
+    if not px or not px.get("enabled"):
+        return None
+    name = px.get("name") or "the proxy"
+    if not px.get("running"):
+        if px.get("order") == "vpn_proxy":
+            return check("proxy", "Proxy", "info", "%s starts once the VPN is connected." % name)
+        if px.get("order") == "proxy_vpn":
+            return check("proxy", "Proxy", "info", "%s starts with the VPN connection it carries." % name)
+        return check("proxy", "Proxy", "fail", "%s is switched on but not running%s." % (
+            name, ": " + px["error"] if px.get("error") else ""))
+    servers = px.get("server_ips") or []
+    if px.get("carrier"):
+        return check("proxy", "Proxy", "ok", "The VPN connection travels through %s (%s)." % (name, ", ".join(servers)))
+    if px.get("mode") == "system":
+        if not direct_ip:
+            return check("proxy", "Proxy", "warn", "System-wide through %s, but the public IP could not be read." % name)
+        if direct_ip in servers:
+            return check("proxy", "Proxy", "ok", "System-wide: websites see %s, the address of %s." % (direct_ip, name))
+        return check("proxy", "Proxy", "warn", "System-wide: websites see %s, not the address of %s (%s). That is normal "
+                     "when the proxy server sends traffic out from another address (a relay or a CDN); otherwise traffic "
+                     "may be going around the proxy." % (direct_ip, name, ", ".join(servers) or "unknown"))
+    try:
+        via = via_proxy()
+    except Exception as e:  # noqa: BLE001
+        return check("proxy", "Proxy", "fail", "The local proxy on 127.0.0.1:%s did not work: %s" % (px.get("http"), e))
+    if not via:
+        return check("proxy", "Proxy", "warn", "Could not read the IP lookup response through the proxy.")
+    if direct_ip and via == direct_ip:
+        return check("proxy", "Proxy", "warn", "Through the proxy websites still see %s, the same address as without it."
+                     % via)
+    return check("proxy", "Proxy", "ok", "Programs that use 127.0.0.1:%s (HTTP) or :%s (SOCKS5) appear as %s%s." % (
+        px.get("http"), px.get("socks"), via, "; others as %s" % direct_ip if direct_ip else ""))
+
+
+def run(status, settings, locked_blocks_ipv6, resolv_path="/etc/resolv.conf", proxy=None):
+    """Run every check for the live `status` (Manager.status()); ``proxy``: see proxy_check."""
     results = []
     tunnel = status.get("iface")
     connected = status.get("state") == "connected" and tunnel
+    proxied = bool(proxy and proxy.get("running"))
+    ip = None
     if not connected:
-        results.append(check("tunnel", "VPN tunnel", "warn", "Not connected - connect first for a meaningful test."))
+        results.append(check("tunnel", "VPN tunnel", "info" if proxied else "warn",
+                             "Not connected - connect first for a meaningful test."))
     else:
         results.append(check("tunnel", "VPN tunnel", "ok", "Connected to %s via %s" % (status.get("profile"), tunnel)))
+    if connected or proxied:
         try:
             ip = public_ip(settings.get("checks.url"))
             results.append(check("ip", "Public IP", "ok" if ip else "warn",
                                  "Websites see %s" % ip if ip else "Could not read the IP lookup response."))
         except Exception as e:  # noqa: BLE001
             results.append(check("ip", "Public IP", "warn", "IP lookup failed: %s" % e))
+    pc = proxy_check(proxy, ip, lambda: public_ip(settings.get("checks.url"),
+                                                  proxy="http://127.0.0.1:%s" % (proxy or {}).get("http")))
+    if pc:
+        results.append(pc)
     gw, physical = plat.default_gateway()
     if physical == tunnel:
         physical = None
     linux = plat.os_family() == "linux"
     engaged = bool(status.get("netlock", {}).get("engaged"))
     if linux:
-        results.append(killswitch_check(engaged, physical, lambda: connect_via(physical, PROBE4)))
+        mark = 0x5658 if proxied and proxy.get("mode") == "system" else 0     # xray.MARK
+        results.append(killswitch_check(engaged, physical, lambda: connect_via(physical, PROBE4, mark=mark)))
     else:
         results.append(check("killswitch", "Kill switch", "info", "The kill switch self-test needs Linux."))
     if connected:

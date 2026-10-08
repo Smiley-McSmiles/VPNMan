@@ -30,7 +30,7 @@ _vpnman() {
             choices=""
             names=1 ;;
         blocks)
-            opts="--proto --note --json"
+            opts="--proto --note --for --until-reboot --json"
             choices="list status add remove rm enable disable on off"
             names=0 ;;
         bypass)
@@ -46,7 +46,7 @@ _vpnman() {
             choices=""
             names=1 ;;
         connections)
-            opts="--listening -l --local --resolve -r --watch -w --json"
+            opts="--listening -l --local --resolve -r --watch -w --csv --json"
             choices=""
             names=0 ;;
         daemon)
@@ -138,8 +138,8 @@ _vpnman() {
             choices=""
             names=0 ;;
         proxy)
-            opts="--name --group --all --latency -l --json"
-            choices="list show add remove rm edit use on off order mode set status ping refresh sources"
+            opts="--name --group --all --fastest --qr --latency -l --json"
+            choices="list show link add remove rm edit use on off order mode set status ping refresh sources failover"
             names=0 ;;
         remove)
             opts=""

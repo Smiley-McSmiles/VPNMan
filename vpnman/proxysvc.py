@@ -25,8 +25,38 @@ CARRIED = ("openvpn", "wireguard", "amneziawg")          # protocols whose serve
 _HIDDEN = ("outbound", "link")
 
 
+HEALTH_EVERY = 20                     # seconds between checks of the proxy server (failover on)
+HEALTH_FAILS = 3                      # checks in a row that must fail before switching to another proxy
+
+
 def _view(p):
     return {k: v for k, v in p.items() if k not in _HIDDEN}
+
+
+def connect_ms(ip, port, timeout=3):
+    """TCP connect time in ms, or None.  The socket carries Xray's mark, so the system-wide redirect does not send the
+    probe through the proxy itself (Linux, root; elsewhere the mark is skipped)."""
+    import socket
+    import time
+    try:
+        fam = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        s = socket.socket(fam, socket.SOCK_STREAM)
+    except OSError:
+        return None
+    try:
+        if plat.os_family() == "linux":
+            try:
+                s.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_MARK", 36), xray.MARK)
+            except OSError:
+                pass
+        s.settimeout(timeout)
+        t0 = time.monotonic()
+        s.connect((ip, int(port)))
+        return round((time.monotonic() - t0) * 1000, 1)
+    except (OSError, ValueError):
+        return None
+    finally:
+        s.close()
 
 
 class ProxyService:
@@ -42,6 +72,11 @@ class ProxyService:
         self._fw_on = False
         self._routes = []
         self.server_ip = ""
+        self.probe = connect_ms       # replaced in tests
+        self._health_at = 0.0
+        self._fails = 0
+        self._deaths = []
+        self.last_failover = None
 
     # ------------------------------------------------------------------ the list
     def list(self):
@@ -156,23 +191,71 @@ class ProxyService:
     def latency(self, idents=None):
         """TCP connect time to each server in ms (None: unreachable), 16 at a time so a long subscription stays quick."""
         import concurrent.futures
-        import socket
-        import time
 
         def probe(p):
             ips = self.ips(p)
-            if not ips:
-                return p["id"], None
-            t0 = time.monotonic()
-            try:
-                with socket.create_connection((ips[0], int(p["port"])), timeout=3):
-                    return p["id"], round((time.monotonic() - t0) * 1000, 1)
-            except (OSError, ValueError):
-                return p["id"], None
+            return p["id"], (self.probe(ips[0], p["port"]) if ips else None)
 
         todo = [p for p in self.store.list() if not idents or p["id"] in idents]
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
             return dict(ex.map(probe, todo))
+
+    def link(self, ident):
+        """The share link of one proxy (to move it to another device).  Empty for proxies imported from an Xray config."""
+        p = self.store.find(ident)
+        return {"id": p["id"], "name": p["name"], "link": p.get("link") or ""}
+
+    def fastest(self, group=None):
+        """Choose the proxy with the quickest server: of ``group``, else of the favourites, else of all."""
+        ps = self.store.list()
+        if group:
+            cands = [p for p in ps if (p.get("group") or "").lower() == group.lower()]
+            if not cands:
+                raise ProfileError("no proxies in group %s" % group)
+        else:
+            cands = [p for p in ps if p.get("favorite")] or ps
+        if not cands:
+            raise ProfileError("no proxies yet")
+        lat = self.latency([p["id"] for p in cands])
+        best = min(cands, key=lambda p: (lat.get(p["id"]) is None, lat.get(p["id"]) or 0, p["name"].lower()))
+        if lat.get(best["id"]) is None:
+            raise ProfileError("none of the %d proxies answers" % len(cands))
+        view = self.select(best["id"])
+        view["latency"] = lat[best["id"]]
+        return view
+
+    def failover_order(self, cur):
+        """Where to go when ``cur`` stops working: the next favourites (if ``cur`` is one or there are any), else
+        the rest of its group, else every other proxy - in name order, starting after ``cur``."""
+        ps = sorted(self.store.list(), key=lambda p: p["name"].lower())
+        i = next((n for n, p in enumerate(ps) if p["id"] == cur["id"]), -1)
+        ring = ps[i + 1:] + ps[:max(i, 0)]                 # everybody else, starting after cur
+        favs = [p for p in ring if p.get("favorite")]
+        group = [p for p in ring if (p.get("group") or "") == (cur.get("group") or "")]
+        return favs or group or ring
+
+    def fail_over(self, reason):
+        """Switch to the first proxy of ``failover_order`` that answers.  Returns it, or None."""
+        cur = self.selected()
+        if not cur:
+            return None
+        for p in self.failover_order(cur):
+            ips = self.ips(p)
+            if ips and self.probe(ips[0], p["port"]) is not None:
+                import time
+                self.m.log.add("warn", "Proxy %s: %s - switching to %s" % (cur["name"], reason, p["name"]))
+                self.last_failover = {"from": cur["name"], "to": p["name"], "reason": reason, "at": int(time.time())}
+                self._fails, self._deaths = 0, []
+                self.m.settings.update({"proxy": {"selected": p["id"]}})
+                self.changed()
+                return _view(p)
+        self.m.log.add("error", "Proxy %s: %s, and no other proxy answers" % (cur["name"], reason))
+        self._fails = 0
+        with self.lock:
+            if self.owner == "local" and not self.runner.alive():
+                self.key = None
+                self.sync()
+        return None
 
     def ips(self, p, live=True):
         """The server's addresses: resolved now (and remembered), else the remembered ones - the kill switch may be
@@ -192,7 +275,8 @@ class ProxyService:
 
     # ------------------------------------------------------------------ settings
     def configure(self, **kw):
-        """Change proxy settings with validation (enabled, selected, order, mode, socks_port, http_port, dns, udp)."""
+        """Change proxy settings with validation (enabled, selected, order, mode, socks_port, http_port, dns, udp,
+        failover)."""
         tree = {}
         for k, v in kw.items():
             if v is None:
@@ -217,7 +301,9 @@ class ProxyService:
                     ipaddress.ip_address(v)
                 except ValueError:
                     raise ProfileError("dns must be an IP address")
-            if k not in ("enabled", "selected", "order", "mode", "socks_port", "http_port", "dns", "udp"):
+            if k == "failover":
+                v = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+            if k not in ("enabled", "selected", "order", "mode", "socks_port", "http_port", "dns", "udp", "failover"):
                 raise ProfileError("unknown proxy setting: %s" % k)
             tree[k] = v
         if tree:
@@ -271,7 +357,9 @@ class ProxyService:
                 "carrier": running and self.owner == "carrier", "error": self.error,
                 "socks": self.ports.get("socks") if local else None, "http": self.ports.get("http") if local else None,
                 "installed": bool(xray.binary()), "system_ok": self.system_supported()[0],
-                "socks_port": cfg["socks_port"], "http_port": cfg["http_port"], "dns": cfg["dns"], "udp": cfg["udp"]}
+                "socks_port": cfg["socks_port"], "http_port": cfg["http_port"], "dns": cfg["dns"], "udp": cfg["udp"],
+                "failover": bool(cfg.get("failover")), "last_failover": self.last_failover,
+                "server_ip": self.server_ip if running else ""}
 
     # ------------------------------------------------------------------ local proxy (proxy_only, vpn_proxy)
     def _wanted(self, vpn_up):
@@ -352,12 +440,39 @@ class ProxyService:
             self.m.log.add("info", "Proxy stopped")
 
     def watch(self):
-        """Called every second by the daemon: restart a local instance that died."""
+        """Called every few seconds by the daemon: restart a local instance that died; with ``proxy.failover``, also
+        check the server and switch to another proxy when it stops answering (or Xray keeps dying)."""
+        import time
+        reason = target = None
         with self.lock:
+            failover = bool(self.settings().get("failover"))
             if self.owner == "local" and not self.runner.alive():
-                self.m.log.add("warn", "Xray terminated unexpectedly - restarting it")
-                self.key = None
-                self.sync()
+                now = time.monotonic()
+                self._deaths = [t for t in self._deaths if now - t < 120] + [now]
+                if not failover or len(self._deaths) < 3:
+                    self.m.log.add("warn", "Xray terminated unexpectedly - restarting it")
+                    self.key = None
+                    self.sync()
+                    return
+                reason = "Xray stopped %d times in two minutes" % len(self._deaths)
+            elif self.owner == "local" and failover and time.monotonic() - self._health_at >= HEALTH_EVERY:
+                self._health_at = time.monotonic()
+                target = (self.server_ip, self.selected())
+            else:
+                return
+        if reason is None:
+            ip, p = target
+            if not (p and ip):
+                return
+            if self.probe(ip, p["port"]) is not None:
+                self._fails = 0
+                return
+            self._fails += 1
+            if self._fails < HEALTH_FAILS:
+                self.m.log.add("debug", "Proxy %s did not answer (%d/%d)" % (p["name"], self._fails, HEALTH_FAILS))
+                return
+            reason = "the server stopped answering"
+        self.fail_over(reason)
 
     def shutdown(self):
         with self.lock:

@@ -158,8 +158,9 @@ installed it).
 | Import notes: options in a config that do not work here (Windows-only options, missing `up`/`down` scripts) are listed when you import it | ✔ |
 | Update check: *Check for Updates…* in the menu, `vpnman update`, or once a day if you switch it on in Preferences | ✔ |
 | **Proxies through Xray** (VLESS, VMess, Trojan, Shadowsocks; Reality, WebSocket, gRPC, ...): share links, files and subscription URLs; a local SOCKS5/HTTP proxy or system-wide (Linux); proxy only, **VPN → proxy** or **proxy → VPN** (`vpnman proxy`, Servers → Proxy) | ✔ (needs `xray`) |
+| Proxy extras: **Use Fastest**, **failover** to the next favourite proxy when the server stops answering, **Share** a proxy as a link or QR code (`vpnman proxy use --fastest`, `proxy failover on`, `proxy link NAME --qr`); the connection test checks the proxy too | ✔ |
 | **Live connection table**: every connection with its application, port, protocol and direction (Connection page, `vpnman connections`) | ✔ (Linux; FreeBSD) |
-| **Blocked connections**: right-click a connection to copy it, force-close it, stop its program or block its address / port / program; a *Pop out* window for the live table; a window to manage the blocks (`vpnman blocks`) | ✔ (Linux, nftables) |
+| **Blocked connections**: right-click a connection to copy it, force-close it, stop its program or block its address / port / program; a *Pop out* window for the live table; a window to manage the blocks (`vpnman blocks`); blocks can be **temporary** (15 min, 1 h, 1 day, until restart; `--for 2h`, `--until-reboot`); **export** the table as CSV (`vpnman connections --csv`) | ✔ (Linux, nftables) |
 | Edit a whole group or a selection at once (group, login, SSL tunnel server) | ✔ |
 | Backup and restore of all profiles and proxies (with credentials) and settings | ✔ |
 | Shell completions for bash, zsh and fish (profile names included) | ✔ |
@@ -171,7 +172,7 @@ installed it).
 | Credentials per profile (stored root-only) | ✔ |
 | Desktop notifications | ✔ |
 | Auto-connect at system start (daemon-side: waits for the network, keeps retrying; `last` / `fastest` / a profile) | ✔ |
-| System tray (StatusNotifierItem): status icon, Connect/Disconnect, Network Lock toggle, Show, Quit | ✔ |
+| System tray (StatusNotifierItem): status icon, Connect/Disconnect, Network Lock toggle, Proxy on/off, Show, Quit | ✔ |
 | Start the tray app at login (XDG autostart; GNOME, KDE, XFCE, …) | ✔ |
 | Proxy / Tor / SSH / SSL tunnels as transports | ✘ |
 

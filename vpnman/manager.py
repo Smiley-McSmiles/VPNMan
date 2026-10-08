@@ -241,6 +241,7 @@ class Manager:
         self.proxy.runner.kill_stale()
         if plat.os_family() == "linux":
             blocks.cleanup()
+        self.blocks.expire()
         self.blocks.sync()
         self.scheduler.start()
         self._start_network_monitor()
@@ -1001,11 +1002,12 @@ class Manager:
 
     def _net_loop(self, stop):
         while not stop.is_set():
-            try:
-                self.network_tick()
-                self.proxy.watch()
-            except Exception as e:  # noqa: BLE001
-                self.log.add("debug", "network monitor: %s" % e)
+            for name, job in (("network", self.network_tick), ("proxy", self.proxy.watch),
+                              ("blocks", self.blocks.expire)):
+                try:
+                    job()
+                except Exception as e:  # noqa: BLE001  (one failing job must not starve the others)
+                    self.log.add("debug", "%s monitor: %s" % (name, e))
             stop.wait(3)
 
     def network_status(self):
@@ -1240,7 +1242,11 @@ class Manager:
     def leak_test(self):
         """Self-test of the live connection (tunnel, public IP, kill switch, DNS, IPv6)."""
         st = self.status()
-        return leaktest.run(st, self.settings, bool(self.settings.get("netlock.block_ipv6")))
+        px = self.proxy.status()
+        sel = self.proxy.selected()
+        px["server_ips"] = ([px["server_ip"]] if px.get("server_ip") else []) + \
+            [i for i in (self.proxy.ips(sel, live=False) if sel else []) if i != px.get("server_ip")]
+        return leaktest.run(st, self.settings, bool(self.settings.get("netlock.block_ipv6")), proxy=px)
 
     def remove_profiles(self, idents):
         """Delete several profiles; a live connection to one of them is dropped first.  Never stops half-way:

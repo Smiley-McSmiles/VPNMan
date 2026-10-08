@@ -31,6 +31,8 @@ def fake_rpc(method, ok=None, fail=None, **kw):
         "proxy.status": PROXY_STATUS, "proxy.sources": [], "proxy.set": PROXY_STATUS, "proxy.select": {"id": "x"},
         "proxy.latency": {"%012d" % 1: 12.5, "%012d" % 2: None},
         "proxy.remove": {"removed": ["WS", "TR"], "failed": []},
+        "proxy.fastest": {"id": "%012d" % 2, "name": "WS", "latency": 9.4},
+        "proxy.link": {"id": "%012d" % 1, "name": "Home", "link": "vless://11111111-2222-3333-4444-555555555555@p1.example.com:443?security=tls#Home"},
         "blocks.status": BLOCK_STATUS, "blocks.add": {"id": "abcd1234", "kind": "address", "value": "x", "proto": "any", "closed": 2},
         "blocks.remove": {"removed": ["aaaa1111"]}, "blocks.set": BLOCK_STATUS, "blocks.update": {"id": "aaaa1111"},
         "connections.close": {"closed": True}, "connections": {"rows": [], "supported": True},
@@ -314,6 +316,42 @@ class App(A.Application):
         add._submit()
         assert "http" in add.err.get_title()
         PP.ProxyEditDialog(w, fake_rpc, fake_proxy_list()[0], lambda: None)
+        # use fastest, failover switch, share dialog with a QR code
+        CALLS.clear()
+        pp._on_fastest()
+        assert CALLS[0] == ("proxy.fastest", {}) and pp.latency["%012d" % 2] == 9.4 and "9 ms" in pp._rows["%012d" % 2].lat.get_label()
+        pp.update_status(dict(PROXY_STATUS, failover=False))
+        CALLS.clear()
+        pp.failover.set_active(True)
+        assert ("proxy.set", {"failover": True}) in CALLS, CALLS
+        CALLS.clear()
+        pp.update_status(dict(PROXY_STATUS, failover=True))
+        assert not CALLS, "the failover switch follows the status without sending it back"
+        import time as _t
+        pp.update_status(dict(PROXY_STATUS, failover=True, last_failover={"from": "Home", "to": "WS", "reason": "x", "at": int(_t.time())}))
+        assert any(c[0] == "proxy.list" for c in CALLS), "after a failover the list (the chosen proxy) is reloaded"
+        shown = []
+        orig_present = PP.ProxyShareDialog.present
+        PP.ProxyShareDialog.present = lambda self: shown.append(self)
+        pp.share(fake_proxy_list()[0])
+        PP.ProxyShareDialog.present = orig_present
+        sd = shown[0]
+        assert sd.qr is not None and len(sd.qr.matrix) >= 21 and sd.link.startswith("vless://")
+        sd._copy()
+        sd.close()
+        assert PP.qr_widget("x" * 3000) is None, "a link too long for a QR code shows only the text"
+        # the tray offers the proxy switch
+        w.proxy_page.update_status(dict(PROXY_STATUS, enabled=False))
+        labels_tray = [i.get("label") for i in w.tray_menu()]
+        assert "Turn Proxy On (Home)" in labels_tray, labels_tray
+        w.proxy_page.update_status(PROXY_STATUS)
+        item = next(i for i in w.tray_menu() if i.get("label") == "Turn Proxy Off")
+        CALLS.clear()
+        item["callback"]()
+        assert ("proxy.set", {"enabled": False}) in CALLS, CALLS
+        w.proxy_page.update_status(dict(PROXY_STATUS, name="", selected=""))
+        assert not any("Proxy" in (i.get("label") or "") for i in w.tray_menu()), "no proxy chosen: no tray item"
+        w.proxy_page.update_status(PROXY_STATUS)
         # ---- connection table
         cg = w.conn_group
         rows = [{"dir": "out", "proto": "tcp", "v6": False, "local": "10.0.0.2", "lport": 40000, "remote": "93.184.216.34", "rport": 443,
@@ -382,6 +420,38 @@ class App(A.Application):
         tb._act_block(None, A.GLib.Variant("s", "endpoint"))
         assert ("blocks.add", {"kind": "endpoint", "value": "93.184.216.34:443", "proto": "tcp"}) in CALLS, CALLS
         CALLS.clear()
+        tb._act_block(None, A.GLib.Variant("s", "endpoint|60"))
+        assert ("blocks.add", {"kind": "endpoint", "value": "93.184.216.34:443", "proto": "tcp", "minutes": 60}) in CALLS, CALLS
+        CALLS.clear()
+        tb._act_block(None, A.GLib.Variant("s", "app|reboot"))
+        assert ("blocks.add", {"kind": "app", "value": "firefox", "proto": "any", "until_reboot": True}) in CALLS, CALLS
+        # every block item opens a submenu with the durations
+        menu = tb.menu_for(r0)
+        subs = []
+        for i in range(menu.get_n_items()):
+            sec = menu.get_item_link(i, "section")
+            for j in range(sec.get_n_items()):
+                sub = sec.get_item_link(j, "submenu")
+                if sub is not None:
+                    subs.append((sec.get_item_attribute_value(j, "label", None).get_string(),
+                                 [sub.get_item_attribute_value(k, "target", None).get_string() for k in range(sub.get_n_items())]))
+        assert len(subs) == 4 and subs[0][1] == ["address|0", "address|15", "address|60", "address|1440", "address|reboot"], subs
+        # export the rows shown as CSV
+        tb.update({"rows": [r0, rl]})
+        assert len(tb.shown_rows()) == 2
+        tb._act_export_copy()
+        from vpnman.conntable import to_csv
+        csv_text = to_csv(tb.shown_rows())
+        assert csv_text.splitlines()[0].startswith("direction,application,pid") and "93.184.216.34" in csv_text
+        saved_to = []
+        import vpnman.gui.connpage as CP
+        orig_save = CP.save_file
+        out_csv = os.path.join(tempfile.mkdtemp(), "c.csv")
+        CP.save_file = lambda parent, title, name, cb: (saved_to.append(name), cb(out_csv))
+        tb._act_export_save()
+        CP.save_file = orig_save
+        assert saved_to[0].endswith(".csv") and open(out_csv).read() == csv_text
+        CALLS.clear()
         tb._act_close(None, None)
         assert CALLS[0][0] == "connections.close" and CALLS[0][1]["rport"] == 443, CALLS
         import subprocess
@@ -418,6 +488,14 @@ class App(A.Application):
         bw.note.set_text("torrents")
         bw._add()
         assert ("blocks.add", {"kind": "port", "value": "6881", "proto": "udp", "note": "torrents"}) in CALLS, CALLS
+        CALLS.clear()
+        bw.value.set_text("6881")
+        bw.duration.set_selected(2)
+        bw._add()
+        assert ("blocks.add", {"kind": "port", "value": "6881", "proto": "udp", "note": "", "minutes": 60}) in CALLS, CALLS
+        bw.duration.set_selected(0)
+        row = bw._make_row(dict(BLOCK_STATUS["entries"][0], expires=int(__import__("time").time()) + 600))
+        assert "more minutes" in row.get_subtitle(), row.get_subtitle()
         bw.value.set_text("")
         CALLS.clear()
         bw._add()

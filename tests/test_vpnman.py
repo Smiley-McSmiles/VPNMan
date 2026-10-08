@@ -1364,6 +1364,108 @@ class XrayUnitTests(unittest.TestCase):
             self.assertNotIn("198.51.100.4", text)
 
 
+class QrTests(unittest.TestCase):
+    """The matrices were checked cell for cell against the 'qrcode' package (all 40 versions, levels L and M) and
+    decoded with OpenCV; these hashes keep them from drifting."""
+    LINK = ("vless://11111111-2222-3333-4444-555555555555@203.0.113.7:443?security=reality&sni=example.com&pbk=PUB"
+            "&sid=ab&type=tcp&flow=xtls-rprx-vision#Home")
+
+    @staticmethod
+    def _hash(m):
+        import hashlib
+        return hashlib.sha256("".join("1" if c else "0" for r in m for c in r).encode()).hexdigest()[:16]
+
+    def test_known_matrices(self):
+        from vpnman import qr
+        for text, size, digest in ((self.LINK, 49, "5dd9202303e025ee"), ("hello", 21, "99ccedcf0d82e92a"),
+                                   ("x" * 1000, 121, "a84b7fbe72da0dff")):
+            m = qr.encode(text)
+            self.assertEqual((len(m), self._hash(m)), (size, digest), text[:20])
+
+    def test_finder_patterns_and_limits(self):
+        from vpnman import qr
+        m = qr.encode("hello")
+        for x0, y0 in ((0, 0), (14, 0), (0, 14)):
+            self.assertTrue(all(m[y0][x0 + i] for i in range(7)) and all(m[y0 + i][x0] for i in range(7)))
+            self.assertFalse(m[y0 + 1][x0 + 1])
+            self.assertTrue(m[y0 + 3][x0 + 3])
+        self.assertTrue(m[21 - 8][8], "the dark module")
+        self.assertEqual(len(qr.encode("y" * 2300)), 177, "too long for level M: falls back to L, version 40")
+        with self.assertRaises(qr.TooLong):
+            qr.encode("z" * 3000)
+        text = qr.to_text(m, quiet=2)
+        self.assertEqual(len(text.splitlines()), (21 + 4 + 1) // 2)
+        self.assertIn("\033[30;47m", text)
+
+
+class TemporaryBlockTests(unittest.TestCase):
+    def test_durations_and_expiry(self):
+        from vpnman import blocks
+        now = time.time()
+        e = blocks.new_entry("address", "203.0.113.9", minutes=15)
+        self.assertAlmostEqual(e["expires"], now + 900, delta=5)
+        self.assertEqual(e["boot"], "")
+        self.assertFalse(blocks.expired(e, now))
+        self.assertTrue(blocks.expired(e, now + 901))
+        self.assertIn("more minutes", blocks.lifetime(e, now))
+        self.assertEqual(blocks.lifetime(dict(e, expires=int(now) + 3 * 3600), now), "for 3 more hours")
+        r = blocks.new_entry("port", "6881", "udp", until_reboot=True)
+        self.assertEqual((r["expires"], r["boot"]), (0, blocks.boot_id()))
+        self.assertFalse(blocks.expired(r))
+        self.assertTrue(blocks.expired(r, boot="another-boot"))
+        self.assertEqual(blocks.lifetime(r), "until restart")
+        self.assertEqual(blocks.lifetime(blocks.new_entry("app", "steam")), "permanent")
+        for bad in (-1, "soon", blocks.MAX_MINUTES + 1):
+            with self.assertRaises(blocks.BlockError):
+                blocks.new_entry("address", "203.0.113.9", minutes=bad)
+
+    def test_cli_durations(self):
+        from vpnman import cli
+        self.assertEqual([cli.parse_minutes(x) for x in ("90", "30m", "2h", "1d", "1h30m", " 2H ")], [90, 30, 120, 1440, 90, 120])
+        for bad in ("soon", "2x", "1h soon", ""):
+            with self.assertRaises(ipc.RpcError):
+                cli.parse_minutes(bad)
+
+
+class ProxyLeakTests(unittest.TestCase):
+    PX = {"enabled": True, "running": True, "name": "Home", "order": "proxy_only", "mode": "local", "carrier": False,
+          "error": "", "http": 10809, "socks": 10808, "server_ips": ["203.0.113.7"]}
+
+    def test_proxy_checks(self):
+        from vpnman import leaktest as lt
+        self.assertIsNone(lt.proxy_check(None, "1.2.3.4", None))
+        self.assertIsNone(lt.proxy_check(dict(self.PX, enabled=False), "1.2.3.4", None))
+        self.assertEqual(lt.proxy_check(dict(self.PX, running=False, error="boom"), None, None)["status"], "fail")
+        self.assertEqual(lt.proxy_check(dict(self.PX, running=False, order="vpn_proxy"), None, None)["status"], "info")
+        ok = lt.proxy_check(self.PX, "198.51.100.1", lambda: "203.0.113.7")
+        self.assertEqual(ok["status"], "ok")
+        self.assertIn("203.0.113.7", ok["detail"])
+        self.assertEqual(lt.proxy_check(self.PX, "198.51.100.1", lambda: "198.51.100.1")["status"], "warn")
+
+        def broken():
+            raise OSError("connection refused")
+        self.assertEqual(lt.proxy_check(self.PX, "198.51.100.1", broken)["status"], "fail")
+        system = dict(self.PX, mode="system")
+        self.assertEqual(lt.proxy_check(system, "203.0.113.7", None)["status"], "ok")
+        self.assertEqual(lt.proxy_check(system, "192.0.2.50", None)["status"], "warn")
+        self.assertEqual(lt.proxy_check(dict(self.PX, carrier=True, order="proxy_vpn"), None, None)["status"], "ok")
+
+    def test_csv_export(self):
+        from vpnman import conntable
+        rows = [{"dir": "out", "proto": "tcp", "v6": False, "local": "10.0.0.2", "lport": 40000, "remote": "93.184.216.34",
+                 "rport": 443, "state": "ESTABLISHED", "pid": 7, "app": "firefox", "rname": "example.net"},
+                {"dir": "listen", "proto": "udp", "v6": True, "local": "::", "lport": 5353, "remote": "::", "rport": 0,
+                 "state": "", "pid": 0, "app": "=cmd|' /C calc'!A0"}]
+        import csv
+        import io
+        got = list(csv.reader(io.StringIO(conntable.to_csv(rows))))
+        self.assertEqual(got[0], list(conntable.CSV_FIELDS))
+        self.assertEqual(got[1], ["out", "firefox", "7", "tcp", "4", "10.0.0.2", "40000", "93.184.216.34", "443",
+                                  "example.net", "ESTABLISHED"])
+        self.assertEqual(got[2][1][0], "'", "a value that looks like a formula is defused")
+        self.assertEqual((got[2][7], got[2][8]), ("", ""), "a listening socket has no remote side")
+
+
 class ConnTableTests(unittest.TestCase):
     TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 111 1 0 100 0 0 10 0
@@ -2024,6 +2126,114 @@ AAAA
         self.assertEqual(self._xray_cfg()["outbounds"][0]["streamSettings"]["realitySettings"]["serverName"], "other.example")
         self._proxy_reset()
         self.c.call("proxy.set", socks_port=10808, http_port=10809)
+
+    def _proxy_names(self):
+        return {p["name"]: p for p in self.c.call("proxy.list")}
+
+    def test_proxy_fastest_link_and_cli(self):
+        self._proxy_reset()
+        self.c.call("proxy.import", text="\n".join(self.LINK.replace("203.0.113.7", "203.0.113.%d" % i)
+                                                   .replace("#Home", "#P%d" % i) for i in (11, 12, 13)), group="g")
+        speeds = {"203.0.113.11": 80.0, "203.0.113.12": 20.0, "203.0.113.13": None}
+        svc = self.mgr.proxy
+        real = svc.probe
+        svc.probe = lambda ip, port, timeout=3: speeds.get(ip)
+        try:
+            p = self.c.call("proxy.fastest")
+            self.assertEqual((p["name"], p["latency"]), ("P12", 20.0))
+            self.assertTrue(self._proxy_names()["P12"]["selected"])
+            self.c.call("proxy.update", ident=self._proxy_names()["P11"]["id"], changes={"favorite": True})
+            self.assertEqual(self.c.call("proxy.fastest")["name"], "P11", "favourites first")
+            self.assertEqual(self.c.call("proxy.fastest", group="g")["name"], "P12")
+            rc, out, _ = self._cli("proxy", "use", "--fastest", "--group", "g")
+            self.assertEqual(rc, 0)
+            self.assertIn("P12", out)
+            speeds.clear()
+            with self.assertRaises(ipc.RpcError):
+                self.c.call("proxy.fastest")
+        finally:
+            svc.probe = real
+        link = self.c.call("proxy.link", ident="P12")
+        self.assertTrue(link["link"].startswith("vless://") and "203.0.113.12" in link["link"])
+        rc, out, _ = self._cli("proxy", "link", "P12", "--qr")
+        self.assertEqual(rc, 0)
+        self.assertIn("\u2588", out)
+        self.assertEqual(out.strip().splitlines()[-1], link["link"])
+        rc, out, _ = self._cli("proxy", "failover", "on")
+        self.assertIn("on", out)
+        self.assertTrue(self.c.call("proxy.status")["failover"])
+        self.c.call("proxy.set", failover=False)
+        self._proxy_reset()
+
+    def test_proxy_fails_over_to_the_next_favourite(self):
+        self._proxy_reset()
+        from vpnman import proxysvc
+        self.c.call("proxy.import", text="\n".join(self.LINK.replace("203.0.113.7", "203.0.113.%d" % i)
+                                                   .replace("#Home", "#F%d" % i) for i in (21, 22, 23)))
+        names = self._proxy_names()
+        for n in ("F21", "F23"):
+            self.c.call("proxy.update", ident=names[n]["id"], changes={"favorite": True})
+        self.c.call("proxy.select", ident="F21")
+        self.c.call("proxy.set", enabled=True, failover=True, socks_port=18828, http_port=18829)
+        self._wait_proxy(True)
+        svc = self.mgr.proxy
+        real = svc.probe
+        alive = {"203.0.113.22", "203.0.113.23"}
+        svc.probe = lambda ip, port, timeout=3: 5.0 if ip in alive else None
+        try:
+            for _ in range(proxysvc.HEALTH_FAILS - 1):
+                svc._health_at = 0
+                svc.watch()
+            self.assertTrue(self._proxy_names()["F21"]["selected"], "not before %d failed checks" % proxysvc.HEALTH_FAILS)
+            svc._health_at = 0
+            svc.watch()
+            self.assertTrue(self._proxy_names()["F23"]["selected"], "F22 is no favourite: the next favourite wins")
+            st = self.c.call("proxy.status")
+            self.assertEqual((st["last_failover"]["from"], st["last_failover"]["to"]), ("F21", "F23"))
+            self.assertEqual(self._xray_cfg()["outbounds"][0]["settings"]["vnext"][0]["address"], "203.0.113.23")
+            alive.clear()                                  # nobody answers: stay put
+            for _ in range(proxysvc.HEALTH_FAILS):
+                svc._health_at = 0
+                svc.watch()
+            self.assertTrue(self._proxy_names()["F23"]["selected"])
+        finally:
+            svc.probe = real
+        order = [p["name"] for p in svc.failover_order(svc.store.find(self._proxy_names()["F22"]["id"]))]
+        self.assertEqual(order, ["F23", "F21"], "from a non-favourite: the favourites, after it in name order")
+        self.c.call("proxy.set", failover=False)
+        self._proxy_reset()
+        self.c.call("proxy.set", socks_port=10808, http_port=10809)
+
+    def test_temporary_blocks_end_by_themselves(self):
+        from vpnman import blocks
+        real = blocks.supported
+        blocks.supported = lambda: (False, "the tests never touch the firewall")
+        try:
+            e = self.c.call("blocks.add", kind="port", value="6881", proto="udp", minutes=30)
+            r = self.c.call("blocks.add", kind="address", value="198.51.100.7", until_reboot=True)
+            self.assertGreater(e["expires"], time.time() + 1700)
+            self.assertEqual(self.mgr.blocks.expire(), 0)
+            entries = self.mgr.blocks.list()
+            for x in entries:
+                if x["id"] == e["id"]:
+                    x["expires"] = int(time.time()) - 1
+                if x["id"] == r["id"]:
+                    x["boot"] = "an-earlier-boot"
+            self.mgr.blocks._save(entries)
+            self.assertEqual(self.mgr.blocks.expire(), 2)
+            self.assertEqual(self.c.call("blocks.status")["entries"], [])
+            rc, out, _ = self._cli("blocks", "add", "app", "steam", "--for", "1h30m")
+            self.assertEqual(rc, 0)
+            self.assertIn("for 90 more minutes", out)
+            rc, out, _ = self._cli("blocks")
+            self.assertIn("90 more minutes", out)
+            self.assertEqual(self._cli("blocks", "add", "app", "x", "--for", "soon")[0], 1)
+            self.c.call("blocks.remove", ids=[x["id"] for x in self.c.call("blocks.status")["entries"]])
+            rc, out, _ = self._cli("connections", "--csv", "--listening")
+            self.assertEqual(rc, 0)
+            self.assertTrue(out.startswith("direction,application,pid"))
+        finally:
+            blocks.supported = real
 
     def test_proxy_latency_probes_in_parallel(self):
         self._proxy_reset()

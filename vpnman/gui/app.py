@@ -20,6 +20,7 @@ import json
 
 from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof, updates
 from .connpage import ConnectionsGroup
+from .files import choose_files, save_file
 from .keys import close_keys, restore_scroll
 from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .proxypage import ProxyPage
@@ -53,47 +54,6 @@ def rpc(method, ok=None, fail=None, **params):
         except (DaemonUnavailable, RpcError) as e:
             GLib.idle_add(fail or (lambda *_: None), str(e), isinstance(e, DaemonUnavailable))
     threading.Thread(target=work, daemon=True).start()
-
-
-def choose_files(parent, title, callback, multiple=True):
-    if hasattr(Gtk, "FileDialog"):
-        dlg = Gtk.FileDialog(title=title)
-
-        def done(d, res):
-            try:
-                if multiple:
-                    model = d.open_multiple_finish(res)
-                    files = [model.get_item(i).get_path() for i in range(model.get_n_items())]
-                else:
-                    files = [d.open_finish(res).get_path()]
-            except GLib.Error:
-                return
-            callback(files)
-        (dlg.open_multiple if multiple else dlg.open)(parent, None, done)
-    else:  # pragma: no cover - GTK < 4.10
-        dlg = Gtk.FileChooserNative(title=title, transient_for=parent, action=Gtk.FileChooserAction.OPEN,
-                                    select_multiple=multiple)
-        dlg.connect("response", lambda d, r: callback([f.get_path() for f in d.get_files()]) if r == Gtk.ResponseType.ACCEPT else None)
-        dlg.show()
-        parent._native = dlg
-
-
-def save_file(parent, title, name, callback):
-    if hasattr(Gtk, "FileDialog"):
-        dlg = Gtk.FileDialog(title=title, initial_name=name)
-
-        def done(d, res):
-            try:
-                callback(d.save_finish(res).get_path())
-            except GLib.Error:
-                return
-        dlg.save(parent, None, done)
-    else:  # pragma: no cover - GTK < 4.10
-        dlg = Gtk.FileChooserNative(title=title, transient_for=parent, action=Gtk.FileChooserAction.SAVE)
-        dlg.set_current_name(name)
-        dlg.connect("response", lambda d, r: callback(d.get_file().get_path()) if r == Gtk.ResponseType.ACCEPT else None)
-        dlg.show()
-        parent._native = dlg
 
 
 class UserConfig:
@@ -789,7 +749,7 @@ class MainWindow(Adw.ApplicationWindow):
         label = {"connected": "Connected to %s" % st.get("profile"), "connecting": "Connecting…",
                  "reconnecting": "Reconnecting…", "error": "Connection failed"}.get(state, "Not connected")
         locked = (st.get("netlock") or {}).get("engaged")
-        return [
+        items = [
             {"label": label, "enabled": False},
             {"separator": True},
             {"label": "Disconnect" if active else "Connect", "enabled": self._daemon_ok,
@@ -797,6 +757,14 @@ class MainWindow(Adw.ApplicationWindow):
             {"label": "Turn Network Lock %s" % ("Off" if locked else "On"), "enabled": self._daemon_ok,
              "callback": lambda: rpc("netlock.disable" if locked else "netlock.enable",
                                      lambda *_: self.refresh(), self._fail)},
+        ]
+        px = self.proxy_page.status or {}
+        if px.get("name"):                          # a proxy is chosen: offer to switch it on or off
+            on = bool(px.get("enabled"))
+            items.append({"label": "Turn Proxy Off" if on else "Turn Proxy On (%s)" % px["name"],
+                          "enabled": self._daemon_ok and bool(px.get("installed", True)),
+                          "callback": lambda: rpc("proxy.set", self._on_proxy_status, self._fail, enabled=not on)})
+        return items + [
             {"separator": True},
             {"label": "Show VPNMan", "callback": lambda: self.present()},
             {"label": "Quit", "callback": lambda: self.get_application().quit()},
@@ -1598,8 +1566,20 @@ class MainWindow(Adw.ApplicationWindow):
         self._poll_extras()
         return True
 
+    def _on_proxy_status(self, st):
+        self.proxy_page.update_status(st)
+        key = (st.get("name"), st.get("enabled"), st.get("installed"))
+        if key != getattr(self, "_tray_proxy_key", None):
+            self._tray_proxy_key = key
+            tray = getattr(self.get_application(), "tray", None)
+            if tray:
+                tray.update_menu()
+
     def _poll_extras(self):
         """Things that are only worth asking the daemon for while their page is on screen."""
+        if self._ticks % 10 == 0 and self._daemon_ok:
+            # the tray's proxy item and failover notices need the proxy state even when the window is hidden
+            rpc("proxy.status", self._on_proxy_status, None)
         if not self.is_visible():
             return
         page = self.stack.get_visible_child_name()
@@ -1608,7 +1588,7 @@ class MainWindow(Adw.ApplicationWindow):
             if self._ticks % 20 == 0:
                 self.conn_group.refresh_blocked()
         elif page == "servers" and self.srv_tabs.get_visible_child_name() == "proxy" and self._ticks % 3 == 0:
-            rpc("proxy.status", self.proxy_page.update_status, None)
+            rpc("proxy.status", self._on_proxy_status, None)
 
     def _auto_latency(self):
         """Optional: re-test server latency every N minutes while the Servers tab is on screen."""

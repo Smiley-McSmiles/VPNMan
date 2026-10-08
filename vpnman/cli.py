@@ -67,6 +67,18 @@ def format_status(st):
     return "\n".join(lines)
 
 
+def parse_minutes(text):
+    """'30m', '2h', '1d', '1h30m', '90' (minutes) -> minutes."""
+    import re
+    t = str(text).strip().lower()
+    if re.fullmatch(r"\d+", t):
+        return int(t)
+    parts = re.findall(r"(\d+)\s*([dhm])", t)
+    if not parts or re.sub(r"\d+\s*[dhm]", "", t).strip():
+        raise RpcError("cannot read the duration %r (use 30m, 2h, 1d or 1h30m)" % text)
+    return sum(int(n) * {"d": 1440, "h": 60, "m": 1}[u] for n, u in parts)
+
+
 class Cli:
     def __init__(self):
         self.client = Client()
@@ -600,6 +612,11 @@ class Cli:
                 print("  carrying the VPN connection")
             print(dim("  settings: socks_port=%s http_port=%s dns=%s udp=%s" % (
                 st["socks_port"], st["http_port"], st["dns"], st["udp"])))
+            print("  failover: %s" % ("on" if st.get("failover") else dim("off")))
+            lf = st.get("last_failover")
+            if lf:
+                print(yellow("  switched from %s to %s at %s (%s)" % (lf["from"], lf["to"], time.strftime(
+                    "%H:%M", time.localtime(lf["at"])), lf["reason"])))
             if st["error"]:
                 print(red("  error:   %s" % st["error"]))
             if not st["installed"]:
@@ -646,10 +663,38 @@ class Cli:
                 print(red("failed: %s" % f["error"]), file=sys.stderr)
             return 1 if res["failed"] else 0
         if act == "use":
+            if a.fastest and not items:
+                p = self.call("proxy.fastest", group=a.group)
+                print("Using %s (%.1f ms)." % (p["name"], p["latency"]), end="")
+            elif len(items) == 1 and not a.fastest:
+                p = self.call("proxy.select", ident=self._proxy_ident(items[0]))
+                print("Using %s." % p["name"], end="")
+            else:
+                raise RpcError("usage: vpnman proxy use NAME | vpnman proxy use --fastest [--group GROUP]")
+            print("" if self.call("proxy.status")["enabled"] else " Switch the proxy on with: vpnman proxy on")
+            return 0
+        if act == "link":
             if len(items) != 1:
-                raise RpcError("usage: vpnman proxy use NAME")
-            p = self.call("proxy.select", ident=self._proxy_ident(items[0]))
-            print("Using %s. Switch the proxy on with: vpnman proxy on" % p["name"])
+                raise RpcError("usage: vpnman proxy link NAME [--qr]")
+            res = self.call("proxy.link", ident=self._proxy_ident(items[0]))
+            if not res["link"]:
+                raise RpcError("%s has no share link (it was imported from an Xray config)" % res["name"])
+            if a.qr:
+                from . import qr
+                try:
+                    print(qr.to_text(qr.encode(res["link"])))
+                except qr.TooLong as e:
+                    raise RpcError(str(e))
+            print(res["link"])
+            return 0
+        if act == "failover":
+            if len(items) > 1 or (items and items[0] not in ("on", "off")):
+                raise RpcError("usage: vpnman proxy failover [on|off]")
+            if items:
+                self.call("proxy.set", failover=items[0] == "on")
+            on = self.call("proxy.status")["failover"]
+            print("Failover is %s." % ("on: when the server stops answering, VPNMan switches to the next favourite "
+                                       "proxy (else the next of its group)" if on else "off"))
             return 0
         if act in ("on", "off"):
             st = self.call("proxy.set", enabled=(act == "on"))
@@ -719,8 +764,8 @@ class Cli:
                 if p["id"] in lat:
                     print("%-30s %s" % (p["name"], ("%.1f ms" % lat[p["id"]]) if lat[p["id"]] else red("unreachable")))
             return 0
-        raise RpcError("unknown action %r (list, show, add, remove, use, on, off, order, mode, set, edit, status, ping, "
-                       "refresh, sources)" % act)
+        raise RpcError("unknown action %r (list, show, link, add, remove, use, on, off, order, mode, set, edit, status, "
+                       "ping, refresh, sources, failover)" % act)
 
     def _proxy_ident(self, text):
         ps = self.call("proxy.list")
@@ -733,6 +778,7 @@ class Cli:
         raise RpcError("no such proxy: %s" % text if not hits else "'%s' is ambiguous: %s" % (text, ", ".join(h["name"] for h in hits[:6])))
 
     def cmd_blocks(self, a):
+        from . import blocks
         act, items = a.action or "list", a.items
         if act in ("list", "status"):
             st = self.call("blocks.status")
@@ -748,8 +794,10 @@ class Cli:
             for e in st["entries"]:
                 what = {"address": "address", "endpoint": "address:port", "port": "port", "app": "program"}[e["kind"]]
                 proto = "" if e.get("proto", "any") == "any" else e["proto"]
+                how = blocks.lifetime(e)
                 print("  %-8s %s %-13s %-28s %-4s %s" % (e["id"], "on " if e.get("enabled", True) else "off", what, e["value"],
-                                                        proto, dim(e.get("note", ""))))
+                                                        proto, dim("  ".join(x for x in (
+                                                            e.get("note", ""), "" if how == "permanent" else "(%s)" % how) if x))))
             if not st["entries"]:
                 print("  nothing blocked - e.g.: vpnman blocks add address 203.0.113.9")
             return 0
@@ -759,9 +807,12 @@ class Cli:
             return 0
         if act == "add":
             if len(items) != 2:
-                raise RpcError("usage: vpnman blocks add address|endpoint|port|app VALUE [--proto tcp|udp] [--note TEXT]")
-            e = self.call("blocks.add", kind=items[0], value=items[1], proto=a.proto or "any", note=a.note or "")
-            print("%s %s %s%s" % (green("blocked"), items[0], e["value"],
+                raise RpcError("usage: vpnman blocks add address|endpoint|port|app VALUE [--proto tcp|udp] [--note TEXT] "
+                               "[--for DURATION] [--until-reboot]")
+            e = self.call("blocks.add", kind=items[0], value=items[1], proto=a.proto or "any", note=a.note or "",
+                          minutes=parse_minutes(a.for_) if a.for_ else 0, until_reboot=a.until_reboot)
+            how = blocks.lifetime(e)
+            print("%s %s %s%s%s" % (green("blocked"), items[0], e["value"], "" if how == "permanent" else " " + how,
                                   "  (closed %d open connection%s)" % (e["closed"], "" if e["closed"] == 1 else "s") if e.get("closed") else ""))
             return 0
         if act in ("remove", "rm", "enable", "disable"):
@@ -780,6 +831,10 @@ class Cli:
     def cmd_connections(self, a):
         def show():
             res = self.call("connections", listening=a.listening, local=a.local, resolve=a.resolve)
+            if a.csv:
+                from .conntable import to_csv
+                sys.stdout.write(to_csv(res["rows"]))
+                return
             if a.json:
                 print(json.dumps(res, indent=2))
                 return
@@ -795,7 +850,7 @@ class Cli:
                                                           loc[:24], rem[:24], r["state"]))
             if res.get("truncated"):
                 print(dim("(list truncated)"))
-        if not a.watch:
+        if not a.watch or a.csv:
             show()
             return 0
         while True:
@@ -1491,6 +1546,11 @@ def build_parser():
             "                         delete proxies\n"
             "  edit NAME KEY=VALUE... name, group, notes, favorite\n"
             "  use NAME               choose the proxy to use\n"
+            "  use --fastest [--group G]\n"
+            "                         choose the quickest server (of the group, else of the favourites, else of all)\n"
+            "  link NAME [--qr]       print the share link (and a QR code) to move the proxy to another device\n"
+            "  failover [on|off]      switch to the next favourite proxy (else the next of its group) when the server\n"
+            "                         stops answering or Xray keeps stopping\n"
             "  on | off               switch the proxy on or off\n"
             "  order proxy_only|vpn_proxy|proxy_vpn\n"
             "                         proxy_only: you -> proxy -> internet.  vpn_proxy: you -> VPN -> proxy -> internet.\n"
@@ -1504,13 +1564,16 @@ def build_parser():
             ["vpnman proxy add 'vless://...@example.com:443?security=reality&...#Home'", "vpnman proxy add https://example.com/sub/abc",
              "vpnman proxy use Home && vpnman proxy order vpn_proxy && vpnman proxy on", "vpnman proxy mode system",
              "vpnman proxy status", "vpnman proxy remove --group example.com", "xclip -o | vpnman proxy add -"])
-    s.add_argument("action", nargs="?", choices=["list", "show", "add", "remove", "rm", "edit", "use", "on", "off", "order",
-                                                  "mode", "set", "status", "ping", "refresh", "sources"], help="default: list")
+    s.add_argument("action", nargs="?", choices=["list", "show", "link", "add", "remove", "rm", "edit", "use", "on", "off",
+                                                  "order", "mode", "set", "status", "ping", "refresh", "sources",
+                                                  "failover"], help="default: list")
     s.add_argument("items", nargs="*", metavar="ARG", help="links / URLs / names / values (see the actions above)")
     s.add_argument("--name", help="add: name for a single imported proxy")
     s.add_argument("--group", help="add: group to put the imported proxies in (default: the subscription's host); "
-                                   "list, remove: only this group")
+                                   "list, remove, use --fastest: only this group")
     s.add_argument("--all", action="store_true", help="remove: every proxy")
+    s.add_argument("--fastest", action="store_true", help="use: the proxy with the quickest server")
+    s.add_argument("--qr", action="store_true", help="link: also print a QR code")
     s.add_argument("--latency", "-l", action="store_true", help="list: measure every server")
     s.add_argument("--json", action="store_true", help=JSON)
     s = add("blocks", "addresses, ports and programs that may not use the network",
@@ -1520,26 +1583,35 @@ def build_parser():
             "  add KIND VALUE          KIND is address (IP or network), endpoint (ADDRESS:PORT), port or app\n"
             "  remove ID...            unblock\n"
             "  enable|disable ID...    keep an entry in the list but stop (or resume) enforcing it\n"
-            "  on | off                switch the whole list on or off",
+            "  on | off                switch the whole list on or off\n\n"
+            "A block can be temporary: --for 30m (or 2h, 1d, 90 = minutes) ends it after that long, --until-reboot\n"
+            "when the computer restarts. Both together end it at whichever comes first.",
             ["vpnman blocks add address 203.0.113.9", "vpnman blocks add endpoint 203.0.113.9:443 --proto tcp",
-             "vpnman blocks add port 6881 --proto udp --note torrents", "vpnman blocks add app steam", "vpnman blocks remove 3f9a1c2b"])
+             "vpnman blocks add port 6881 --proto udp --note torrents", "vpnman blocks add app steam",
+             "vpnman blocks add app steam --for 2h", "vpnman blocks add address 198.51.100.7 --until-reboot",
+             "vpnman blocks remove 3f9a1c2b"])
     s.add_argument("action", nargs="?", choices=["list", "status", "add", "remove", "rm", "enable", "disable", "on", "off"],
                    help="default: list")
     s.add_argument("items", nargs="*", metavar="ARG", help="add: KIND VALUE; remove/enable/disable: ids")
     s.add_argument("--proto", choices=["any", "tcp", "udp"], help="add: protocol (endpoint and port entries)")
     s.add_argument("--note", help="add: a reminder of why")
+    s.add_argument("--for", dest="for_", metavar="DURATION", help="add: end the block after 30m, 2h, 1d... (minutes "
+                                                                   "when there is no unit)")
+    s.add_argument("--until-reboot", action="store_true", help="add: end the block when the computer restarts")
     s.add_argument("--json", action="store_true", help=JSON)
     s = add("connections", "live list of connections: which application, port and protocol",
             "Show the network connections of this computer as the daemon sees them: the way (in, out, listen), the\n"
             "application and its pid, the protocol, the local and remote address and port, and the TCP state.\n"
             "Connections that never leave this machine and sockets that only listen are hidden unless asked for.\n"
             "On BSD systems other than FreeBSD the application names are not available.",
-            ["vpnman connections", "vpnman connections --listening", "vpnman connections --watch", "vpnman connections --json"])
+            ["vpnman connections", "vpnman connections --listening", "vpnman connections --watch", "vpnman connections --json",
+             "vpnman connections --csv > connections.csv"])
     s.add_argument("--listening", "-l", action="store_true", help="also show sockets that wait for connections")
     s.add_argument("--local", action="store_true", help="also show connections within this computer (loopback)")
     s.add_argument("--resolve", "-r", action="store_true",
                    help="show host names instead of addresses where reverse DNS knows them (sends DNS queries)")
     s.add_argument("--watch", "-w", action="store_true", help="refresh every 2 seconds")
+    s.add_argument("--csv", action="store_true", help="print CSV with a header line (for spreadsheets)")
     s.add_argument("--json", action="store_true", help=JSON)
     s = add("group", "list groups; rename a group or edit all its servers at once",
             "Servers are grouped by the folder they were imported from (or 'vpnman edit PROFILE group=NAME').\n"

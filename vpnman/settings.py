@@ -56,7 +56,8 @@ DEFAULTS = {
     "routes": [],                  # [{"ip": "10.0.0.0/8", "action": "out"}]  out = bypass the VPN
     "blocks": {
         "enabled": True,           # enforce the list below
-        "entries": [],             # [{id, kind: address|endpoint|port|app, value, proto, note, enabled, created}]
+        "entries": [],             # [{id, kind: address|endpoint|port|app, value, proto, note, enabled, created,
+                                   #   expires (0: never), boot ("": survives restarts)}]
     },
     "proxy": {
         "enabled": False,          # use the selected proxy (see vpnman proxy)
@@ -67,6 +68,7 @@ DEFAULTS = {
         "http_port": 10809,
         "dns": "1.1.1.1",          # system mode: the resolver that answers queries (asked through the proxy)
         "udp": "block",            # system mode: block | direct - what happens to UDP other than DNS
+        "failover": False,         # switch to the next favourite proxy (else the group) when the server stops answering
     },
     "events": {
         "pre_connect": "",

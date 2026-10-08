@@ -67,11 +67,11 @@ _vpnman() {
         autostart) _arguments '--login-app[start the tray app at login (this user)]:value:(on off)' ;;
         backup) _arguments '--replace[import: make this computer match the backup (removes other profiles)]' '--settings[import: also restore the settings (always with --replace)]' '--force[export: overwrite an existing file]' '1:action:(export import)' ;;
         block) _arguments '*:profile:_vpnman_profiles' ;;
-        blocks) _arguments '--proto[add: protocol (endpoint and port entries)]:value:(any tcp udp)' '--note[add: a reminder of why]' '--json[print machine-readable JSON instead of text]' '1:action:(list status add remove rm enable disable on off)' ;;
+        blocks) _arguments '--proto[add: protocol (endpoint and port entries)]:value:(any tcp udp)' '--note[add: a reminder of why]' '--for[add: end the block after 30m, 2h, 1d... (minutes when there is no unit)]' '--until-reboot[add: end the block when the computer restarts]' '--json[print machine-readable JSON instead of text]' '1:action:(list status add remove rm enable disable on off)' ;;
         bypass) _arguments '1:action:(list add remove rm available on off mode)' ;;
         cleanup) _arguments '--force[even if the service is running]' ;;
         connect) _arguments '--fastest[measure all servers and use the one with the lowest latency]' '--last[use the last connected profile (the default without a profile)]' '--no-wait[return immediately instead of waiting for the tunnel]' '--timeout[how long to wait (default 90)]' '*:profile:_vpnman_profiles' ;;
-        connections) _arguments '(--listening -l)'{--listening,-l}'[also show sockets that wait for connections]' '--local[also show connections within this computer (loopback)]' '(--resolve -r)'{--resolve,-r}'[show host names instead of addresses where reverse DNS knows them (sends DNS queries)]' '(--watch -w)'{--watch,-w}'[refresh every 2 seconds]' '--json[print machine-readable JSON instead of text]' ;;
+        connections) _arguments '(--listening -l)'{--listening,-l}'[also show sockets that wait for connections]' '--local[also show connections within this computer (loopback)]' '(--resolve -r)'{--resolve,-r}'[show host names instead of addresses where reverse DNS knows them (sends DNS queries)]' '(--watch -w)'{--watch,-w}'[refresh every 2 seconds]' '--csv[print CSV with a header line (for spreadsheets)]' '--json[print machine-readable JSON instead of text]' ;;
         daemon) _arguments '*:: :' ;;
         disconnect) _arguments '*:: :' ;;
         dns) _arguments '*:: :' ;;
@@ -94,7 +94,7 @@ _vpnman() {
         networks) _arguments '1:action:(show trust untrust)' ;;
         ping) _arguments '*:profile:_vpnman_profiles' ;;
         protocols) _arguments '--json[print machine-readable JSON instead of text]' ;;
-        proxy) _arguments '--name[add: name for a single imported proxy]' '--group[add: group to put the imported proxies in (default: the subscription'\''s host); list, remove: only this group]' '--all[remove: every proxy]' '(--latency -l)'{--latency,-l}'[list: measure every server]' '--json[print machine-readable JSON instead of text]' '1:action:(list show add remove rm edit use on off order mode set status ping refresh sources)' ;;
+        proxy) _arguments '--name[add: name for a single imported proxy]' '--group[add: group to put the imported proxies in (default: the subscription'\''s host); list, remove, use --fastest: only this group]' '--all[remove: every proxy]' '--fastest[use: the proxy with the quickest server]' '--qr[link: also print a QR code]' '(--latency -l)'{--latency,-l}'[list: measure every server]' '--json[print machine-readable JSON instead of text]' '1:action:(list show link add remove rm edit use on off order mode set status ping refresh sources failover)' ;;
         remove) _arguments '*:profile:_vpnman_profiles' ;;
         rm) _arguments '*:profile:_vpnman_profiles' ;;
         routes) _arguments '1:action:(list add remove rm)' ;;
