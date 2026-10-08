@@ -20,7 +20,7 @@ import json
 
 from .. import APP_ID, APP_NAME, __version__, autostart, credits, profiles as prof, updates
 from .connpage import ConnectionsGroup
-from .keys import close_keys
+from .keys import close_keys, restore_scroll
 from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .proxypage import ProxyPage
 from .tray import HelperTray, Tray, wants_helper
@@ -1041,7 +1041,7 @@ class MainWindow(Adw.ApplicationWindow):
         clamp = Adw.Clamp(maximum_size=720, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12,
                           valign=Gtk.Align.START)
         clamp.set_child(inner)
-        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroll = self.srv_scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scroll.set_child(clamp)
         self.empty = Adw.StatusPage(icon_name="network-server-symbolic", title="No Profiles",
                                     description="Import an OpenVPN or WireGuard file, or add a server by hand.",
@@ -1647,6 +1647,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.server_names.splice(0, self.server_names.get_n_items(), names)
         self._quiet = False
         self._sync_selector()
+        adj = self.srv_scroll.get_vadjustment()
+        pos = adj.get_value()
         keep = {r.profile["id"] for r in self.listbox.get_selected_rows()}
         child = self.listbox.get_first_child()
         while child:
@@ -1662,6 +1664,7 @@ class MainWindow(Adw.ApplicationWindow):
                 self.listbox.select_row(row)
         self._update_latency()
         self.srv_stack.set_visible_child_name("list" if profiles else "empty")
+        restore_scroll(adj, pos)                      # the rebuilt list must not throw the user back to the top
         self._sync_auto()
 
     def _on_settings(self, settings):

@@ -295,6 +295,16 @@ class App(A.Application):
         pp.do_remove([p["id"] for p in pp.selected_proxies()] + ["%012d" % 3])
         assert CALLS[0] == ("proxy.remove", {"ids": ["%012d" % 2, "%012d" % 3]}), CALLS
         pp.listbox.unselect_all()
+        rows_before = dict(pp._rows)
+        pp.update_list(fake_proxy_list())
+        assert all(pp._rows[k] is v for k, v in rows_before.items()), "an unchanged list must keep its rows (and the scroll position)"
+        CALLS.clear()
+        pp.update_status(PROXY_STATUS)
+        pp._rows["%012d" % 3].use.set_active(True)                     # choosing a proxy must not reload the whole list
+        assert ("proxy.select", {"ident": "%012d" % 3}) in CALLS and not any(c[0] == "proxy.list" for c in CALLS), CALLS
+        pp.update_status(PROXY_STATUS)
+        pp._rows["%012d" % 1].use.set_active(False)                    # the chosen proxy cannot be un-chosen
+        assert pp._rows["%012d" % 1].use.get_active()
         pp.search.set_text("tr")
         pp.listbox.invalidate_filter()
         add = PP.ProxyAddDialog(w, fake_rpc, lambda: None)

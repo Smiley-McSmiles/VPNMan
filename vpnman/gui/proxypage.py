@@ -10,7 +10,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from .. import __version__  # noqa: E402
-from .keys import close_keys  # noqa: E402
+from .keys import close_keys, restore_scroll  # noqa: E402
 
 ORDERS = [
     ("proxy_only", "Proxy only", "You → Proxy → Internet. It runs whenever it is switched on, with or without the VPN."),
@@ -258,9 +258,10 @@ class ProxyPage(Gtk.Box):
         clamp = Adw.Clamp(maximum_size=720, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12,
                           valign=Gtk.Align.START)
         clamp.set_child(box)
-        scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        scroll = self.scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         scroll.set_child(clamp)
         self.append(scroll)
+        self._sig = None
         # selection bar: appears as soon as something is selected
         self.sel_label = Gtk.Label(label="", hexpand=True, xalign=0, margin_start=6)
         sel_all = Gtk.Button(label="Select All")
@@ -286,6 +287,19 @@ class ProxyPage(Gtk.Box):
 
     def update_list(self, proxies):
         self.proxies = proxies
+        sig = [(p["id"], p["name"], p["protocol"], p["server"], p["port"], p.get("group", "")) for p in proxies]
+        if sig == self._sig:
+            # nothing but, perhaps, the chosen proxy changed: leave the rows (and the scroll position) alone
+            for pid, row in self._rows.items():
+                want = any(p["id"] == pid and p.get("selected") for p in proxies)
+                if row.use.get_active() != want:
+                    self._quiet = True
+                    row.use.set_active(want)
+                    self._quiet = False
+            return
+        self._sig = sig
+        adj = self.scroll.get_vadjustment()
+        pos = adj.get_value()
         keep = {r.proxy["id"] for r in self.listbox.get_selected_rows()}
         old = self._rows
         for r in old.values():
@@ -300,6 +314,7 @@ class ProxyPage(Gtk.Box):
         self.empty.set_visible(not proxies)
         self.listbox.set_visible(bool(proxies))
         self.search.set_visible(bool(proxies))
+        restore_scroll(adj, pos)                          # a rebuilt list must not throw the user back to the top
 
     def update_status(self, st):
         self.status = st
@@ -422,9 +437,18 @@ class ProxyPage(Gtk.Box):
             self._set(socks_port=s, http_port=h)
 
     def _on_use(self, btn, p):
-        if self._quiet or not btn.get_active() or p["id"] == self.status.get("selected"):
+        if self._quiet:
             return
-        self.rpc("proxy.select", lambda *_: self.reload(), self._fail, ident=p["id"])
+        if not btn.get_active():
+            if p["id"] == self.status.get("selected"):          # a radio button: the chosen one cannot be un-chosen
+                self._quiet = True
+                btn.set_active(True)
+                self._quiet = False
+            return
+        if p["id"] == self.status.get("selected"):
+            return
+        # only the status is needed back: reloading the whole list would rebuild the rows under the user's cursor
+        self.rpc("proxy.select", lambda *_: self.rpc("proxy.status", self.update_status, None), self._fail, ident=p["id"])
 
     def _copy(self, kind):
         st = self.status
