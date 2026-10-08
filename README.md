@@ -27,8 +27,6 @@ VPNMan is developed and maintained by:
 
 Project GitHub: [https://github.com/Smiley-McSmiles/VPNMan](https://github.com/Smiley-McSmiles/VPNMan)
 
-The same credits are in the app (*main menu → About VPNMan*) and on the command line (`vpnman about`).
-
 ## Architecture
 
 ```
