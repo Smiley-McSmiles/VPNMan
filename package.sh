@@ -90,6 +90,13 @@ CTL
 #!/bin/sh
 set -e
 if [ "$1" = configure ]; then
+    # an install.sh copy in /usr/local comes first in PATH and its unit in /etc/systemd/system overrides this package's:
+    # the upgrade would install fine and keep running the old version
+    if [ -e /usr/local/lib/vpnman/vpnman/__init__.py ] || [ -e /usr/local/bin/vpnman ] || [ -e /usr/local/sbin/vpnman ]; then
+        rm -rf /usr/local/lib/vpnman /usr/local/share/vpnman
+        rm -f /usr/local/bin/vpnman /usr/local/bin/vpnmand /usr/local/bin/vpnman-gtk \
+              /usr/local/sbin/vpnman /usr/local/sbin/vpnmand /usr/local/sbin/vpnman-gtk /etc/systemd/system/vpnmand.service
+    fi
     find /usr/lib/vpnman -name __pycache__ -type d -exec rm -rf {} + >/dev/null 2>&1 || true
     getent group vpnman >/dev/null || addgroup --system vpnman >/dev/null 2>&1 || groupadd -r vpnman
     mkdir -p /etc/vpnman && chmod 700 /etc/vpnman
@@ -184,6 +191,13 @@ DESTDIR=%{buildroot} ./install.sh --prefix /usr --init systemd --no-post
 mkdir -p %{buildroot}/etc/vpnman
 
 %post
+# an install.sh copy in /usr/local comes first in PATH and its unit in /etc/systemd/system overrides this package's:
+# the upgrade would install fine and keep running the old version
+if [ -e /usr/local/lib/vpnman/vpnman/__init__.py ] || [ -e /usr/local/bin/vpnman ] || [ -e /usr/local/sbin/vpnman ]; then
+    rm -rf /usr/local/lib/vpnman /usr/local/share/vpnman
+    rm -f /usr/local/bin/vpnman /usr/local/bin/vpnmand /usr/local/bin/vpnman-gtk \
+          /usr/local/sbin/vpnman /usr/local/sbin/vpnmand /usr/local/sbin/vpnman-gtk /etc/systemd/system/vpnmand.service
+fi
 # stale compiled caches from the previous version must never survive an upgrade
 find /usr/lib/vpnman -name __pycache__ -type d -exec rm -rf {} + >/dev/null 2>&1 || :
 getent group vpnman >/dev/null || groupadd -r vpnman
