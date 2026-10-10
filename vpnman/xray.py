@@ -497,13 +497,16 @@ LAN4 = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.
 
 
 def redirect_ruleset(tcp_port, dns_port, *, exclude=(), allow_lan=True, split_mark=0, udp="block", skip_cgroup="",
-                     allow6=()):
+                     allow6=(), hotspots=()):
     """nftables ruleset that sends this machine's TCP connections and DNS queries to the Xray listeners.
 
     Skipped (they keep their normal route): Xray's own connections (the socket mark), loopback, the networks in
     ``exclude`` (the VPN server, bypass routes), the local network when ``allow_lan``, and applications of the app
     bypass (``split_mark``) and the programs in the cgroup ``skip_cgroup``.  IPv6 (except the networks in ``allow6``)
-    and - with ``udp == "block"`` - all other UDP are dropped so nothing can leave around the proxy.  Priorities sit just before the kill switch (-100) so the redirected packets reach loopback
+    and - with ``udp == "block"`` - all other UDP are dropped so nothing can leave around the proxy.
+    ``hotspots``: interfaces other devices connect to (see hotspot.py).  What they send gets the same treatment:
+    their TCP and DNS go to the Xray listeners (DNAT to 127.0.0.1 - hotspot.route_localnet() must be on for these
+    interfaces), IPv6 and (with udp == "block") other UDP are dropped, ``exclude`` / the local network go direct.  Priorities sit just before the kill switch (-100) so the redirected packets reach loopback
     before it looks at them."""
     skip = ["127.0.0.0/8"] + (LAN4 if allow_lan else []) + [str(ipaddress.ip_network(e, strict=False))
                                                               for e in exclude if ":" not in str(e)]
@@ -527,8 +530,10 @@ def redirect_ruleset(tcp_port, dns_port, *, exclude=(), allow_lan=True, split_ma
         lines.append("    meta mark %s accept" % m)
     if skip_cgroup:
         lines.append('    socket cgroupv2 level 1 "%s" accept' % skip_cgroup)
-    lines += ['    oifname "lo" accept',
-              "    ip daddr { %s } accept" % ", ".join(skip)]
+    lines += ['    oifname "lo" accept']
+    if hotspots:
+        lines.append("    ct status dnat ip saddr 127.0.0.0/8 accept")   # the proxy's answers to a hotspot's devices
+    lines += ["    ip daddr { %s } accept" % ", ".join(skip)]
     six = sorted({str(ipaddress.ip_network(n, strict=False)) for n in allow6})
     if six:
         lines.append("    ip6 daddr { %s } accept" % ", ".join(six))
@@ -536,7 +541,34 @@ def redirect_ruleset(tcp_port, dns_port, *, exclude=(), allow_lan=True, split_ma
               "    meta nfproto ipv6 drop"]
     if udp == "block":
         lines.append("    meta l4proto udp drop")
-    lines += ["  }", "}"]
+    lines.append("  }")
+    if hotspots:
+        hs = ", ".join('"%s"' % h for h in sorted(set(hotspots)))
+        lines += [
+            "  chain guard_pre {",                            # route_localnet must not open 127.0.0.1 to the devices
+            "    type filter hook prerouting priority -200; policy accept;",
+            "    iifname { %s } ip daddr 127.0.0.0/8 drop" % hs,
+            "  }",
+            "  chain redirect_pre {",
+            "    type nat hook prerouting priority -110; policy accept;",
+            "    iifname != { %s } return" % hs,
+            "    fib daddr type local return",                # the hotspot's own DNS / DHCP
+            "    ip daddr { %s } return" % ", ".join(skip),
+            "    meta nfproto ipv4 udp dport 53 dnat ip to 127.0.0.1:%d" % dns_port,
+            "    meta nfproto ipv4 tcp dport 53 dnat ip to 127.0.0.1:%d" % dns_port,
+            "    meta nfproto ipv4 meta l4proto tcp dnat ip to 127.0.0.1:%d" % tcp_port,
+            "  }",
+            "  chain guard_fwd {",
+            "    type filter hook forward priority -105; policy accept;",
+            "    iifname != { %s } accept" % hs]
+        if six:
+            lines.append("    iifname { %s } ip6 daddr { %s } accept" % (hs, ", ".join(six)))
+        lines += ["    meta nfproto ipv6 drop",
+                  "    ip daddr { %s } accept" % ", ".join(skip)]
+        if udp == "block":
+            lines.append("    meta l4proto udp drop")
+        lines.append("  }")
+    lines.append("}")
     return "\n".join(lines) + "\n"
 
 
@@ -554,7 +586,11 @@ def blocked_ruleset(*, exclude=(), allow_lan=True, split_mark=0, skip_cgroup="")
     if skip_cgroup:
         lines.append('    socket cgroupv2 level 1 "%s" accept' % skip_cgroup)
     lines += ['    oifname "lo" accept', "    ip daddr { %s } accept" % ", ".join(skip),
-              "    udp dport { 67, 68 } accept", "    drop", "  }", "}"]
+              "    udp dport { 67, 68 } accept", "    drop", "  }",
+              # devices behind a hotspot or shared connection are blocked as well (their replies from ignored hosts pass)
+              "  chain guard_fwd {", "    type filter hook forward priority -105; policy drop;",
+              "    ip daddr { %s } accept" % ", ".join(skip),
+              "    ct direction reply ip saddr { %s } accept" % ", ".join(skip), "  }", "}"]
     return "\n".join(lines) + "\n"
 
 

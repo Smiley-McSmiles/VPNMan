@@ -17,6 +17,19 @@
   <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.1.0" date="2026-10-10">
+      <description>
+        <ul>
+          <li>New status picture on the main page: a computer, chevrons and the internet. Red when traffic goes out directly, blue with the VPN, green with the proxy, cyan with both; the chevrons flash with the data going out (&gt;&gt;&gt;&gt;&gt;) and coming in (&lt;&lt;&lt;&lt;&lt;)</li>
+          <li>Hotspots: the devices behind a Wi-Fi hotspot (GNOME, KDE Plasma, Cinnamon, hostapd) or a shared connection now take the same way out as the computer: VPN only, proxy only, VPN then proxy, or proxy then VPN, whichever you start first. With the kill switch on, only through the tunnel</li>
+          <li>The proxy (system-wide mode) and the Network Proxy also carry the hotspot's devices (TCP and DNS), and their kill switch blocks them while the proxy is down</li>
+          <li>Fixed: hotspot devices connected but "no internet" while a VPN was up (forwarding was off for the tunnel, so the answers coming back through it were dropped; TCP segment size too big for the tunnel; the kill switch dropped the hotspot's DHCP requests)</li>
+          <li>Connections the devices opened before the VPN or the proxy came on are reset so they start again over the right route</li>
+          <li>New settings connection.share_tunnel (on) and connection.share_ifaces (more interfaces, such as a libvirt bridge)</li>
+          <li>The packages remove an older script install in /usr/local that would hide the packaged version</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.9" date="2026-10-08">
       <description>
         <ul>

@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.0.9-blue.svg?style=flat-square" alt="Version 1.0.9"></a>
+  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.1.0-blue.svg?style=flat-square" alt="Version 1.1.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
   <a href="https://gtk.org"><img src="https://img.shields.io/badge/toolkit-GTK4%20%7C%20Libadwaita-red.svg?style=flat-square" alt="GTK4 Libadwaita"></a>
@@ -99,6 +99,22 @@ in **Servers → Proxy** (or `vpnman proxy add ...`), choose one, and pick how i
 *Mode* `local` gives applications a SOCKS5 and an HTTP proxy on `127.0.0.1`; `system` (Linux) redirects all TCP and DNS of
 the computer into Xray with nftables (IPv6 and other UDP are blocked so nothing goes around it). The kill switch is aware
 of the proxy server. See `man vpnman` (PROXIES) for the details and limits.
+
+### Hotspots
+
+A Wi-Fi hotspot of GNOME, KDE Plasma or Cinnamon (any NetworkManager connection that shares the connection) and a Wi-Fi
+interface in access-point mode (hostapd, create_ap) are found automatically; add others (a libvirt or Docker bridge, a
+USB tether) with `connection.share_ifaces`. The devices behind a hotspot take the same way out as the computer itself -
+VPN only, proxy only, VPN then proxy, or proxy then VPN - and follow every change, whichever you start first:
+
+* **VPN connects while the hotspot is on:** their traffic moves into the tunnel (connections they had open are reset once,
+  so they start again over the tunnel),
+* **kill switch on:** forwarded traffic may only leave through the tunnel, so a dropped VPN cannot leak the devices,
+* **proxy (system-wide mode) or Network Proxy on:** their TCP and DNS go through the proxy too, and the Network Proxy's
+  kill switch blocks them while the proxy is down.
+
+While a VPN is up VPNMan also clamps the TCP segment size to the tunnel's MTU for them and masquerades them into the
+tunnel. Turn it all off with `connection.share_tunnel`. Needs Linux and nftables; `vpnman status` shows the hotspots it found.
 
 ### Network proxy
 
@@ -198,6 +214,7 @@ installed it).
 | Auto-connect at system start (daemon-side: waits for the network, keeps retrying; `last` / `fastest` / a profile) | ✔ |
 | System tray (StatusNotifierItem): status icon, Connect/Disconnect, quick-connect to the last server and favourites, Network Lock toggle, Proxy on/off, Show, Quit | ✔ |
 | **Reconnects at once** when the computer wakes up or the network changes; **per-network rules** (connect to this server / turn the network proxy on or off on this Wi-Fi) (`vpnman networks rule`) | ✔ |
+| **Hotspots follow the VPN and the proxy**: devices on your Wi-Fi hotspot / shared connection are tunneled (and proxied) automatically, whichever you start first | ✔ |
 | **Group order and folding** in the server list (▲ ▼ ▾ in a group's heading, `vpnman group order`) | ✔ |
 | **Diagnostics report** for bug reports with passwords, names and public addresses removed (`vpnman diagnostics`, main menu → Save Diagnostics) | ✔ |
 | Start the tray app at login (XDG autostart; GNOME, KDE, XFCE, …) | ✔ |

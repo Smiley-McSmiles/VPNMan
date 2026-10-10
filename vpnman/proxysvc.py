@@ -16,7 +16,7 @@ import threading
 
 from . import paths
 from . import platform as plat
-from . import blocks, split, xray
+from . import blocks, hotspot, split, xray
 from .profiles import ProfileError, ProfileStore, new_profile
 
 ORDERS = ("proxy_only", "vpn_proxy", "proxy_vpn")
@@ -89,6 +89,7 @@ class ProxyService:
         self.key = None              # what the running local instance was built from
         self.ports = {}
         self._fw_on = False
+        self._rules = None       # builds the redirect ruleset for a list of hotspot interfaces
         self._routes = []
         self.server_ip = ""
         self.probe = connect_ms       # replaced in tests
@@ -398,6 +399,17 @@ class ProxyService:
             return set()
         return set(self.ips(p, live=False))
 
+    def up(self):
+        """(a proxy is carrying this computer's traffic, its name) - for the picture on the main page."""
+        if not self.runner.alive():
+            return False, ""
+        if self.owner == "net":
+            return True, "network proxy"
+        if self.owner in ("local", "carrier"):
+            p = self.selected()
+            return True, p["name"] if p else ""
+        return False, ""
+
     def status(self):
         cfg = self.settings()
         p = self.selected()
@@ -479,10 +491,10 @@ class ProxyService:
             self.ports = {"socks": socks, "http": http}
             if system:
                 allow_lan = bool(self.m.settings.get("netlock.allow_lan"))
-                xray.apply_ruleset(xray.redirect_ruleset(
-                    redirect, dns, exclude=exclude, allow_lan=allow_lan,
-                    split_mark=split.MARK if self.m._split.active else 0, udp=cfg["udp"]))
-                self._fw_on = True
+                split_mark = split.MARK if self.m._split.active else 0
+                self._install(lambda hs: xray.redirect_ruleset(
+                    redirect, dns, exclude=exclude, allow_lan=allow_lan, split_mark=split_mark, udp=cfg["udp"],
+                    hotspots=hs))
             self.m.log.add("info", "Proxy up: SOCKS5 127.0.0.1:%d, HTTP 127.0.0.1:%d%s" % (
                 socks, http, "; all TCP and DNS of this computer go through it" if system else ""))
         except xray.ProxyError as e:
@@ -490,6 +502,35 @@ class ProxyService:
             self.m.log.add("error", "Proxy: %s" % e)
             self._stop_local()
             self.error = str(e)
+
+    def _install(self, make_rules):
+        """Put the redirect in place, for this computer and for the devices behind its hotspots.  ``make_rules(hotspots)``
+        builds the ruleset; it is kept to rebuild it when a hotspot comes or goes (hotspots_changed)."""
+        self._rules = make_rules
+        self._apply_rules()
+        self._fw_on = True
+        self._flush_hotspots()          # connections they opened before took the old route
+
+    def _apply_rules(self):
+        hs = sorted(self.m.hotspots)
+        hotspot.route_localnet(hs)
+        xray.apply_ruleset(self._rules(hs))
+
+    def hotspots_changed(self):
+        """A hotspot appeared or went away: redirect (or stop redirecting) its devices; the proxy keeps running."""
+        with self.lock:
+            if self._fw_on and self._rules:
+                try:
+                    self._apply_rules()
+                except xray.ProxyError as e:
+                    self.m.log.add("error", "Proxy for the hotspot: %s" % e)
+
+    def _flush_hotspots(self):
+        nets = [n for v in self.m.hotspots.values() for n in v]
+        if nets:
+            n = hotspot.flush(nets)
+            if n:
+                self.m.log.add("info", "The devices behind the hotspot reconnect through the new route (%d connections)" % n)
 
     def _stop_local(self, keep_block=False):
         """Stop Xray and take the redirect away.  ``keep_block``: with the network proxy's kill switch, put the
@@ -507,6 +548,9 @@ class ProxyService:
                     split_mark=split.MARK if self.m._split.active else 0,
                     skip_cgroup=blocks.NOPROXY_CGROUP if self.exempt.active else ""))
                 self._fw_on = True
+                self._rules = None
+                hotspot.route_localnet(())
+                self._flush_hotspots()                 # what the devices behind a hotspot have open must stop, too
                 self.net_blocked = True
             except xray.ProxyError as e:
                 self.m.log.add("error", "Network proxy kill switch: %s" % e)
@@ -514,6 +558,9 @@ class ProxyService:
         elif self._fw_on:
             xray.remove_ruleset()
             self._fw_on = False
+            self._rules = None
+            hotspot.route_localnet(())
+            self._flush_hotspots()
         if not block:
             self.net_blocked = False
         self.runner.stop()
@@ -713,12 +760,11 @@ class ProxyService:
                         self.net_error = "programs cannot skip the proxy: %s" % e
                 else:
                     self.net_error = "letting programs skip the proxy needs cgroup v2; the rest works"
-            xray.apply_ruleset(xray.redirect_ruleset(
-                redirect, dns, exclude=exclude + v4 + list(ips.values()),
-                allow_lan=bool(self.m.settings.get("netlock.allow_lan")),
-                split_mark=split.MARK if self.m._split.active else 0, udp=cfg.get("udp") or "block",
-                skip_cgroup=skip, allow6=v6))
-            self._fw_on = True
+            allow_lan = bool(self.m.settings.get("netlock.allow_lan"))
+            split_mark = split.MARK if self.m._split.active else 0
+            self._install(lambda hs: xray.redirect_ruleset(
+                redirect, dns, exclude=exclude + v4 + list(ips.values()), allow_lan=allow_lan, split_mark=split_mark,
+                udp=cfg.get("udp") or "block", skip_cgroup=skip, allow6=v6, hotspots=hs))
             self.m.log.add("info", "Network proxy up: this computer's TCP and DNS go through it")
         except xray.ProxyError as e:
             self.m.log.add("error", "Network proxy: %s" % e)

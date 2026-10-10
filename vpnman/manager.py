@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, backup, blocks, dns, history, leaktest, netlock, network, paths, proxysvc, schedule, split, stunnel, xray
+from . import __version__, backends, backup, blocks, dns, history, hotspot, leaktest, netlock, network, paths, proxysvc, schedule, share, split, stunnel, xray
 from . import platform as plat
 from .backends.base import CredentialsRequired
 from .profiles import ProfileError, ProfileStore, public_view
@@ -109,6 +109,8 @@ class Manager:
         self.lock_engaged = False
         self._lock_endpoints = set()
         self._lock_ifaces = set()
+        self._hotspot = hotspot.Scanner()
+        self.hotspots = {}        # interfaces other devices connect to (a Wi-Fi hotspot...): {interface: [networks]}
         self._status = self._blank_status()
         self._state_cache = {}
         self._last_profile = None
@@ -155,10 +157,29 @@ class Manager:
         with self._mlock:
             s = dict(self._status)
         s["netlock"] = self.netlock_status()
+        s["hotspots"] = sorted(self.hotspots)
+        s["proxy_up"], s["proxy_name"] = self.proxy.up()
+        if s["state"] != "connected":
+            s["rx_rate"], s["tx_rate"] = self._open_rates()          # no tunnel to count: the way out itself
         s["last_profile"] = self._last_profile_id()
         s["version"] = __version__
         s["uptime"] = int(time.time() - s["since"]) if s.get("since") and s["state"] == "connected" else 0
         return s
+
+    def _open_rates(self):
+        """Bytes per second in and out on the interface that carries the traffic (no VPN: the default route)."""
+        now = time.time()
+        if now - getattr(self, "_open_dev_at", 0) > 5:                 # the route is looked up now and then, not every call
+            self._open_dev, self._open_dev_at = plat.default_gateway()[1], now
+        dev = self._open_dev
+        st = plat.iface_stats(dev) if dev else None
+        last, self._open_last = getattr(self, "_open_last", None), None
+        if st:
+            self._open_last = (now, dev, st[0], st[1])
+        if not st or not last or last[1] != dev or now - last[0] <= 0:
+            return 0, 0
+        dt = now - last[0]
+        return max(st[0] - last[2], 0) / dt, max(st[1] - last[3], 0) / dt
 
     # --------------------------------------------------------------- persistent
     def _load_state(self):
@@ -193,6 +214,46 @@ class Manager:
         if not self.lock_engaged:
             self.log.add("info", "Network lock engaged (%s)" % self._fw.name)
         self.lock_engaged = True
+
+    def hotspot_tick(self):
+        """Look for hotspots (every few seconds).  Their devices follow the VPN (share.py) and the proxy: when one
+        comes or goes while a proxy redirect is running, the redirect is rebuilt for it."""
+        if plat.os_family() != "linux":
+            return
+        found = {}
+        if self.settings.get("connection.share_tunnel"):
+            skip = set(self._lock_ifaces) | {self._status.get("iface")}
+            found = self._hotspot.scan(self.settings.get("connection.share_ifaces") or [], skip)
+        if found == self.hotspots:
+            return
+        for dev in sorted(set(found) - set(self.hotspots)):
+            self.log.add("info", "Hotspot %s (%s): its devices follow the VPN and the proxy" % (dev, ", ".join(found[dev])))
+        for dev in sorted(set(self.hotspots) - set(found)):
+            self.log.add("info", "Hotspot %s is gone" % dev)
+        self.hotspots = found
+        self.proxy.hotspots_changed()
+
+    def _hotspot_flush(self):
+        """The route of the devices behind a hotspot changed (the VPN came or went): what they have open took the old
+        one and cannot continue (the NAT address is wrong), so start it again."""
+        nets = [n for v in self.hotspots.values() for n in v]
+        n = hotspot.flush(nets) if nets else 0
+        if n:
+            self.log.add("info", "The devices behind the hotspot reconnect through the new route (%d connections)" % n)
+
+    def _share_sync(self, ifaces):
+        """Other devices behind this computer (hotspot...) get the tunnel: segment size clamp + NAT while it is up."""
+        try:
+            if self.settings.get("connection.share_tunnel"):
+                err = share.apply(ifaces)
+                self._hotspot_flush()
+            else:
+                share.remove()
+                err = ""
+        except Exception as e:  # noqa: BLE001
+            err = str(e)
+        if err:
+            self.log.add("warn", err)
 
     def _lock_remove(self):
         if self.lock_engaged or (self._fw and self._fw.active()):
@@ -241,6 +302,8 @@ class Manager:
         dns.restore_resolv_conf()
         if plat.os_family() == "linux":
             split.cleanup()
+            share.cleanup()
+            hotspot.restore()
             if xray.cleanup():
                 self.log.add("warn", "Removed the proxy firewall rules left by a previous run")
         self.proxy.runner.kill_stale()
@@ -640,6 +703,7 @@ class Manager:
             self._routes_added = routes_added
             self._split_ctx = (gw, gwif, orig_dns)
             self._split_sync()
+            self._share_sync(ifaces)
             self._proxy_sync_safe(vpn_up=True)          # proxy inside the VPN: now that the tunnel carries traffic
             up = True
             self._set(state="connected", iface=primary, since=time.time(), message="", attempt=0)
@@ -713,6 +777,7 @@ class Manager:
                 except OSError as e:
                     self.log.add("warn", "Could not save connection history: %s" % e)
             self._split_ctx = None
+            self._share_sync(())
             self._split_sync()              # stays up for the whitelisted apps if the kill switch is still engaged
             self._proxy_sync_safe(vpn_up=False)    # a proxy that ran inside the VPN stops with it
             self._dns.restore()
@@ -1017,7 +1082,7 @@ class Manager:
     def _net_loop(self, stop):
         last = time.time()
         while not stop.is_set():
-            for name, job in (("network", self.network_tick), ("proxy", self.proxy.watch),
+            for name, job in (("network", self.network_tick), ("hotspot", self.hotspot_tick), ("proxy", self.proxy.watch),
                               ("blocks", self.blocks.expire)):
                 try:
                     job()
