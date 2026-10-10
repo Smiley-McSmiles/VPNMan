@@ -12,6 +12,9 @@ carries (10.99.0.3:8080) and a DNS server that only speaks TCP (10.99.0.6:53).  
   "site" (a namespace behind a veth, 10.98.0.2) through the proxy, its DNS is answered, and an ignored network goes direct,
 * a connection the device opened directly before the proxy came on does not carry on around it: the hotspot's
   tracked connections are flushed (hotspot.flush) and it is reset,
+* the whole chain, as the computer itself has it: VPN, then proxy.  A stand-in tunnel (``tun0``, a veth to a "VPN" namespace)
+  is the only way to the proxy server and to the far site; the hotspot's device gets through to the far site only via
+  the redirect, Xray and the tunnel (the proxy server logs it),
 * with xray dead and the kill switch's block rules in place, nothing but ignored hosts gets out - for the computer
   and for the hotspot's device.
 (That other UDP and IPv6 are blocked is checked on the ruleset text: on loopback the guard lets everything pass.)
@@ -100,6 +103,48 @@ while True:
 def from_client(pid, mode, ip, *extra):
     out = nsx(pid, sys.executable, "-c", CLIENT, mode, ip, *map(str, extra)).stdout.strip()
     return None if out.startswith("FAIL") else out
+
+
+FAR_PROXY = """
+import socket, sys, threading
+LOGF = sys.argv[1]
+def pipe(a, b):
+    try:
+        while True:
+            d = a.recv(65536)
+            if not d: break
+            b.sendall(d)
+    except OSError: pass
+    for x in (a, b):
+        try: x.shutdown(socket.SHUT_RDWR)
+        except OSError: pass
+def handle(c):
+    head = b""
+    while b"\\r\\n\\r\\n" not in head:
+        d = c.recv(4096)
+        if not d: return
+        head += d
+    line = head.split(b"\\r\\n", 1)[0].decode()
+    open(LOGF, "a").write(line + "\\n")
+    host, port = line.split(" ")[1].rsplit(":", 1)
+    u = socket.create_connection((host, int(port)), timeout=5)
+    c.sendall(b"HTTP/1.1 200 Connection established\\r\\n\\r\\n")
+    threading.Thread(target=pipe, args=(c, u), daemon=True).start()
+    pipe(u, c)
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("198.51.100.3", 8080)); s.listen(16)
+while True:
+    c, _ = s.accept()
+    threading.Thread(target=handle, args=(c,), daemon=True).start()
+"""
+
+FAR_SITE = """
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(s):
+        s.send_response(200); s.send_header('Content-Length','4'); s.end_headers(); s.wfile.write(b'far!')
+    def log_message(s,*a): pass
+http.server.HTTPServer(('203.0.113.9',80),H).serve_forever()
+"""
 
 
 def website(ip):
@@ -346,6 +391,45 @@ def main(xray_bin):
                        check=True)
         assert reach(), "ignored hosts still go direct"
         assert client_reach(), "ignored hosts still go direct for the hotspot's devices"
+        # VPN, then proxy: the tunnel is the only way to the proxy server and to the far site
+        xray.remove_ruleset()
+        vpn = subprocess.Popen(["unshare", "-n", "sleep", "300"])
+        procs.append(vpn)
+        time.sleep(0.5)
+        sh("ip", "link", "add", "tun0", "type", "veth", "peer", "name", "tunp")
+        sh("ip", "link", "set", "tunp", "netns", str(vpn.pid))
+        sh("ip", "addr", "add", "10.8.0.2/24", "dev", "tun0")
+        sh("ip", "link", "set", "tun0", "up")
+        nsx(vpn.pid, "ip", "addr", "add", "10.8.0.1/24", "dev", "tunp")
+        nsx(vpn.pid, "ip", "link", "set", "tunp", "up")
+        nsx(vpn.pid, "ip", "link", "set", "lo", "up")
+        for a in ("198.51.100.3/32", "203.0.113.9/32"):
+            nsx(vpn.pid, "ip", "addr", "add", a, "dev", "lo")
+            sh("ip", "route", "add", a, "via", "10.8.0.1", "dev", "tun0")
+        far_log = os.path.join(d, "far.log")
+        for script, extra in ((FAR_PROXY, [far_log]), (FAR_SITE, [])):
+            procs.append(subprocess.Popen(["nsenter", "-t", str(vpn.pid), "-n", sys.executable, "-c", script] + extra,
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        time.sleep(1.0)
+        r2 = xray.free_port()
+        d2 = xray.free_port({r2})
+        conf2 = xray.netproxy_config({"http": ("198.51.100.3", 8080, "", "")}, redirect=r2, dns=d2, mark=xray.MARK,
+                                     dns_server="198.51.100.3", direct_nets=[])
+        path2 = os.path.join(d, "x2.json")
+        with open(path2, "w") as fh:
+            json.dump(conf2, fh)
+        proc2 = subprocess.Popen([xray_bin, "run", "-c", path2], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        procs.append(proc2)
+        time.sleep(1.5)
+        hotspot.route_localnet(["ap0"])
+        subprocess.run(["nft", "-f", "-"], check=True, input=xray.redirect_ruleset(
+            r2, d2, exclude=["198.51.100.3/32"], allow_lan=False, hotspots=["ap0"]).encode())
+        tx = lambda: next(int(l.split()[10]) for l in open("/proc/net/dev") if l.split()[0] == "tun0:")
+        before = tx()
+        assert client_reach("203.0.113.9"), "the hotspot's device reaches the far site"
+        assert tx() > before, "... through the tunnel"
+        logged = open(far_log).read() if os.path.exists(far_log) else ""
+        assert "CONNECT 203.0.113.9:80" in logged, "... through the proxy, which is behind the tunnel"
         ok = True
         print("NETNS-OK")
     finally:

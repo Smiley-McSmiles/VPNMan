@@ -106,7 +106,8 @@ of the proxy server. See `man vpnman` (PROXIES) for the details and limits.
 
 A Wi-Fi hotspot of GNOME, KDE Plasma or Cinnamon (any NetworkManager connection that shares the connection) and a Wi-Fi
 interface in access-point mode (hostapd, create_ap) are found automatically; add others (a libvirt or Docker bridge, a
-USB tether) with `connection.share_ifaces`. The devices behind a hotspot follow the VPN whichever you start first:
+USB tether) with `connection.share_ifaces`. The devices behind a hotspot take the same way out as the computer itself -
+VPN only, proxy only, VPN then proxy, or proxy then VPN - and follow every change, whichever you start first:
 
 * **VPN connects while the hotspot is on:** their traffic moves into the tunnel (connections they had open are reset once,
   so they start again over the tunnel),
