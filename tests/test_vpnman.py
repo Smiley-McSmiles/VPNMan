@@ -2826,6 +2826,48 @@ class RealXrayTests(unittest.TestCase):
         self.assertIn("NETNS-OK", r.stdout, (r.stdout + r.stderr)[-3000:])
 
 
+class ShareTunnelTests(unittest.TestCase):
+    def test_share_ruleset(self):
+        from vpnman import share
+        r = share.ruleset(["tun0", "wg0"])
+        self.assertIn('oifname { "tun0", "wg0" } tcp flags syn tcp option maxseg size set rt mtu', r)
+        self.assertIn('oifname { "tun0", "wg0" } masquerade', r)
+        self.assertIn("delete table inet vpnman_share", r)
+
+    def test_kill_switch_forwards_only_through_the_tunnel(self):
+        r = netlock.nft_ruleset(netlock.Spec(["198.51.100.4"], ["tun0"], allow_lan=False))
+        fwd = r[r.index("chain forward"):]
+        self.assertIn("hook forward priority -100; policy drop", fwd)
+        self.assertIn('oifname { "tun0" } accept', fwd)
+        self.assertNotIn("192.168.0.0/16", fwd)
+        self.assertIn("ip saddr", netlock.nft_ruleset(netlock.Spec([], ["tun0"], allow_lan=True)).split("chain forward")[1])
+        self.assertNotIn("chain forward", netlock.nft_ruleset(netlock.Spec([], ["tun0"], share=False)))
+        # no tunnel yet (reconnecting): the chain must still be valid
+        self.assertNotIn("oifname {  }", netlock.nft_ruleset(netlock.Spec([], [])))
+
+    def test_hotspot_dhcp_and_iptables_forward(self):
+        r = netlock.nft_ruleset(netlock.Spec([], ["tun0"]))
+        self.assertIn("udp sport 68 udp dport 67 accept", r)         # the clients' requests
+        self.assertIn("udp sport 67 udp dport 68 accept", r)         # our answers
+        cmds = netlock.ipt_commands(netlock.Spec([], ["tun0"], allow_lan=False))
+        self.assertIn(["-A", "VPNMAN_FWD", "-o", "tun0", "-j", "ACCEPT"], cmds)
+        self.assertEqual(["-A", "VPNMAN_FWD", "-j", "DROP"], [c for c in cmds if c[:2] == ["-A", "VPNMAN_FWD"]][-1])
+        self.assertFalse([c for c in netlock.ipt_commands(netlock.Spec([], ["tun0"], share=False))
+                          if c[:2] == ["-A", "VPNMAN_FWD"]])
+
+    def test_setting_and_netns(self):
+        import shutil
+        import subprocess
+        self.assertTrue(settings.DEFAULTS["connection"]["share_tunnel"])
+        if os.geteuid() != 0 or not (shutil.which("unshare") and shutil.which("nsenter") and shutil.which("nft")):
+            self.skipTest("needs root, unshare, nsenter and nft")
+        r = subprocess.run(["unshare", "-n", sys.executable, os.path.join(os.path.dirname(__file__), "share_check.py")],
+                           capture_output=True, text=True, timeout=120)
+        if "Operation not permitted" in r.stderr and "SHARE-OK" not in r.stdout:
+            self.skipTest("network namespaces are not allowed here")
+        self.assertIn("SHARE-OK", r.stdout, (r.stdout + r.stderr)[-3000:])
+
+
 class ScheduleTests(unittest.TestCase):
     @staticmethod
     def at(wday, h, m):

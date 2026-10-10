@@ -24,20 +24,22 @@ class Spec:
     """Everything the firewall needs to know."""
 
     def __init__(self, endpoints=(), ifaces=(), allow_lan=True, allow_dhcp=True, allow_ping=False,
-                 block_ipv6=True, whitelist_in=(), whitelist_out=(), split_mark=0):
+                 block_ipv6=True, whitelist_in=(), whitelist_out=(), split_mark=0, share=True):
         self.endpoints = sorted({_norm(e) for e in endpoints})
         self.ifaces = sorted({i for i in ifaces if IFACE_RE.match(i)})
         self.allow_lan, self.allow_dhcp, self.allow_ping = allow_lan, allow_dhcp, allow_ping
         self.block_ipv6 = block_ipv6
         self.whitelist_in = sorted({_norm(e) for e in whitelist_in})
         self.whitelist_out = sorted({_norm(e) for e in whitelist_out})
+        self.share = bool(share)                     # forwarded traffic (hotspot, VMs...) may only leave through the tunnel
         self.split_mark = int(split_mark or 0)       # packets of apps that bypass the VPN (see split.py)
 
     @classmethod
     def from_settings(cls, s, endpoints=(), ifaces=(), split_mark=0, extra_out=()):
         n = s.get("netlock")
         return cls(endpoints, ifaces, n["allow_lan"], n["allow_dhcp"], n["allow_ping"], n["block_ipv6"],
-                   n["whitelist_in"], list(n["whitelist_out"]) + list(extra_out), split_mark)
+                   n["whitelist_in"], list(n["whitelist_out"]) + list(extra_out), split_mark,
+                   bool(s.get("connection.share_tunnel")))
 
 
 def _norm(addr):
@@ -87,13 +89,28 @@ def nft_ruleset(spec):
         out.append("udp sport 546 udp dport 547 accept")
         inn.append("udp sport 67 udp dport 68 accept")
         inn.append("udp sport 547 udp dport 546 accept")
+        inn.append("udp sport 68 udp dport 67 accept")          # a hotspot / shared connection hands out addresses
+        out.append("udp sport 67 udp dport 68 accept")
     if spec.allow_ping:
         out.append("icmp type echo-request accept")
         out.append("icmpv6 type echo-request accept")
         inn.append("icmp type echo-request accept")
         inn.append("icmpv6 type echo-request accept")
+    fwd = []
+    if spec.share:
+        if spec.block_ipv6:
+            fwd.append("meta nfproto ipv6 drop")
+        fwd.append("ct state established,related accept")
+        if ifs:
+            fwd.append("oifname { %s } accept" % ifs)
+        if spec.allow_lan:
+            fwd.append("ip saddr { %s } ip daddr { %s } accept" % (", ".join(LAN4), ", ".join(LAN4)))
+            fwd.append("ip6 saddr { %s } ip6 daddr { %s } accept" % (", ".join(LAN6), ", ".join(LAN6)))
     body = ["table inet vpnman", "delete table inet vpnman", "table inet vpnman {"]
-    for name, hook, rules in (("input", "input", inn), ("output", "output", out)):
+    chains = [("input", "input", inn), ("output", "output", out)]
+    if spec.share:
+        chains.append(("forward", "forward", fwd))
+    for name, hook, rules in chains:
         body.append("  chain %s {" % name)
         body.append("    type filter hook %s priority -100; policy drop;" % hook)
         body += ["    " + r for r in rules]
@@ -128,8 +145,19 @@ def ipt_commands(spec, v6=False):
     """Return a list of argv lists (without the binary) that builds the chains."""
     ep, wo, wi = (_split(x)[1 if v6 else 0] for x in (spec.endpoints, spec.whitelist_out, spec.whitelist_in))
     lan = LAN6 if v6 else LAN4
-    O, I = "VPNMAN_OUT", "VPNMAN_IN"
-    c = [["-N", O], ["-N", I], ["-F", O], ["-F", I]]
+    O, I, F = "VPNMAN_OUT", "VPNMAN_IN", "VPNMAN_FWD"
+    c = [["-N", O], ["-N", I], ["-N", F], ["-F", O], ["-F", I], ["-F", F]]
+    if spec.share:                       # forwarded traffic (hotspot, VMs...) may only leave through the tunnel
+        if spec.block_ipv6 and v6:
+            c.append(["-A", F, "-j", "DROP"])
+        else:
+            c.append(["-A", F, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"])
+            for i in spec.ifaces:
+                c.append(["-A", F, "-o", i, "-j", "ACCEPT"])
+            if spec.allow_lan:
+                for a in (LAN6 if v6 else LAN4):
+                    c.append(["-A", F, "-s", a, "-d", a, "-j", "ACCEPT"])
+            c.append(["-A", F, "-j", "DROP"])
     c.append(["-A", O, "-o", "lo", "-j", "ACCEPT"])
     c.append(["-A", I, "-i", "lo", "-j", "ACCEPT"])
     if spec.block_ipv6 and v6:
@@ -158,6 +186,8 @@ def ipt_commands(spec, v6=False):
         else:
             c.append(["-A", O, "-p", "udp", "--sport", "68", "--dport", "67", "-j", "ACCEPT"])
             c.append(["-A", I, "-p", "udp", "--sport", "67", "--dport", "68", "-j", "ACCEPT"])
+            c.append(["-A", I, "-p", "udp", "--sport", "68", "--dport", "67", "-j", "ACCEPT"])     # hotspot: we are the server
+            c.append(["-A", O, "-p", "udp", "--sport", "67", "--dport", "68", "-j", "ACCEPT"])
     if spec.allow_ping:
         icmp = "icmpv6" if v6 else "icmp"
         c.append(["-A", O, "-p", icmp, "--%s-type" % icmp, "echo-request", "-j", "ACCEPT"])
@@ -186,7 +216,7 @@ class IptFirewall:
 
     def _teardown(self):
         for b in self._bins():
-            for chain, parent in (("VPNMAN_OUT", "OUTPUT"), ("VPNMAN_IN", "INPUT")):
+            for chain, parent in (("VPNMAN_OUT", "OUTPUT"), ("VPNMAN_IN", "INPUT"), ("VPNMAN_FWD", "FORWARD")):
                 while plat.run([b, "-w", "-D", parent, "-j", chain])[0] == 0:
                     pass
                 plat.run([b, "-w", "-F", chain])
@@ -201,7 +231,9 @@ class IptFirewall:
                     rc, out = plat.run([b, "-w"] + args)
                     if rc and args[0] != "-N":
                         raise RuntimeError("%s %s: %s" % (os.path.basename(b), " ".join(args), out.strip()))
-                for chain, parent in (("VPNMAN_OUT", "OUTPUT"), ("VPNMAN_IN", "INPUT")):
+                for chain, parent in (("VPNMAN_OUT", "OUTPUT"), ("VPNMAN_IN", "INPUT"), ("VPNMAN_FWD", "FORWARD")):
+                    if chain == "VPNMAN_FWD" and not spec.share:
+                        continue
                     rc, out = plat.run([b, "-w", "-I", parent, "1", "-j", chain])
                     if rc:
                         raise RuntimeError(out.strip())
@@ -243,6 +275,8 @@ def pf_ruleset(spec):
     if spec.allow_dhcp:
         r.append("pass out quick inet proto udp from port 68 to port 67")
         r.append("pass in quick inet proto udp from port 67 to port 68")
+        r.append("pass in quick inet proto udp from port 68 to port 67")
+        r.append("pass out quick inet proto udp from port 67 to port 68")
         r.append("pass out quick inet6 proto udp from port 546 to port 547")
         r.append("pass in quick inet6 proto udp from port 547 to port 546")
     if spec.allow_ping:

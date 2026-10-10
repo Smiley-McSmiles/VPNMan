@@ -825,6 +825,11 @@ Fail over to another server, and prefer servers of the same group.
 .B connection.timeout \fR(60)
 Seconds to wait for a tunnel to come up.
 .TP
+.B connection.share_tunnel \fR(true)
+Devices behind this computer (a Wi-Fi hotspot, a shared Ethernet connection, virtual machines, containers) use the
+tunnel: while a VPN is up VPNMan clamps the TCP segment size of their connections and masquerades them into the tunnel,
+and the kill switch lets forwarded traffic leave only through the tunnel. Needs nftables.
+.TP
 .B connection.reconnect_on_change \fR(true)
 Reconnect at once when the computer wakes up or the network (gateway) changes.
 .TP

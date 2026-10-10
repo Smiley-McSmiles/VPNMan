@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, backup, blocks, dns, history, leaktest, netlock, network, paths, proxysvc, schedule, split, stunnel, xray
+from . import __version__, backends, backup, blocks, dns, history, leaktest, netlock, network, paths, proxysvc, schedule, share, split, stunnel, xray
 from . import platform as plat
 from .backends.base import CredentialsRequired
 from .profiles import ProfileError, ProfileStore, public_view
@@ -194,6 +194,19 @@ class Manager:
             self.log.add("info", "Network lock engaged (%s)" % self._fw.name)
         self.lock_engaged = True
 
+    def _share_sync(self, ifaces):
+        """Other devices behind this computer (hotspot...) get the tunnel: segment size clamp + NAT while it is up."""
+        try:
+            if self.settings.get("connection.share_tunnel"):
+                err = share.apply(ifaces)
+            else:
+                share.remove()
+                err = ""
+        except Exception as e:  # noqa: BLE001
+            err = str(e)
+        if err:
+            self.log.add("warn", err)
+
     def _lock_remove(self):
         if self.lock_engaged or (self._fw and self._fw.active()):
             self._firewall().remove()
@@ -241,6 +254,7 @@ class Manager:
         dns.restore_resolv_conf()
         if plat.os_family() == "linux":
             split.cleanup()
+            share.cleanup()
             if xray.cleanup():
                 self.log.add("warn", "Removed the proxy firewall rules left by a previous run")
         self.proxy.runner.kill_stale()
@@ -640,6 +654,7 @@ class Manager:
             self._routes_added = routes_added
             self._split_ctx = (gw, gwif, orig_dns)
             self._split_sync()
+            self._share_sync(ifaces)
             self._proxy_sync_safe(vpn_up=True)          # proxy inside the VPN: now that the tunnel carries traffic
             up = True
             self._set(state="connected", iface=primary, since=time.time(), message="", attempt=0)
@@ -713,6 +728,7 @@ class Manager:
                 except OSError as e:
                     self.log.add("warn", "Could not save connection history: %s" % e)
             self._split_ctx = None
+            self._share_sync(())
             self._split_sync()              # stays up for the whitelisted apps if the kill switch is still engaged
             self._proxy_sync_safe(vpn_up=False)    # a proxy that ran inside the VPN stops with it
             self._dns.restore()
