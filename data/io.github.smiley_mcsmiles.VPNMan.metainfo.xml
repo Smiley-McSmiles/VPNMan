@@ -17,6 +17,18 @@
   <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.1.0" date="2026-10-10">
+      <description>
+        <ul>
+          <li>Hotspots: the devices behind a Wi-Fi hotspot (GNOME, KDE Plasma, Cinnamon, hostapd) or a shared connection now follow the VPN and the proxies. Start the hotspot first and connect the VPN later, or the other way round: their traffic goes through the tunnel, and with the kill switch on only through it</li>
+          <li>The proxy (system-wide mode) and the Network Proxy also carry the hotspot's devices (TCP and DNS), and their kill switch blocks them while the proxy is down</li>
+          <li>Fixed: hotspot devices connected but "no internet" while a VPN was up (TCP segment size too big for the tunnel; the kill switch dropped the hotspot's DHCP requests)</li>
+          <li>Connections the devices opened before the VPN or the proxy came on are reset so they start again over the right route</li>
+          <li>New settings connection.share_tunnel (on) and connection.share_ifaces (more interfaces, such as a libvirt bridge)</li>
+          <li>The packages remove an older script install in /usr/local that would hide the packaged version</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.9" date="2026-10-08">
       <description>
         <ul>

@@ -2840,6 +2840,7 @@ class ShareTunnelTests(unittest.TestCase):
         self.assertIn("hook forward priority -100; policy drop", fwd)
         self.assertIn('oifname { "tun0" } accept', fwd)
         self.assertNotIn("192.168.0.0/16", fwd)
+        self.assertIn("198.51.100.4/32", fwd)                         # the addresses that skip the VPN, for the devices too
         self.assertIn("ip saddr", netlock.nft_ruleset(netlock.Spec([], ["tun0"], allow_lan=True)).split("chain forward")[1])
         self.assertNotIn("chain forward", netlock.nft_ruleset(netlock.Spec([], ["tun0"], share=False)))
         # no tunnel yet (reconnecting): the chain must still be valid
@@ -2866,6 +2867,138 @@ class ShareTunnelTests(unittest.TestCase):
         if "Operation not permitted" in r.stderr and "SHARE-OK" not in r.stdout:
             self.skipTest("network namespaces are not allowed here")
         self.assertIn("SHARE-OK", r.stdout, (r.stdout + r.stderr)[-3000:])
+
+
+class HotspotTests(unittest.TestCase):
+    ADDR = ("1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n"
+            "2: wlp3s0    inet 192.168.1.20/24 brd 192.168.1.255 scope global dynamic wlp3s0\\\n"
+            "3: ap0    inet 10.42.0.1/24 brd 10.42.0.255 scope global noprefixroute ap0\\\n"
+            "4: virbr0    inet 192.168.122.1/24 brd 192.168.122.255 scope global virbr0\\\n"
+            "5: tun0    inet 10.8.0.2/24 scope global tun0\\\n"
+            "6: eth9    inet 8.8.4.4/24 scope global eth9\\\n")
+
+    def _scan(self, nm_shared=(), ap=(), extra=(), exclude=()):
+        from vpnman import hotspot
+        calls = []
+        real = (hotspot.addresses, hotspot._nm_shared, hotspot._access_point)
+        try:
+            from vpnman import platform as plat
+            old_run, old_which, old_fam = plat.run, plat.which, plat.os_family
+            plat.os_family = lambda: "linux"
+            plat.which = lambda n: "/usr/sbin/" + n
+            plat.run = lambda cmd, **kw: (0, self.ADDR) if cmd[1:3] == ["-o", "-4"] else (1, "")
+            hotspot._nm_shared = lambda: calls.append("nm") or set(nm_shared)
+            hotspot._access_point = lambda d: d in ap
+            sc = hotspot.Scanner()
+            first = sc.scan(extra, exclude)
+            second = sc.scan(extra, exclude)
+            return first, second, calls
+        finally:
+            plat.run, plat.which, plat.os_family = old_run, old_which, old_fam
+            hotspot.addresses, hotspot._nm_shared, hotspot._access_point = real
+
+    def test_finds_networkmanager_hotspots_and_access_points(self):
+        first, second, calls = self._scan(nm_shared={"ap0"})
+        self.assertEqual(first, {"ap0": ["10.42.0.0/24"]})          # not the uplink, a bridge, the tunnel or a public address
+        self.assertEqual(first, second)
+        self.assertEqual(calls, ["nm"])                              # NetworkManager is asked once while nothing changes
+        first, _, _ = self._scan(ap={"wlp3s0"}, exclude={"tun0"})
+        self.assertEqual(list(first), ["wlp3s0"])
+
+    def test_manual_interfaces_and_exclusions(self):
+        first, _, _ = self._scan(extra=["virbr0"])
+        self.assertEqual(first, {"virbr0": ["192.168.122.0/24"]})
+        first, _, _ = self._scan(nm_shared={"ap0"}, exclude={"ap0"})
+        self.assertEqual(first, {})
+
+    def test_redirect_rules_for_hotspots(self):
+        r = _xray.redirect_ruleset(1081, 1082, exclude=["203.0.113.5/32"], allow_lan=False, hotspots=["ap0", "wlp3s0"])
+        self.assertIn('iifname { "ap0", "wlp3s0" } ip daddr 127.0.0.0/8 drop', r)      # route_localnet must not open loopback
+        self.assertIn("hook prerouting priority -110", r)
+        self.assertIn("fib daddr type local return", r)
+        self.assertIn("dnat ip to 127.0.0.1:1081", r)
+        self.assertIn("udp dport 53 dnat ip to 127.0.0.1:1082", r)
+        self.assertIn("203.0.113.5/32", r.split("chain redirect_pre")[1])
+        self.assertIn("ct status dnat ip saddr 127.0.0.0/8 accept", r)                 # the proxy's answers get out
+        self.assertIn("meta l4proto udp drop", r.split("chain guard_fwd")[1])
+        plain = _xray.redirect_ruleset(1081, 1082, exclude=[], allow_lan=False)
+        self.assertNotIn("prerouting", plain)
+        self.assertNotIn("guard_fwd", plain)
+
+    def test_kill_switch_blocks_forwarded_traffic_too(self):
+        r = _xray.blocked_ruleset(exclude=["203.0.113.5/32"], allow_lan=False)
+        fwd = r.split("chain guard_fwd")[1]
+        self.assertIn("policy drop", fwd)
+        self.assertIn("ct direction reply ip saddr", fwd)
+        self.assertIn("203.0.113.5/32", fwd)
+
+    def test_lock_lets_the_redirect_through(self):
+        r = netlock.nft_ruleset(netlock.Spec([], ["tun0"], allow_lan=False))
+        self.assertIn('iifname != "lo" ct status dnat ip daddr 127.0.0.0/8 accept', r)
+        self.assertIn('oifname != "lo" ct status dnat ip saddr 127.0.0.0/8 accept', r)
+
+    def test_route_localnet_is_restored(self):
+        from vpnman import hotspot
+        d = tempfile.mkdtemp()
+        os.environ["VPNMAN_RUN_DIR"] = d
+        try:
+            for dev, val in (("ap0", "0"), ("ap1", "1")):
+                with open(os.path.join(d, dev), "w") as fh:
+                    fh.write(val)
+            old = hotspot._sysctl
+            hotspot._sysctl = lambda dev: os.path.join(d, dev)
+            try:
+                hotspot.route_localnet(["ap0", "ap1"])
+                self.assertEqual(open(os.path.join(d, "ap0")).read(), "1")
+                hotspot.route_localnet(["ap1"])                           # ap0 is no longer a hotspot: back to what it was
+                self.assertEqual(open(os.path.join(d, "ap0")).read(), "0")
+                hotspot.restore()                                         # a crashed daemon's change is undone at start
+                self.assertEqual(open(os.path.join(d, "ap1")).read(), "1")
+                self.assertFalse(os.path.exists(os.path.join(d, "route_localnet.json")))
+            finally:
+                hotspot._sysctl = old
+        finally:
+            os.environ.pop("VPNMAN_RUN_DIR", None)
+
+    def test_proxy_rebuilds_its_rules_when_a_hotspot_comes(self):
+        from vpnman import hotspot
+        m = Manager(settings=settings.Settings(TMP + "/hp-%d.json" % id(self)))
+        applied, localnet = [], []
+        old = (_xray.apply_ruleset, hotspot.route_localnet)
+        _xray.apply_ruleset = lambda text: applied.append(text)
+        hotspot.route_localnet = lambda ifaces: localnet.append(list(ifaces))
+        try:
+            m.proxy.hotspots_changed()                                   # no redirect running: nothing to rebuild
+            m.proxy._rules, m.proxy._fw_on = (lambda hs: "rules for " + ",".join(hs)), True
+            m.hotspots = {"ap0": ["10.42.0.0/24"]}
+            m.proxy.hotspots_changed()
+        finally:
+            _xray.apply_ruleset, hotspot.route_localnet = old
+        self.assertEqual(applied, ["rules for ap0"])
+        self.assertEqual(localnet, [["ap0"]])
+
+    def test_manager_follows_hotspots(self):
+        s = settings.Settings(TMP + "/hs-%d.json" % id(self))
+        m = Manager(settings=s)
+        seen = []
+        m.proxy.hotspots_changed = lambda: seen.append(dict(m.hotspots))
+        found = {"ap0": ["10.42.0.0/24"]}
+        m._hotspot = type("S", (), {"scan": lambda self_, extra, skip: dict(found)})()
+        from vpnman import platform as plat
+        old = plat.os_family
+        plat.os_family = lambda: "linux"
+        try:
+            m.hotspot_tick()
+            m.hotspot_tick()                                              # unchanged: nothing to do
+            found.clear()
+            m.hotspot_tick()
+            s.update({"connection": {"share_tunnel": False}})
+            found["ap0"] = ["10.42.0.0/24"]
+            m.hotspot_tick()                                              # sharing is off: not a hotspot for us
+        finally:
+            plat.os_family = old
+        self.assertEqual(seen, [{"ap0": ["10.42.0.0/24"]}, {}])
+        self.assertEqual(m.status()["hotspots"], [])
 
 
 class ScheduleTests(unittest.TestCase):

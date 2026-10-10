@@ -70,6 +70,9 @@ def nft_ruleset(spec):
         out.append("meta mark 0x%x accept" % spec.split_mark)
         inn.append("ct mark 0x%x accept" % spec.split_mark)
     inn.append("ct state established,related accept")
+    # a hotspot's devices redirected to the local proxy (xray.redirect_ruleset): DNAT to loopback, and the answers back
+    inn.append('iifname != "lo" ct status dnat ip daddr 127.0.0.0/8 accept')
+    out.append('oifname != "lo" ct status dnat ip saddr 127.0.0.0/8 accept')
     if ifs:
         out.append("oifname { %s } accept" % ifs)
         inn.append("iifname { %s } accept" % ifs)
@@ -103,6 +106,9 @@ def nft_ruleset(spec):
         fwd.append("ct state established,related accept")
         if ifs:
             fwd.append("oifname { %s } accept" % ifs)
+        for fam, addrs in (("ip", ep4 + wo4), ("ip6", ep6 + wo6)):      # the addresses that skip the VPN, for the devices too
+            if addrs:
+                fwd.append("%s daddr { %s } accept" % (fam, ", ".join(addrs)))
         if spec.allow_lan:
             fwd.append("ip saddr { %s } ip daddr { %s } accept" % (", ".join(LAN4), ", ".join(LAN4)))
             fwd.append("ip6 saddr { %s } ip6 daddr { %s } accept" % (", ".join(LAN6), ", ".join(LAN6)))
@@ -154,6 +160,8 @@ def ipt_commands(spec, v6=False):
             c.append(["-A", F, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"])
             for i in spec.ifaces:
                 c.append(["-A", F, "-o", i, "-j", "ACCEPT"])
+            for a in ep + wo:
+                c.append(["-A", F, "-d", a, "-j", "ACCEPT"])
             if spec.allow_lan:
                 for a in (LAN6 if v6 else LAN4):
                     c.append(["-A", F, "-s", a, "-d", a, "-j", "ACCEPT"])
@@ -168,6 +176,9 @@ def ipt_commands(spec, v6=False):
         c.append(["-A", O, "-m", "mark", "--mark", "0x%x" % spec.split_mark, "-j", "ACCEPT"])
         c.append(["-A", I, "-m", "connmark", "--mark", "0x%x" % spec.split_mark, "-j", "ACCEPT"])
     c.append(["-A", I, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"])
+    if not v6:      # a hotspot's devices redirected to the local proxy (see the nft rules)
+        c.append(["-A", I, "-m", "conntrack", "--ctstate", "DNAT", "-d", "127.0.0.0/8", "-j", "ACCEPT"])
+        c.append(["-A", O, "-m", "conntrack", "--ctstate", "DNAT", "-s", "127.0.0.0/8", "-j", "ACCEPT"])
     for i in spec.ifaces:
         c.append(["-A", O, "-o", i, "-j", "ACCEPT"])
         c.append(["-A", I, "-i", i, "-j", "ACCEPT"])

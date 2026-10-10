@@ -2016,8 +2016,8 @@ class PreferencesWindow(Adw.PreferencesWindow):
         g.add(self._switch("connection.reconnect_on_change", "Reconnect when the network changes",
                            "Reconnect at once after the computer wakes up or you switch Wi-Fi / Ethernet"))
         g.add(self._switch("connection.share_tunnel", "Share the VPN with hotspots and other devices",
-                           "Wi-Fi hotspot, shared Ethernet, virtual machines: their traffic goes through the tunnel, and "
-                           "only through it while the kill switch is on"))
+                           "A Wi-Fi hotspot or shared connection: its devices go through the tunnel (and the proxy), "
+                           "whichever you start first, and only through them while the kill switch is on"))
         page.add(g)
         g = Adw.PreferencesGroup(title="OpenVPN")
         g.add(self._entry("connection.openvpn_args", "Extra arguments", "comma separated"))

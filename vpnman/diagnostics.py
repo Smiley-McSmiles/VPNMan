@@ -162,6 +162,7 @@ def build(m):
         out.append("network proxy: %s" % json.dumps(scrub(m.proxy.net_status())))
     except Exception as e:  # noqa: BLE001
         out.append("proxy: unavailable (%s)" % e)
+    out.append("hotspots: %s" % (", ".join("%s %s" % (k, ",".join(v)) for k, v in sorted(m.hotspots.items())) or "none"))
     try:
         out.append("blocked connections: %d entries" % len(m.blocks.list()))
     except Exception:  # noqa: BLE001
@@ -180,7 +181,8 @@ def build(m):
     out.append(json.dumps(scrub(m.settings.get(None) if hasattr(m.settings, "get") else {}), indent=1, sort_keys=True,
                           default=str))
     sec("Firewall tables")
-    for fam, table in (("inet", "vpnman"), ("inet", "vpnman_split"), ("inet", "vpnman_proxy"), ("inet", "vpnman_block")):
+    for fam, table in (("inet", "vpnman"), ("inet", "vpnman_split"), ("inet", "vpnman_proxy"), ("inet", "vpnman_block"),
+                         ("inet", "vpnman_share")):
         nft = shutil.which("nft")
         if nft and plat.os_family() == "linux":
             rc, _ = plat.run([nft, "list", "table", fam, table])

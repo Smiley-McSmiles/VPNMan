@@ -1,4 +1,4 @@
-.TH VPNMAN 1 "October 2026" "vpnman 1.0.9" "User Commands"
+.TH VPNMAN 1 "October 2026" "vpnman 1.1.0" "User Commands"
 .\" Written for man(7) / mdoc-free roff so it renders on every man implementation (man-db, mandoc, BSD).
 .SH NAME
 vpnman, vpnmand, vpnman\-gtk \- multi\-protocol VPN manager with a kill switch
@@ -829,6 +829,11 @@ Seconds to wait for a tunnel to come up.
 Devices behind this computer (a Wi-Fi hotspot, a shared Ethernet connection, virtual machines, containers) use the
 tunnel: while a VPN is up VPNMan clamps the TCP segment size of their connections and masquerades them into the tunnel,
 and the kill switch lets forwarded traffic leave only through the tunnel. Needs nftables.
+.TP
+.B connection.share_ifaces \fR(empty)
+More interfaces to treat as hotspots, for example a libvirt or Docker bridge. The Wi-Fi hotspots of GNOME, KDE Plasma and
+Cinnamon (NetworkManager connections that share the connection) and Wi-Fi interfaces in access-point mode are found
+automatically; the devices behind them follow the VPN and, with the proxy in system-wide mode or the network proxy on, the proxy.
 .TP
 .B connection.reconnect_on_change \fR(true)
 Reconnect at once when the computer wakes up or the network (gateway) changes.

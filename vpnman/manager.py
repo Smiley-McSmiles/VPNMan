@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, backup, blocks, dns, history, leaktest, netlock, network, paths, proxysvc, schedule, share, split, stunnel, xray
+from . import __version__, backends, backup, blocks, dns, history, hotspot, leaktest, netlock, network, paths, proxysvc, schedule, share, split, stunnel, xray
 from . import platform as plat
 from .backends.base import CredentialsRequired
 from .profiles import ProfileError, ProfileStore, public_view
@@ -109,6 +109,8 @@ class Manager:
         self.lock_engaged = False
         self._lock_endpoints = set()
         self._lock_ifaces = set()
+        self._hotspot = hotspot.Scanner()
+        self.hotspots = {}        # interfaces other devices connect to (a Wi-Fi hotspot...): {interface: [networks]}
         self._status = self._blank_status()
         self._state_cache = {}
         self._last_profile = None
@@ -155,6 +157,7 @@ class Manager:
         with self._mlock:
             s = dict(self._status)
         s["netlock"] = self.netlock_status()
+        s["hotspots"] = sorted(self.hotspots)
         s["last_profile"] = self._last_profile_id()
         s["version"] = __version__
         s["uptime"] = int(time.time() - s["since"]) if s.get("since") and s["state"] == "connected" else 0
@@ -194,11 +197,38 @@ class Manager:
             self.log.add("info", "Network lock engaged (%s)" % self._fw.name)
         self.lock_engaged = True
 
+    def hotspot_tick(self):
+        """Look for hotspots (every few seconds).  Their devices follow the VPN (share.py) and the proxy: when one
+        comes or goes while a proxy redirect is running, the redirect is rebuilt for it."""
+        if plat.os_family() != "linux":
+            return
+        found = {}
+        if self.settings.get("connection.share_tunnel"):
+            skip = set(self._lock_ifaces) | {self._status.get("iface")}
+            found = self._hotspot.scan(self.settings.get("connection.share_ifaces") or [], skip)
+        if found == self.hotspots:
+            return
+        for dev in sorted(set(found) - set(self.hotspots)):
+            self.log.add("info", "Hotspot %s (%s): its devices follow the VPN and the proxy" % (dev, ", ".join(found[dev])))
+        for dev in sorted(set(self.hotspots) - set(found)):
+            self.log.add("info", "Hotspot %s is gone" % dev)
+        self.hotspots = found
+        self.proxy.hotspots_changed()
+
+    def _hotspot_flush(self):
+        """The route of the devices behind a hotspot changed (the VPN came or went): what they have open took the old
+        one and cannot continue (the NAT address is wrong), so start it again."""
+        nets = [n for v in self.hotspots.values() for n in v]
+        n = hotspot.flush(nets) if nets else 0
+        if n:
+            self.log.add("info", "The devices behind the hotspot reconnect through the new route (%d connections)" % n)
+
     def _share_sync(self, ifaces):
         """Other devices behind this computer (hotspot...) get the tunnel: segment size clamp + NAT while it is up."""
         try:
             if self.settings.get("connection.share_tunnel"):
                 err = share.apply(ifaces)
+                self._hotspot_flush()
             else:
                 share.remove()
                 err = ""
@@ -255,6 +285,7 @@ class Manager:
         if plat.os_family() == "linux":
             split.cleanup()
             share.cleanup()
+            hotspot.restore()
             if xray.cleanup():
                 self.log.add("warn", "Removed the proxy firewall rules left by a previous run")
         self.proxy.runner.kill_stale()
@@ -1033,7 +1064,7 @@ class Manager:
     def _net_loop(self, stop):
         last = time.time()
         while not stop.is_set():
-            for name, job in (("network", self.network_tick), ("proxy", self.proxy.watch),
+            for name, job in (("network", self.network_tick), ("hotspot", self.hotspot_tick), ("proxy", self.proxy.watch),
                               ("blocks", self.blocks.expire)):
                 try:
                     job()

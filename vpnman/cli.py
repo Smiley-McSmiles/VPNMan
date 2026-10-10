@@ -70,6 +70,9 @@ def format_status(st):
         lines.append("%s %s via %s (%s, %s)%s" % (bold("Proxy:      "), green("RUNNING") if px["running"] else yellow("on"),
                                                  px["name"] or "-", px["order"], px["mode"],
                                                  red("  " + px["error"]) if px["error"] else ""))
+    if st.get("hotspots"):
+        lines.append("%s %s%s" % (bold("Hotspot:    "), ", ".join(st["hotspots"]),
+                                  dim("  (its devices follow the VPN and the proxy)")))
     return "\n".join(lines)
 
 
@@ -1147,7 +1150,7 @@ class Cli:
         return 1 if res["summary"] == "fail" else 0
 
     def cmd_cleanup(self, a):
-        from . import blocks, netlock, share, split, xray
+        from . import blocks, hotspot, netlock, share, split, xray
         if self.client.alive() and not a.force:
             raise RpcError("the VPNMan service is running and owns these rules - stop it first "
                            "(vpnman disconnect; vpnman lock off), or use --force")
@@ -1157,6 +1160,7 @@ class Cli:
         if plat.os_family() == "linux":
             split.cleanup()
             share.cleanup()
+            hotspot.restore()
             if xray.cleanup():
                 gone = list(gone) + ["proxy redirect"]
             if blocks.cleanup():

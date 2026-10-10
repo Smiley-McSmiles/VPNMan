@@ -8,6 +8,8 @@ server behind the tunnel interface ``tun0`` (MTU 1400, a veth standing in for a 
 ``wlan0``.  The laptop forwards for the client, with the share rules of vpnman/share.py and the kill switch of netlock:
 * the client reaches a site through the tunnel, and the site sees the tunnel's address (masquerade) and a TCP segment
   size that fits the tunnel (clamp: 1360, not the 1460 of an Ethernet client),
+* a connection the device opened over the uplink before the VPN came up (its NAT address is the uplink's) cannot
+  continue through the tunnel: after the hotspot's tracked connections are flushed it is reset at once,
 * with the default route on the uplink (the tunnel "dropped"), the kill switch stops the client reaching the uplink,
   while the client still reaches the tunnel.
 """
@@ -18,7 +20,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from vpnman import netlock, share  # noqa: E402
+from vpnman import hotspot, netlock, share  # noqa: E402
 
 
 def sh(*cmd, check=True):
@@ -62,6 +64,49 @@ except OSError as e:
 """
 
 
+ECHO = r"""
+import socket, threading
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("0.0.0.0", 81)); s.listen(8)
+def serve(c):
+    try:
+        while True:
+            d = c.recv(100)
+            if not d: break
+            c.sendall(d)
+    except OSError: pass
+while True:
+    c, _ = s.accept()
+    threading.Thread(target=serve, args=(c,), daemon=True).start()
+"""
+HOLD = r"""
+import socket, sys
+c = socket.create_connection(("203.0.113.1", 81), timeout=4)
+c.sendall(b"a"); c.recv(1)
+print("ready", flush=True)
+sys.stdin.readline()
+c.settimeout(4)
+try:
+    c.sendall(b"b"); c.recv(1); print("echo", flush=True)
+except (ConnectionResetError, BrokenPipeError):
+    print("reset", flush=True)
+except OSError:
+    print("timeout", flush=True)
+"""
+
+
+def held_connection(client, flush):
+    """Open a connection from the device, let ``flush`` run, and report what the open connection does."""
+    p = subprocess.Popen(["nsenter", "-t", str(client.pid), "-n", sys.executable, "-c", HOLD], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, text=True)
+    assert p.stdout.readline().strip() == "ready"
+    flush()
+    p.stdin.write("go\n")
+    p.stdin.flush()
+    out = p.stdout.readline().strip()
+    p.wait(10)
+    return out
+
+
 def fetch(client, ip):
     out = nsx(client, "python3", "-c", CLIENT, ip).stdout.strip()
     return None if out.startswith("FAIL") else out.split()
@@ -89,6 +134,7 @@ def main():
         nsx(vpn, "ip", "addr", "add", "198.51.100.1/32", "dev", "lo")
         nsx(vpn, "ip", "route", "add", "10.42.0.0/24", "via", "10.8.0.2")     # a VPN server that routes back
         nsx(up, "ip", "addr", "add", "203.0.113.1/32", "dev", "lo")
+        nsx(vpn, "ip", "addr", "add", "203.0.113.1/32", "dev", "lo")          # the same "internet" address on both paths
         # what NetworkManager's shared mode does: NAT the hotspot's network out of whatever interface the route picks
         subprocess.run(["nft", "-f", "-"], text=True, check=True, input=(
             "table ip nm_shared_ap0 {\n  chain post {\n    type nat hook postrouting priority 100;\n"
@@ -100,9 +146,24 @@ def main():
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         time.sleep(1.0)
 
-        sh("ip", "route", "add", "default", "via", "10.8.0.1", "dev", "tun0")
-        err = share.apply(["tun0"])
-        assert err == "", err
+        for peer in (vpn, up):
+            procs.append(subprocess.Popen(["nsenter", "-t", str(peer.pid), "-n", "python3", "-c", ECHO],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        time.sleep(0.5)
+        # the hotspot's device is connected and the VPN is off: it uses the uplink
+        sh("ip", "route", "add", "default", "via", "192.168.50.1", "dev", "wlan0")
+        nsx(up, "ip", "route", "add", "10.42.0.0/24", "via", "192.168.50.2")       # (the uplink's NAT is the other table)
+
+        def vpn_comes_up(do_flush):
+            def go():
+                sh("ip", "route", "replace", "default", "via", "10.8.0.1", "dev", "tun0")
+                err = share.apply(["tun0"])
+                assert err == "", err
+                if do_flush:
+                    hotspot.flush(["10.42.0.0/24"])
+            return go
+
+        assert held_connection(client, vpn_comes_up(True)) == "reset", "an open connection is reset after the flush"
         got = fetch(client, "198.51.100.1")
         assert got, "the client reaches the site through the tunnel"
         assert got[0] == "10.8.0.2", ("the site sees the tunnel's address, not the hotspot's", got)
@@ -110,7 +171,7 @@ def main():
 
         # the kill switch with the tunnel route gone (the default route now on the uplink)
         sh("ip", "route", "replace", "default", "via", "192.168.50.1", "dev", "wlan0")
-        spec = netlock.Spec(endpoints=["203.0.113.1"], ifaces=["tun0"], allow_lan=False, share=True)
+        spec = netlock.Spec(endpoints=["192.0.2.99"], ifaces=["tun0"], allow_lan=False, share=True)
         subprocess.run(["nft", "-f", "-"], input=netlock.nft_ruleset(spec), text=True, check=True)
         assert fetch(client, "203.0.113.1") is None, "the kill switch stops forwarded traffic leaving by the uplink"
         sh("ip", "route", "replace", "default", "via", "10.8.0.1", "dev", "tun0")

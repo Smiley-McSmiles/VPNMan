@@ -33,6 +33,7 @@ DEFAULTS = {
         "failover_group": True,    # ... preferring the servers in the same group
         "timeout": 60,
         "share_tunnel": True,      # hotspots / shared connections / VMs behind this computer use the tunnel (and only it)
+        "share_ifaces": [],        # more interfaces to treat as hotspots (a libvirt/Docker bridge, a USB tether...)
         "reconnect_on_change": True,   # reconnect at once when the computer wakes up or the network (gateway) changes
         "openvpn_args": [],        # extra raw arguments appended to OpenVPN
     },
