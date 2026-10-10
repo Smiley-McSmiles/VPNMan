@@ -38,26 +38,30 @@ def pixels(widget):
     return renderer.render_texture(node, None)
 
 
+N = len(statusart.POSITIONS)
+
+
 def checks(win, arts):
     logic()
+    assert N == 15, "fifteen chevrons per lane"
     a = arts["off"]
     now = time.monotonic()
-    assert all(a.brightness("tx", i, now) == 0 for i in range(10)), "nothing lit at rest"
+    assert all(a.brightness("tx", i, now) == 0 for i in range(N)), "nothing lit at rest"
     # two packets 0.3 s apart: two lit groups with dark chevrons between them, like a chaser light
     a.packets = {"tx": [now - 0.50, now - 0.15], "rx": []}
-    lit = [a.brightness("tx", i, now) for i in range(10)]
-    heads = [i for i in range(1, 9) if lit[i] >= lit[i - 1] and lit[i] >= lit[i + 1] and lit[i] > 0.7]
+    lit = [a.brightness("tx", i, now) for i in range(N)]
+    heads = [i for i in range(1, N - 1) if lit[i] >= lit[i - 1] and lit[i] >= lit[i + 1] and lit[i] > 0.7]
     assert len(heads) == 2, ("two packets are on their way", lit)
     lo, hi = heads
     assert min(lit[lo + 1:hi]) < 0.1, ("with dark chevrons between them", lit)
     assert lit[lo] > lit[lo - 1] > 0.2, ("and a fading tail behind each head", lit)
     # the packets move along the chevrons and the other direction runs the other way
     a.packets = {"tx": [now - 0.1], "rx": []}
-    first = [a.brightness("tx", i, now) for i in range(10)]
-    later = [a.brightness("tx", i, now + 0.1) for i in range(10)]
+    first = [a.brightness("tx", i, now) for i in range(N)]
+    later = [a.brightness("tx", i, now + 0.1) for i in range(N)]
     assert later.index(max(later)) > first.index(max(first)), "the head moves on"
     a.packets = {"tx": [], "rx": [now - 0.1]}
-    rx = [a.brightness("rx", i, now) for i in range(10)]
+    rx = [a.brightness("rx", i, now) for i in range(N)]
     assert rx.index(max(rx)) in (1, 2), "a received packet enters at the internet side"
     # more data, more packets; below the threshold nothing blinks
     assert statusart.packets_for(0) == 0 and statusart.packets_for(50) == 0
@@ -67,10 +71,10 @@ def checks(win, arts):
     a.set_rates(rx_rate=2 * 1024 * 1024, tx_rate=0)
     assert a.flow_until["rx"] > now and a.flow_until["tx"] == 0 and not a.packets["rx"]
     a.level["rx"] = 1.0
-    wave = [[a.brightness("rx", i, now + dt) for i in range(10)] for dt in (0.0, 0.2, 0.4)]
+    wave = [[a.brightness("rx", i, now + dt) for i in range(N)] for dt in (0.0, 0.2, 0.4)]
     assert all(min(row) > 0.65 for row in wave), ("the lane is lit all along", wave)
     assert max(max(r) for r in wave) - min(min(r) for r in wave) > 0.1, "... and its glow pulses"
-    assert all(a.brightness("tx", i, now) == 0 for i in range(10))
+    assert all(a.brightness("tx", i, now) == 0 for i in range(N))
     a.flow_until["rx"], a.level["rx"] = 0.0, 0.0
     a.packets = {"tx": [], "rx": []}
     a.set_rates(rx_rate=5000, tx_rate=10)

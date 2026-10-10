@@ -16,9 +16,11 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
-VIEW_W, VIEW_H = 240.0, 112.0
-X0, X1, STEP = 66, 174, 12
-TX_Y, RX_Y = 44, 68
+VIEW_W, VIEW_H = 280.0, 112.0
+COUNT, X0, STEP = 15, 68, 11          # chevrons per lane, where the first one is, the distance between them
+TX_Y, RX_Y = 44, 68                  # the two lanes; the icons are centred between them
+MID_Y = (TX_Y + RX_Y) / 2
+ICON = 1.2                           # icon size relative to the first design
 SPEED = 17.0           # chevrons a packet travels per second
 TAIL = 2.6             # chevrons of fading glow behind the head
 LEAD = 0.5             # ... and a little glow just ahead of it
@@ -38,7 +40,7 @@ COLORS = {             # (dark theme, light theme)
     "error": ((1.00, 0.36, 0.38), (0.85, 0.23, 0.25)),
 }
 MODES = tuple(COLORS)
-POSITIONS = list(range(X0, X1 + 1, STEP))
+POSITIONS = [X0 + k * STEP for k in range(COUNT)]
 
 
 def mode_for(state, vpn_up, proxy_up):
@@ -73,7 +75,7 @@ def packets_for(rate):
 class StatusArt(Gtk.DrawingArea):
     def __init__(self):
         super().__init__(halign=Gtk.Align.CENTER)
-        self.set_content_width(240)
+        self.set_content_width(int(VIEW_W))
         self.set_content_height(112)
         self.mode = "off"
         self.packets = {"tx": [], "rx": []}        # start times (monotonic); a packet's head is at (now - start) * SPEED
@@ -168,36 +170,45 @@ class StatusArt(Gtk.DrawingArea):
         cr.set_line_join(1)
         now = time.monotonic()
 
-        # the computer and the internet, in the neutral foreground colour
-        cr.set_line_width(2.2)
+        # the computer and the internet, in the neutral foreground colour, centred on the lanes
+        cr.set_line_width(2.2 / ICON)
+        cr.save()                                                # laptop: 42 x 28 in its own units
+        cr.translate(2, MID_Y)
+        cr.scale(ICON, ICON)
+        cr.translate(0, -14)
         cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.62)
-        self._rounded(cr, 12, 34, 34, 22, 3)
+        self._rounded(cr, 4, 0, 34, 22, 3)
         cr.stroke()
-        cr.move_to(8, 62)
+        cr.move_to(0, 28)
         cr.rel_line_to(42, 0)
         cr.rel_line_to(-3, -4)
         cr.rel_line_to(-36, 0)
         cr.close_path()
         cr.stroke()
-        cx, cy = 214, 50
+        cr.set_source_rgba(*color, 0.9)                          # the screen carries the state colour
+        cr.move_to(12, 11)
+        cr.line_to(30, 11)
+        cr.stroke()
+        cr.restore()
+        cr.save()                                                # globe: radius 17
+        cr.translate(VIEW_W - 17 * ICON - 2, MID_Y)
+        cr.scale(ICON, ICON)
+        cr.set_line_width(2.2 / ICON)
+        cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.62)
         cr.new_sub_path()
-        cr.arc(cx, cy, 17, 0, 2 * math.pi)
+        cr.arc(0, 0, 17, 0, 2 * math.pi)
         cr.stroke()
         cr.save()
-        cr.translate(cx, cy)
         cr.scale(7, 17)
         cr.new_sub_path()
         cr.arc(0, 0, 1, 0, 2 * math.pi)
         cr.restore()
         cr.stroke()
         for dy, half in ((0, 17), (-9, 14), (9, 14)):
-            cr.move_to(cx - half, cy + dy)
-            cr.line_to(cx + half, cy + dy)
+            cr.move_to(-half, dy)
+            cr.line_to(half, dy)
             cr.stroke()
-        cr.set_source_rgba(*color, 0.9)                          # the screen carries the state colour
-        cr.move_to(20, 45)
-        cr.line_to(38, 45)
-        cr.stroke()
+        cr.restore()
 
         # the chevrons
         count = len(POSITIONS)
