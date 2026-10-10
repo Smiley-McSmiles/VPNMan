@@ -159,7 +159,7 @@ class Manager:
         s["netlock"] = self.netlock_status()
         s["hotspots"] = sorted(self.hotspots)
         s["proxy_up"], s["proxy_name"] = self.proxy.up()
-        if s["proxy_up"] and s["state"] != "connected":
+        if s["state"] != "connected":
             s["rx_rate"], s["tx_rate"] = self._open_rates()          # no tunnel to count: the way out itself
         s["last_profile"] = self._last_profile_id()
         s["version"] = __version__
@@ -168,9 +168,11 @@ class Manager:
 
     def _open_rates(self):
         """Bytes per second in and out on the interface that carries the traffic (no VPN: the default route)."""
-        _gw, dev = plat.default_gateway()
-        st = plat.iface_stats(dev) if dev else None
         now = time.time()
+        if now - getattr(self, "_open_dev_at", 0) > 5:                 # the route is looked up now and then, not every call
+            self._open_dev, self._open_dev_at = plat.default_gateway()[1], now
+        dev = self._open_dev
+        st = plat.iface_stats(dev) if dev else None
         last, self._open_last = getattr(self, "_open_last", None), None
         if st:
             self._open_last = (now, dev, st[0], st[1])

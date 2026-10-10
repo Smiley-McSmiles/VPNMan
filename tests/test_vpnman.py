@@ -3000,11 +3000,13 @@ class HotspotTests(unittest.TestCase):
         m = Manager(settings=settings.Settings(TMP + "/pu-%d.json" % id(self)))
         st = m.status()
         self.assertEqual((st["proxy_up"], st["proxy_name"]), (False, ""))
-        m.proxy.runner.alive = lambda: True
-        m.proxy.owner = "net"
         m._open_rates = lambda: (123.0, 45.0)
         st = m.status()
-        self.assertEqual((st["proxy_up"], st["proxy_name"], st["rx_rate"], st["tx_rate"]), (True, "network proxy", 123.0, 45.0))
+        self.assertEqual((st["rx_rate"], st["tx_rate"]), (123.0, 45.0))        # no VPN: the way out itself is counted
+        m.proxy.runner.alive = lambda: True
+        m.proxy.owner = "net"
+        st = m.status()
+        self.assertEqual((st["proxy_up"], st["proxy_name"]), (True, "network proxy"))
 
     def test_manager_follows_hotspots(self):
         s = settings.Settings(TMP + "/hs-%d.json" % id(self))

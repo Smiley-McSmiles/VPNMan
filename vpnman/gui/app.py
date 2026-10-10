@@ -1917,8 +1917,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._sync_selector()
         vpn_up = state == "connected" and not self._disconnecting
         self.hero.set_mode(mode_for("disconnecting" if self._disconnecting else state, vpn_up, bool(st.get("proxy_up"))))
-        if vpn_up or st.get("proxy_up"):
-            self.hero.icon.set_rates(st.get("rx_rate"), st.get("tx_rate"))     # the chevrons blink with the traffic
+        self.hero.icon.set_rates(st.get("rx_rate"), st.get("tx_rate"))         # packets run along the chevrons
         if state == "disconnecting" or self._disconnecting:
             self.hero.set_title("Disconnecting…")
             self.hero.set_description(st.get("profile") or "")

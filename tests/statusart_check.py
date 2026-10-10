@@ -23,8 +23,8 @@ def logic():
     assert m("connected", True, True) == "both"
     assert m("connecting", False, False) == m("reconnecting", True, True) == m("disconnecting", True, True) == "busy"
     assert m("error", False, True) == "error"
-    assert statusart.envelope(0) == 0 and statusart.envelope(1) == 0 and statusart.envelope(0.25) == 1
-    assert 0 < statusart.envelope(0.1) < 1 and 0 < statusart.envelope(0.6) < 1
+    assert statusart.glow(0) == 1 and statusart.glow(-1) == 0 and statusart.glow(5) == 0
+    assert 0 < statusart.glow(1) < 1 and 0 < statusart.glow(-0.2) < 1
 
 
 def pixels(widget):
@@ -40,23 +40,48 @@ def pixels(widget):
 
 def checks(win, arts):
     logic()
-    a = arts["vpn"]
-    # idle: nothing lit; a wave lights the chevrons of its direction one after another, then fades
-    assert all(a.brightness("tx", i, time.monotonic()) == 0 for i in range(10))
-    a.set_rates(rx_rate=5000, tx_rate=0)
-    t = time.monotonic()
-    assert a.waves["rx"] is not None and a.waves["tx"] is None
-    later = a.waves["rx"] + 0.2
-    assert a.brightness("rx", 0, later) > a.brightness("rx", 9, later), "the wave runs along the chevrons"
-    a.set_rates(rx_rate=10, tx_rate=10)                      # chatter below the threshold does not blink
-    assert a.waves["tx"] is None
+    a = arts["off"]
+    now = time.monotonic()
+    assert all(a.brightness("tx", i, now) == 0 for i in range(10)), "nothing lit at rest"
+    # two packets 0.3 s apart: two lit groups with dark chevrons between them, like a chaser light
+    a.packets = {"tx": [now - 0.50, now - 0.15], "rx": []}
+    lit = [a.brightness("tx", i, now) for i in range(10)]
+    heads = [i for i in range(1, 9) if lit[i] >= lit[i - 1] and lit[i] >= lit[i + 1] and lit[i] > 0.7]
+    assert len(heads) == 2, ("two packets are on their way", lit)
+    lo, hi = heads
+    assert min(lit[lo + 1:hi]) < 0.1, ("with dark chevrons between them", lit)
+    assert lit[lo] > lit[lo - 1] > 0.2, ("and a fading tail behind each head", lit)
+    # the packets move along the chevrons and the other direction runs the other way
+    a.packets = {"tx": [now - 0.1], "rx": []}
+    first = [a.brightness("tx", i, now) for i in range(10)]
+    later = [a.brightness("tx", i, now + 0.1) for i in range(10)]
+    assert later.index(max(later)) > first.index(max(first)), "the head moves on"
+    a.packets = {"tx": [], "rx": [now - 0.1]}
+    rx = [a.brightness("rx", i, now) for i in range(10)]
+    assert rx.index(max(rx)) in (1, 2), "a received packet enters at the internet side"
+    # more data, more packets; below the threshold nothing blinks
+    assert statusart.packets_for(0) == 0 and statusart.packets_for(50) == 0
+    assert statusart.packets_for(300) == 1 < statusart.packets_for(30000) < statusart.packets_for(3000000) <= 7
+    # a transfer (a download): the whole incoming lane is lit and pulses; the other lane stays dark
+    a.packets = {"tx": [], "rx": []}
+    a.set_rates(rx_rate=2 * 1024 * 1024, tx_rate=0)
+    assert a.flow_until["rx"] > now and a.flow_until["tx"] == 0 and not a.packets["rx"]
+    a.level["rx"] = 1.0
+    wave = [[a.brightness("rx", i, now + dt) for i in range(10)] for dt in (0.0, 0.2, 0.4)]
+    assert all(min(row) > 0.65 for row in wave), ("the lane is lit all along", wave)
+    assert max(max(r) for r in wave) - min(min(r) for r in wave) > 0.1, "... and its glow pulses"
+    assert all(a.brightness("tx", i, now) == 0 for i in range(10))
+    a.flow_until["rx"], a.level["rx"] = 0.0, 0.0
+    a.packets = {"tx": [], "rx": []}
+    a.set_rates(rx_rate=5000, tx_rate=10)
+    assert len(a.packets["rx"]) >= 2 and not a.packets["tx"]
+    assert all(now <= t <= now + 1.0 for t in a.packets["rx"]), "spread over the next second"
     a.set_mode("busy")
     assert a._tick, "the frame clock runs while connecting"
-    a.set_mode("vpn")
-    seen = {}
-    for name, art in arts.items():
-        art.set_rates(9000, 9000)
-    GLib.timeout_add(250, lambda: finish(arts))
+    a.set_mode("off")
+    for art in arts.values():
+        art.set_rates(900000, 900000)
+    GLib.timeout_add(450, lambda: finish(arts))
     return False
 
 
@@ -68,7 +93,7 @@ def finish(arts):
     if out:
         tex.save_to_png(out)
     # the animation stops by itself once the waves are over
-    GLib.timeout_add(1800, lambda: done(arts))
+    GLib.timeout_add(2200, lambda: done(arts))
     return False
 
 

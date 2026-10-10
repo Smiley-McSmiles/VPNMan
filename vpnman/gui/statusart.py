@@ -1,11 +1,14 @@
 """The picture on the main page: a computer, rows of chevrons (>>>>> out, <<<<< back) and the internet.
 
 The colour says how the traffic goes: red - straight out, blue - through the VPN, green - through the proxy, cyan -
-through both.  Amber chevrons sweep while connecting.  Whenever data moves, the chevrons of that direction light up one
-after another (``pulse``), so the picture blinks with the traffic.
+through both.  Amber chevrons sweep while connecting.  Every packet is a bright head that runs along the chevrons with a fading
+tail, like the lit LED of a chaser light; several can be on their way at once, with dark chevrons between them, so
+the picture moves with the traffic: more data, more packets (``set_rates``).  A sustained transfer (a download, an
+upload) lights its whole lane, with a glow that pulses along it.
 """
 
 import math
+import random
 import time
 
 import gi
@@ -16,10 +19,15 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 VIEW_W, VIEW_H = 240.0, 112.0
 X0, X1, STEP = 66, 174, 12
 TX_Y, RX_Y = 44, 68
-WAVE = 0.75            # seconds a chevron takes to flash and fade
-LAG = 0.055            # seconds between neighbouring chevrons
-IDLE = 0.25            # brightness of a chevron at rest
+SPEED = 17.0           # chevrons a packet travels per second
+TAIL = 2.6             # chevrons of fading glow behind the head
+LEAD = 0.5             # ... and a little glow just ahead of it
+IDLE = 0.2             # brightness of a chevron at rest
+BUSY_EVERY = 0.42      # seconds between packets while connecting
 MIN_RATE = 200         # bytes per second that count as traffic
+FLOW_RATE = 256 * 1024  # bytes per second that count as a transfer: the whole lane stays lit
+FLOW_HOLD = 1.8        # seconds a transfer stays lit after the last update that showed it
+PULSE_HZ = 1.1         # glow pulses per second along a lit lane
 
 COLORS = {             # (dark theme, light theme)
     "off": ((1.00, 0.36, 0.38), (0.85, 0.23, 0.25)),
@@ -46,11 +54,20 @@ def mode_for(state, vpn_up, proxy_up):
     return "proxy" if proxy_up else "off"
 
 
-def envelope(t):
-    """0..1..0 over t in 0..1: fast rise, slower fade."""
-    if t <= 0 or t >= 1:
+def glow(behind):
+    """Brightness of a chevron that is ``behind`` chevrons behind a packet's head (negative: ahead of it)."""
+    if behind < -LEAD or behind > TAIL:
         return 0.0
-    return t / 0.25 if t < 0.25 else 1.0 - (t - 0.25) / 0.75
+    if behind < 0:
+        return 1.0 + behind / LEAD
+    return 1.0 - behind / TAIL
+
+
+def packets_for(rate):
+    """How many packets to show per second for ``rate`` bytes per second (0 when there is no traffic)."""
+    if not rate or rate < MIN_RATE:
+        return 0
+    return min(7, 1 + int(math.log10(rate / MIN_RATE) * 1.6))
 
 
 class StatusArt(Gtk.DrawingArea):
@@ -59,9 +76,12 @@ class StatusArt(Gtk.DrawingArea):
         self.set_content_width(240)
         self.set_content_height(112)
         self.mode = "off"
-        self.waves = {"tx": None, "rx": None}      # start time of the running wave, or None
+        self.packets = {"tx": [], "rx": []}        # start times (monotonic); a packet's head is at (now - start) * SPEED
+        self.flow_until = {"tx": 0.0, "rx": 0.0}   # a transfer is on until then
+        self.level = {"tx": 0.0, "rx": 0.0}        # 0..1 how fully the lane is lit (eases in and out)
+        self._frame = 0.0
         self._tick = 0
-        self._busy_from = 0.0
+        self._busy_next = 0.0
         self.set_draw_func(self._draw)
         self.set_accessible_role(Gtk.AccessibleRole.IMG)
         Adw.StyleManager.get_default().connect("notify::dark", lambda *_: self.queue_draw())
@@ -72,21 +92,29 @@ class StatusArt(Gtk.DrawingArea):
         if mode == self.mode:
             return
         self.mode = mode
-        self._busy_from = time.monotonic()
+        self._busy_next = 0.0
         self._animate()
         self.queue_draw()
 
-    def pulse(self, tx=False, rx=False):
-        now = time.monotonic()
+    def pulse(self, tx=False, rx=False, at=None):
+        """One packet in each direction asked for, starting at ``at`` (default: now)."""
+        at = time.monotonic() if at is None else at
         for key, on in (("tx", tx), ("rx", rx)):
-            if on and self.mode not in ("error",):
-                self.waves[key] = now
+            if on and self.mode != "error":
+                self.packets[key].append(at)
         if tx or rx:
             self._animate()
 
-    def set_rates(self, rx_rate, tx_rate):
-        """Called with every status update: data moved in a direction -> flash that direction."""
-        self.pulse(tx=(tx_rate or 0) >= MIN_RATE, rx=(rx_rate or 0) >= MIN_RATE)
+    def set_rates(self, rx_rate, tx_rate, span=0.9):
+        """Called with every status update: spread the packets of the next ``span`` seconds, a few more for more data."""
+        now = time.monotonic()
+        for key, rate in (("rx", rx_rate), ("tx", tx_rate)):
+            if (rate or 0) >= FLOW_RATE and self.mode != "error":
+                self.flow_until[key] = now + FLOW_HOLD         # a transfer: light the whole lane instead of single packets
+                self._animate()
+                continue
+            for _ in range(packets_for(rate)):
+                self.pulse(tx=key == "tx", rx=key == "rx", at=now + random.uniform(0, span))
 
     # ---- animation: the frame clock runs only while something is moving
     def _animate(self):
@@ -95,27 +123,38 @@ class StatusArt(Gtk.DrawingArea):
 
     def _on_tick(self, *_):
         now = time.monotonic()
-        running = self.mode == "busy"
-        for key, start in self.waves.items():
-            if start is None:
-                continue
-            if now - start > WAVE + LAG * len(POSITIONS):
-                self.waves[key] = None
-            else:
-                running = True
+        life = (len(POSITIONS) + TAIL) / SPEED
+        for key in self.packets:
+            self.packets[key] = [t for t in self.packets[key] if now - t < life]
+        if self.mode == "busy" and now >= self._busy_next:        # connecting: one packet after another, forever
+            self.packets["tx"].append(now)
+            self._busy_next = now + BUSY_EVERY
+        dt = min(now - self._frame, 0.1) if self._frame else 0.0
+        self._frame = now
+        for key in self.level:                                 # the lane eases fully lit while a transfer runs, then dims
+            target = 1.0 if self.flow_until[key] > now else 0.0
+            self.level[key] += (target - self.level[key]) * min(1.0, dt * 7)
+        running = self.mode == "busy" or any(self.packets.values()) or any(
+            self.flow_until[k] > now or self.level[k] > 0.01 for k in self.level)
+        if not running:
+            self._frame = 0.0
         self.queue_draw()
         if not running:
             self._tick = 0
         return GLib.SOURCE_CONTINUE if running else GLib.SOURCE_REMOVE
 
     def brightness(self, direction, index, now):
-        """0..1 flash of chevron ``index`` (counted along its direction of travel)."""
-        if self.mode == "busy":                                 # an endless sweep to the right
-            period = WAVE + LAG * len(POSITIONS) + 0.3
-            t0 = (now - self._busy_from) % period
-            return envelope((t0 - index * LAG) / WAVE) if direction == "tx" else 0.0
-        start = self.waves[direction]
-        return 0.0 if start is None else envelope((now - start - index * LAG) / WAVE)
+        """0..1 glow of chevron ``index`` (counted along its direction of travel): the brightest of the packets near it."""
+        best = 0.0
+        level = self.level[direction]
+        if level > 0.01:                       # a transfer: lit all along, with a glow that runs down the lane
+            wave = 0.5 + 0.5 * math.cos(2 * math.pi * (now * PULSE_HZ - index * 0.11))
+            best = level * (0.7 + 0.3 * wave)
+        for start in self.packets[direction]:
+            if start > now:
+                continue
+            best = max(best, glow((now - start) * SPEED - index))
+        return best
 
     # ---- drawing
     def _draw(self, _area, cr, width, height):
