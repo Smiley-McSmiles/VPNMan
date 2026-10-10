@@ -2856,6 +2856,25 @@ class ShareTunnelTests(unittest.TestCase):
         self.assertFalse([c for c in netlock.ipt_commands(netlock.Spec([], ["tun0"], share=False))
                           if c[:2] == ["-A", "VPNMAN_FWD"]])
 
+    def test_forwarding_is_turned_on_for_the_tunnel_and_restored(self):
+        from vpnman import share
+        d = tempfile.mkdtemp()
+        for dev, val in (("tun0", "0"), ("wg0", "1"), ("tun1", "0")):
+            with open(os.path.join(d, dev), "w") as fh:
+                fh.write(val)
+        old = share._forwarding_file
+        share._forwarding_file = lambda dev: os.path.join(d, dev)
+        read = lambda dev: open(os.path.join(d, dev)).read()
+        try:
+            share.forwarding(["tun0", "wg0", "nonexistent", "../etc"])
+            self.assertEqual((read("tun0"), read("wg0")), ("1", "1"))
+            share.forwarding(["tun1"])                                    # tun0 is gone from the list: back to what it was
+            self.assertEqual((read("tun0"), read("tun1"), read("wg0")), ("0", "1", "1"))
+            share.forwarding(())
+            self.assertEqual(read("tun1"), "0")
+        finally:
+            share._forwarding_file = old
+
     def test_setting_and_netns(self):
         import shutil
         import subprocess

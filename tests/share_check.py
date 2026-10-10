@@ -139,7 +139,12 @@ def main():
         subprocess.run(["nft", "-f", "-"], text=True, check=True, input=(
             "table ip nm_shared_ap0 {\n  chain post {\n    type nat hook postrouting priority 100;\n"
             "    ip saddr 10.42.0.0/24 ip daddr != 10.42.0.0/24 masquerade\n  }\n}\n"))
-        sh("sysctl", "-qw", "net.ipv4.ip_forward=1")
+        # like the laptop this was reported on: forwarding is off globally and only on for the hotspot and the uplink (what
+        # NetworkManager's shared mode does).  The tunnel is created later, so its own setting stays off - and the answers coming back through it
+        # are dropped - unless VPNMan turns it on (share.apply)
+        sh("sysctl", "-qw", "net.ipv4.ip_forward=0")
+        sh("sysctl", "-qw", "net.ipv4.conf.ap0.forwarding=1")
+        sh("sysctl", "-qw", "net.ipv4.conf.wlan0.forwarding=1")        # ... and on the uplink it picked
         sh("sysctl", "-qw", "net.ipv4.conf.all.rp_filter=0")
         for peer in (vpn, up):
             procs.append(subprocess.Popen(["nsenter", "-t", str(peer.pid), "-n", "python3", "-c", SERVER],
