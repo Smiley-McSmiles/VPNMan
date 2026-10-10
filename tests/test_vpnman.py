@@ -2996,6 +2996,16 @@ class HotspotTests(unittest.TestCase):
         self.assertEqual(applied, ["rules for ap0"])
         self.assertEqual(localnet, [["ap0"]])
 
+    def test_status_tells_whether_a_proxy_carries_the_traffic(self):
+        m = Manager(settings=settings.Settings(TMP + "/pu-%d.json" % id(self)))
+        st = m.status()
+        self.assertEqual((st["proxy_up"], st["proxy_name"]), (False, ""))
+        m.proxy.runner.alive = lambda: True
+        m.proxy.owner = "net"
+        m._open_rates = lambda: (123.0, 45.0)
+        st = m.status()
+        self.assertEqual((st["proxy_up"], st["proxy_name"], st["rx_rate"], st["tx_rate"]), (True, "network proxy", 123.0, 45.0))
+
     def test_manager_follows_hotspots(self):
         s = settings.Settings(TMP + "/hs-%d.json" % id(self))
         m = Manager(settings=s)

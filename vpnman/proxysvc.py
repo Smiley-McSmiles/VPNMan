@@ -399,6 +399,17 @@ class ProxyService:
             return set()
         return set(self.ips(p, live=False))
 
+    def up(self):
+        """(a proxy is carrying this computer's traffic, its name) - for the picture on the main page."""
+        if not self.runner.alive():
+            return False, ""
+        if self.owner == "net":
+            return True, "network proxy"
+        if self.owner in ("local", "carrier"):
+            p = self.selected()
+            return True, p["name"] if p else ""
+        return False, ""
+
     def status(self):
         cfg = self.settings()
         p = self.selected()

@@ -25,6 +25,8 @@ from .files import choose_files, save_file
 from .keys import close_keys, restore_scroll
 from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .proxypage import ProxyPage
+from .statusart import mode_for
+from .statusart import StatusArt
 from .proxyprefs import NetProxyModel, NetworkProxySwitch, ProxyPreferences
 from .tray import HelperTray, Tray, wants_helper
 from ..settings import DNS_PRESETS
@@ -123,8 +125,7 @@ class Hero(Gtk.Box):
     def __init__(self, icon_name, title, description):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=24, margin_start=12,
                          margin_end=12, halign=Gtk.Align.CENTER)
-        self.icon = Gtk.Image(icon_name=icon_name, pixel_size=96)
-        self.icon.add_css_class("dim-label")
+        self.icon = StatusArt()
         self.title = Gtk.Label(label=title, css_classes=["title-1"], wrap=True, justify=Gtk.Justification.CENTER)
         self.desc = Gtk.Label(label=description, wrap=True, justify=Gtk.Justification.CENTER,
                               css_classes=["dim-label"])
@@ -132,7 +133,7 @@ class Hero(Gtk.Box):
         for w in (self.icon, self.title, self.desc, self.holder):
             self.append(w)
 
-    def set_icon_name(self, n): self.icon.set_from_icon_name(n)
+    def set_mode(self, mode): self.icon.set_mode(mode)
     def set_title(self, t): self.title.set_label(t)
     def set_description(self, d): self.desc.set_label(d or "")
     def set_child(self, w): self.holder.append(w)
@@ -1914,27 +1915,33 @@ class MainWindow(Adw.ApplicationWindow):
         self._quiet = False
         self.server_row.set_sensitive(state not in BUSY and not self._disconnecting)
         self._sync_selector()
+        vpn_up = state == "connected" and not self._disconnecting
+        self.hero.set_mode(mode_for("disconnecting" if self._disconnecting else state, vpn_up, bool(st.get("proxy_up"))))
+        if vpn_up or st.get("proxy_up"):
+            self.hero.icon.set_rates(st.get("rx_rate"), st.get("tx_rate"))     # the chevrons blink with the traffic
         if state == "disconnecting" or self._disconnecting:
-            self.hero.set_icon_name("network-vpn-acquiring-symbolic")
             self.hero.set_title("Disconnecting…")
             self.hero.set_description(st.get("profile") or "")
         elif state == "connected":
-            self.hero.set_icon_name("network-vpn-symbolic")
             self.hero.set_title("Connected")
-            self.hero.set_description("%s · %s" % (st["profile"], st["protocol"]))
+            self.hero.set_description("%s · %s%s" % (st["profile"], st["protocol"],
+                                                     " · via proxy %s" % st["proxy_name"] if st.get("proxy_up") and st.get("proxy_name") else
+                                                     " · via proxy" if st.get("proxy_up") else ""))
         elif state in ("connecting", "reconnecting"):
-            self.hero.set_icon_name("network-vpn-acquiring-symbolic")
             self.hero.set_title("Connecting…" if state == "connecting" else "Reconnecting…")
             self.hero.set_description(st.get("message") or st["profile"] or "")
         elif state == "error":
-            self.hero.set_icon_name("network-vpn-error-symbolic")
             self.hero.set_title("Connection Failed")
             self.hero.set_description(st.get("message") or "")
         else:
-            self.hero.set_icon_name("network-vpn-disabled-symbolic")
-            self.hero.set_title("Not Connected")
-            self.hero.set_description("Your traffic is not protected." if not st["netlock"]["engaged"]
-                                      else "Network lock is engaged - traffic is blocked.")
+            if st.get("proxy_up"):
+                self.hero.set_title("Proxy")
+                self.hero.set_description("Your traffic goes through the proxy%s." % (
+                    " " + st["proxy_name"] if st.get("proxy_name") else ""))
+            else:
+                self.hero.set_title("Not Connected")
+                self.hero.set_description("Your traffic is not protected." if not st["netlock"]["engaged"]
+                                          else "Network lock is engaged - traffic is blocked.")
         self._show_main_button()
         self._sync_rows()
         shown = state == "connected" and not self._disconnecting

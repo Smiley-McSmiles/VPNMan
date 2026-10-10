@@ -158,10 +158,26 @@ class Manager:
             s = dict(self._status)
         s["netlock"] = self.netlock_status()
         s["hotspots"] = sorted(self.hotspots)
+        s["proxy_up"], s["proxy_name"] = self.proxy.up()
+        if s["proxy_up"] and s["state"] != "connected":
+            s["rx_rate"], s["tx_rate"] = self._open_rates()          # no tunnel to count: the way out itself
         s["last_profile"] = self._last_profile_id()
         s["version"] = __version__
         s["uptime"] = int(time.time() - s["since"]) if s.get("since") and s["state"] == "connected" else 0
         return s
+
+    def _open_rates(self):
+        """Bytes per second in and out on the interface that carries the traffic (no VPN: the default route)."""
+        _gw, dev = plat.default_gateway()
+        st = plat.iface_stats(dev) if dev else None
+        now = time.time()
+        last, self._open_last = getattr(self, "_open_last", None), None
+        if st:
+            self._open_last = (now, dev, st[0], st[1])
+        if not st or not last or last[1] != dev or now - last[0] <= 0:
+            return 0, 0
+        dt = now - last[0]
+        return max(st[0] - last[2], 0) / dt, max(st[1] - last[3], 0) / dt
 
     # --------------------------------------------------------------- persistent
     def _load_state(self):
