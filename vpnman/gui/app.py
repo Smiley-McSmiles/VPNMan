@@ -821,7 +821,9 @@ class MainWindow(Adw.ApplicationWindow):
         if st["netlock"]["engaged"]:
             tip += " · Network Lock on"
         tray.set_state("%s-%s-symbolic" % (APP_ID, TRAY_ICONS.get(state, "disconnected")), tip,
-                       attention=(state == "error"))
+                       attention=(state == "error"),
+                       mode=mode_for("disconnecting" if self._disconnecting else state, state == "connected",
+                                     bool(st.get("proxy_up"))))
         if key != getattr(self, "_tray_key", None):
             self._tray_key = key
             tray.update_menu()

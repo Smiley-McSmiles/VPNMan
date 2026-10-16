@@ -87,6 +87,20 @@ def client():
         props = call("/StatusNotifierItem", "org.freedesktop.DBus.Properties", "GetAll",
                      GLib.Variant("(s)", ("org.kde.StatusNotifierItem",))).unpack()[0]
         assert props["Status"] == "NeedsAttention" and props["IconName"] == "test-icon", props
+        # drawn icons: the pixels go to the host, so it needs no icon theme (the GNOME extension shows dots without one)
+        for mode in ("off", "vpn", "proxy", "both", "busy", "error"):
+            tray.set_state("name-not-in-any-theme", "tip", mode=mode)
+            props = call("/StatusNotifierItem", "org.freedesktop.DBus.Properties", "GetAll",
+                         GLib.Variant("(s)", ("org.kde.StatusNotifierItem",))).unpack()[0]
+            assert props["IconName"] == "" and [(w, h) for w, h, _d in props["IconPixmap"]] == [(24, 24), (48, 48)], props
+            w, h, data = props["IconPixmap"][0]
+            data = bytes(data)
+            assert len(data) == w * h * 4 and data[:4] == b"\0\0\0\0", "a transparent corner"
+            assert any(data[i] == 255 for i in range(0, len(data), 4)), "and opaque pixels"
+        tray.set_state("test-icon", "tip")                    # without a mode: the icon name alone, as before
+        props = call("/StatusNotifierItem", "org.freedesktop.DBus.Properties", "GetAll",
+                     GLib.Variant("(s)", ("org.kde.StatusNotifierItem",))).unpack()[0]
+        assert props["IconName"] == "test-icon" and not props["IconPixmap"]
         print("TRAY OK")
     except Exception as e:  # noqa: BLE001
         errors.append(repr(e))
