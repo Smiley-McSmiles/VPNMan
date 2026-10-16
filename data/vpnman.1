@@ -187,7 +187,7 @@ Show or set the servers tried, in order, when \fIPROFILE\fR keeps failing. See
 .BR FAILOVER .
 .SS Safety and privacy
 .TP
-.B bypass \fR[\fIlist\fR|\fIadd\fR|\fIremove\fR|\fIavailable\fR|\fIon\fR|\fIoff\fR|\fImode\fR] [\fIAPP\fR...]
+.B bypass \fR[\fIlist\fR|\fIadd\fR|\fIremove\fR|\fIavailable\fR|\fIon\fR|\fIoff\fR|\fImode\fR|\fIdns\fR] [\fIAPP\fR...]
 Applications that skip the VPN. See
 .BR "APP BYPASS" .
 Alias:
@@ -536,6 +536,10 @@ Modes (\fBvpnman bypass mode\fR, setting \fBsplit.mode\fR):
 .B include
 (experimental) \fBonly\fR the listed applications use the VPN; everything else uses the normal connection.
 .PP
+DNS for these applications (\fBvpnman bypass dns\fR, setting \fBsplit.dns\fR, also in the Apps tab and on the main page):
+the programs that skip the VPN ask this name server instead of the VPN's. Empty (automatic) means the resolver the computer had
+before the VPN came up. Give a preset name or up to four IPv4 addresses; the first one is used.
+.PP
 Requirements: Linux with \fBnft\fR, \fBip\fR (iproute2) and a \fBunified cgroup v2\fR hierarchy mounted at
 \fI/sys/fs/cgroup\fR (hybrid cgroup layouts are not supported). It is not available on
 the BSDs. Processes are moved within a couple of seconds of the tunnel coming up or of the application starting.
@@ -867,8 +871,8 @@ The scheduler switch and its entries (managed with \fBvpnman schedule\fR).
 .PP
 .B split
 .TP
-.B split.enabled \fR(true), \fBsplit.mode \fR(exclude), \fBsplit.apps\fR
-App bypass switch, mode and the applications (managed with \fBvpnman bypass\fR).
+.B split.enabled \fR(true), \fBsplit.mode \fR(exclude), \fBsplit.apps\fR, \fBsplit.dns \fR(empty)
+App bypass switch, mode, the applications and the name server they use (managed with \fBvpnman bypass\fR).
 .PP
 .B routes
 .TP

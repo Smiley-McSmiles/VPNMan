@@ -23,7 +23,7 @@ from .caps_lock import attach_caps_lock_hint
 from .connpage import ConnectionsGroup
 from .files import choose_files, save_file
 from .keys import close_keys, restore_scroll
-from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
+from .pages import BypassDns, BypassPage, HistoryGroup, SchedulePage, TrafficGraph
 from .proxypage import ProxyPage
 from .statusart import mode_for
 from .statusart import StatusArt
@@ -888,6 +888,10 @@ class MainWindow(Adw.ApplicationWindow):
                                        visible=False)
         self.dns_custom.connect("apply", lambda r: self._save_dns(True, self._parse_ips(r.get_text())))
         dns.add(self.dns_custom)
+        self.bypass_dns_main = BypassDns(rpc, self._fail, lambda st: self._on_split_status(st),
+                                         title="DNS for apps and addresses that skip the VPN")
+        for w in self.bypass_dns_main.widgets:
+            dns.add(w)
         groups.append(dns)
 
         netproxy = Adw.PreferencesGroup(title="Network Proxy",
@@ -1798,6 +1802,10 @@ class MainWindow(Adw.ApplicationWindow):
         self._poll_extras()
         return True
 
+    def _on_split_status(self, st):
+        self.bypass_page.update(st)                 # (it brings its own copy of the DNS rows up to date)
+        self.bypass_dns_main.sync(st)
+
     def _on_proxy_status(self, st):
         self.proxy_page.update_status(st)
         self.netproxy.update(st.get("net"))
@@ -1839,7 +1847,7 @@ class MainWindow(Adw.ApplicationWindow):
         if full or slow:
             rpc("history", self.history_group.update, None, limit=8)
             rpc("schedule.status", self.sched_page.update, None)
-            rpc("split.status", self.bypass_page.update, None)
+            rpc("split.status", self._on_split_status, None)
         if full:
             self.proxy_page.reload()
             self.netproxy.refresh()

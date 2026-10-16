@@ -428,6 +428,26 @@ class Cli:
             self.call("split.set", mode=rest[0])
             print("Mode set to %s." % rest[0])
             return 0
+        if act == "dns":
+            from .settings import DNS_PRESETS
+            if not rest:
+                own = st.get("dns") or []
+                print("DNS for the apps that skip the VPN: %s" % (", ".join(own) if own else
+                      "automatic (%s)" % (", ".join(st.get("dns_original") or []) or "your router")))
+                print("\nvpnman bypass dns <preset name | IP[,IP...] | auto>   (the first server is used)")
+                for name, ips in DNS_PRESETS:
+                    print("  %-30s %s" % (name, ", ".join(ips)))
+                return 0
+            text = " ".join(rest)
+            low = text.lower()
+            if low in ("auto", "automatic", "default", "off"):
+                ips = []
+            else:
+                hit = [x for name, x in DNS_PRESETS if low in name.lower()]
+                ips = hit[0] if hit else [x.strip() for x in text.replace(";", ",").replace(" ", ",").split(",") if x.strip()]
+            self.call("split.set", dns=ips)
+            print("Saved: %s." % (", ".join(ips) if ips else "automatic (the original DNS)"))
+            return 0
         if act == "available":
             flt = " ".join(rest).lower()
             for ap in appmod.discover():
@@ -455,7 +475,7 @@ class Cli:
                     print(yellow("  not in the list: %s" % want))
                 cur = keep
         else:
-            raise RpcError("unknown action %r (list, add, remove, available, on, off)" % act)
+            raise RpcError("unknown action %r (list, add, remove, available, on, off, mode, dns)" % act)
         self.call("split.set", apps=cur)
         print("Saved. Programs are moved out of the VPN within a couple of seconds of the tunnel coming up.")
         return 0
@@ -1638,12 +1658,13 @@ def build_parser():
             "  add APP...           add apps by name or process name\n"
             "  remove APP...        remove apps\n"
             "  on | off             turn the feature on or off\n"
+            "  dns [PRESET|IP|auto] the name server those apps use (default: your normal one)\n"
             "  mode [exclude|include]\n"
             "                       exclude (default): listed apps skip the VPN.\n"
             "                       include (experimental): ONLY listed apps use the VPN.",
             ["vpnman bypass available fire", "vpnman bypass add firefox steam", "vpnman bypass remove steam",
-             "vpnman bypass mode include"], aliases=["split"])
-    s.add_argument("action", nargs="?", choices=["list", "add", "remove", "rm", "available", "on", "off", "mode"],
+             "vpnman bypass mode include", "vpnman bypass dns quad9", "vpnman bypass dns auto"], aliases=["split"])
+    s.add_argument("action", nargs="?", choices=["list", "add", "remove", "rm", "available", "on", "off", "mode", "dns"],
                    help="what to do (default: list)")
     s.add_argument("items", nargs="*", metavar="APP", help="application names / process names (or the mode)")
     s = add("schedule", "connect the VPN at set times",

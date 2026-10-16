@@ -3197,6 +3197,37 @@ class SplitTests(unittest.TestCase):
             m._split.start, m._split.stop, plat.default_gateway, m._lock_apply = real
             m._split.active = False
 
+    def test_bypassed_apps_can_use_their_own_dns(self):
+        from vpnman.profiles import ProfileError
+        from vpnman import platform as plat
+        m = Manager(settings=settings.Settings(TMP + "/bdns.json"))
+        m.split_changed = lambda: None
+        self.assertEqual(m.split_status()["dns"], [])
+        self.assertEqual(m.split_set(dns="9.9.9.9, 149.112.112.112")["dns"], ["9.9.9.9", "149.112.112.112"])
+        self.assertEqual(m.split_set(dns=[])["dns"], [])
+        for bad in (["not-an-ip"], ["2606:4700::1111"], ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"]):
+            with self.assertRaises(ProfileError):
+                m.split_set(dns=bad)
+        started = []
+        real = (m._split.start, plat.default_gateway, m._lock_apply)
+        m._split.start = lambda gw, dev, dns=(), mode="exclude": (started.append(list(dns)), setattr(m._split, "active", True))
+        m._lock_apply = lambda: None
+        m.settings.update({"split": {"apps": [{"id": "a", "name": "A", "match": ["a"]}]}})
+        m.lock_engaged, m._split_ctx = True, None
+        plat.default_gateway = lambda: ("192.168.1.1", "eno1")
+        try:
+            m._split_sync()
+            m.split_set(dns=["1.1.1.1"])                           # a change restarts the bypass with the new resolver
+            m._split_sync()
+            m._split_sync()                                        # idempotent
+            m.split_set(dns=[])
+            m._split_sync()
+        finally:
+            m._split.start, plat.default_gateway, m._lock_apply = real
+            m._split.active = False
+        self.assertEqual(started[1:3], [["1.1.1.1"], started[0]])
+        self.assertEqual(len(started), 3)
+
     def test_kill_switch_lets_bypassed_traffic_through_only_when_asked(self):
         plain = netlock.nft_ruleset(netlock.Spec(endpoints=["1.2.3.4"], ifaces=["tun0"]))
         marked = netlock.nft_ruleset(netlock.Spec(endpoints=["1.2.3.4"], ifaces=["tun0"], split_mark=0x5652))

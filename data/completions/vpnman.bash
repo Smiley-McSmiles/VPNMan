@@ -35,7 +35,7 @@ _vpnman() {
             names=0 ;;
         bypass)
             opts=""
-            choices="list add remove rm available on off mode"
+            choices="list add remove rm available on off mode dns"
             names=0 ;;
         cleanup)
             opts="--force"
@@ -179,7 +179,7 @@ _vpnman() {
             names=0 ;;
         split)
             opts=""
-            choices="list add remove rm available on off mode"
+            choices="list add remove rm available on off mode dns"
             names=0 ;;
         status)
             opts="--json"
