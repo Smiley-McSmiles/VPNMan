@@ -4,13 +4,14 @@ The panel host gets the pixels (StatusNotifierItem ``IconPixmap``) as well as an
 host cannot find the named icon in its theme (the GNOME AppIndicator extension then shows three dots).
 """
 
+from .palette import STATE_COLORS
+
 try:
     import cairo
 except ImportError:                                  # pragma: no cover - the GUI needs it anyway
     cairo = None
 
-COLORS = {"off": (0.93, 0.26, 0.28), "vpn": (0.22, 0.48, 0.95), "proxy": (0.16, 0.70, 0.46),
-          "both": (0.08, 0.72, 0.80), "busy": (0.95, 0.65, 0.12), "error": (0.93, 0.26, 0.28)}
+COLORS = {mode: dark for mode, (dark, _light) in STATE_COLORS.items()}
 SIZES = (24, 48)
 
 

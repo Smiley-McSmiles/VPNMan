@@ -20,7 +20,7 @@
     <release version="1.1.1" date="2026-10-16">
       <description>
         <ul>
-          <li>New tray icon: a shield in the state colour (red off, blue VPN, green proxy, cyan both, amber connecting), sent to the panel as pixels, so the GNOME AppIndicator extension no longer shows three dots when it cannot find the named icon</li>
+          <li>New tray icon: a shield in the same colours as the status picture on the main page (red nothing, blue VPN, green proxy, cyan both, amber connecting). It follows the state on GNOME, KDE, Cinnamon and other desktops, and is sent to the panel as pixels too, so the GNOME AppIndicator extension no longer shows three dots when it cannot find the named icon</li>
           <li>New: choose the DNS server the whitelisted apps use while they skip the VPN (Apps tab or vpnman bypass dns): automatic, a preset or your own. It also works with systemd-resolved (Fedora): programs that ask a resolver on this computer are redirected, and while a server is chosen VPNMan switches name lookups from the resolved NSS module to its stub (/etc/nsswitch.conf, restored afterwards) so Firefox and GNOME apps follow too</li>
           <li>Fixed: with a file-based /etc/resolv.conf (Void, Alpine and others without systemd-resolved), whitelisted apps could lose DNS while connected. They were sent to the VPN's own resolver, which they cannot reach outside the tunnel, when VPNMan had already replaced the file. They now keep the original resolver</li>
         </ul>

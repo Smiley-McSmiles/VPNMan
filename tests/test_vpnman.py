@@ -1177,6 +1177,23 @@ class CompletionTests(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_tray_icons_follow_the_palette_of_the_main_page(self):
+        import subprocess
+        r = subprocess.run([sys.executable, os.path.join(self.ROOT, "tools", "gen_tray_icons.py"), "--check"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("palette", os.path.join(self.ROOT, "vpnman", "gui", "palette.py"))
+        pal = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pal)
+        self.assertEqual(sorted(pal.MODES), sorted(["off", "vpn", "proxy", "both", "busy", "error"]))
+        want = {"off": "#ff5c61", "vpn": "#4c8cff", "proxy": "#3dcf8f", "both": "#29d4e6"}      # red, blue, green, cyan
+        for mode, color in want.items():
+            self.assertEqual(pal.hex_color(pal.STATE_COLORS[mode][0]), color, mode)
+            with open(os.path.join(self.ROOT, "data", "icons", "hicolor", "scalable", "apps",
+                                   "io.github.smiley_mcsmiles.VPNMan-tray-%s.svg" % mode)) as fh:
+                self.assertIn(color, fh.read())
+
     def test_bash_completion_offers_commands_choices_and_profile_option_flags(self):
         import subprocess
         bash = shutil_which("bash")

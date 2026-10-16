@@ -88,7 +88,8 @@ class UserConfig:
             pass
 
 
-ICON_NAMES = [APP_ID] + ["%s-%s-symbolic" % (APP_ID, k) for k in ("connected", "connecting", "error", "disconnected")]
+ICON_NAMES = [APP_ID] + ["%s-%s-symbolic" % (APP_ID, k) for k in ("connected", "connecting", "error", "disconnected")] \
+    + ["%s-tray-%s" % (APP_ID, k) for k in ("off", "vpn", "proxy", "both", "busy", "error")]
 
 
 def private_icon_dir():
@@ -114,9 +115,6 @@ def ensure_icons():
         theme.add_search_path(d)
     Gtk.Window.set_default_icon_name(APP_ID)
 
-
-TRAY_ICONS = {"connected": "connected", "connecting": "connecting", "reconnecting": "connecting",
-              "disconnecting": "connecting", "error": "error", "disconnected": "disconnected"}
 
 
 class Hero(Gtk.Box):
@@ -820,10 +818,8 @@ class MainWindow(Adw.ApplicationWindow):
                "error": "Connection failed"}.get(state, state)
         if st["netlock"]["engaged"]:
             tip += " · Network Lock on"
-        tray.set_state("%s-%s-symbolic" % (APP_ID, TRAY_ICONS.get(state, "disconnected")), tip,
-                       attention=(state == "error"),
-                       mode=mode_for("disconnecting" if self._disconnecting else state, state == "connected",
-                                     bool(st.get("proxy_up"))))
+        mode = mode_for("disconnecting" if self._disconnecting else state, state == "connected", bool(st.get("proxy_up")))
+        tray.set_state("%s-tray-%s" % (APP_ID, mode), tip, attention=(state == "error"), mode=mode)
         if key != getattr(self, "_tray_key", None):
             self._tray_key = key
             tray.update_menu()
@@ -2292,7 +2288,7 @@ class Application(Adw.Application):
             # Cinnamon: XApp.StatusIcon in a GTK 3 helper process; fall back to StatusNotifier if it cannot start
             self.tray = HelperTray(*args, private_icon_dir(), on_failure=self._helper_failed)
             if self.tray.start():
-                self.tray.set_state("%s-disconnected-symbolic" % APP_ID, "VPNMan")
+                self.tray.set_state("%s-tray-off" % APP_ID, "VPNMan", mode="off")
                 return
         self._start_sni()
 
@@ -2303,7 +2299,7 @@ class Application(Adw.Application):
     def _start_sni(self):
         self.tray = Tray(APP_ID, APP_NAME, lambda: self.win.present(), self.win.tray_menu,
                          self._on_tray_availability, private_icon_dir())
-        self.tray.set_state("%s-disconnected-symbolic" % APP_ID, "VPNMan")
+        self.tray.set_state("%s-tray-off" % APP_ID, "VPNMan", mode="off")
         self.tray.start()
 
     def keep_in_tray(self):
