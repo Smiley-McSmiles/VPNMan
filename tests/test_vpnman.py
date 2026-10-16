@@ -1938,7 +1938,7 @@ exit 0
         calls = []
         real_start, real_stop = self.mgr._split.start, self.mgr._split.stop
 
-        def fake_start(gw, dev, dns=(), mode="exclude"):
+        def fake_start(gw, dev, dns=(), mode="exclude", **kw):
             calls.append(("start", dev))
             self.mgr._split.active = True
 
@@ -1969,7 +1969,7 @@ exit 0
         calls, locks = [], []
         real = (m._split.start, m._split.stop, m._lock_apply, plat.default_gateway, m.lock_engaged)
 
-        def fake_start(gw, dev, dns=(), mode="exclude"):
+        def fake_start(gw, dev, dns=(), mode="exclude", **kw):
             calls.append(("start", gw, dev))
             m._split.active = True
 
@@ -3047,6 +3047,32 @@ class HotspotTests(unittest.TestCase):
                 else:
                     os.environ[k] = v
 
+    def test_dns_forwarder_in_a_network_namespace(self):
+        import shutil
+        import subprocess
+        if os.geteuid() != 0 or not (shutil.which("unshare") and shutil.which("nsenter") and shutil.which("nft")):
+            self.skipTest("needs root, unshare, nsenter and nft")
+        r = subprocess.run(["unshare", "-n", sys.executable, os.path.join(os.path.dirname(__file__), "dnsfwd_check.py")],
+                           capture_output=True, text=True, timeout=120)
+        if "Operation not permitted" in r.stderr and "DNSFWD-OK" not in r.stdout:
+            self.skipTest("network namespaces are not allowed here")
+        self.assertIn("DNSFWD-OK", r.stdout, (r.stdout + r.stderr)[-3000:])
+
+    def test_dns_caveat_and_loopback_rules(self):
+        from vpnman import dns as _dns
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "nsswitch.conf")
+        for line, want in (("hosts:      files myhostname mdns4_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] dns", True),
+                           ("hosts: files dns", False), ("hosts: files resolve", True), ("# hosts: resolve", False)):
+            with open(path, "w") as fh:
+                fh.write("passwd: files\n%s\n" % line)
+            self.assertEqual(_dns.nss_resolve(path), want, line)
+        self.assertFalse(_dns.nss_resolve(os.path.join(d, "missing")))
+        rules = _split.ruleset(["1.1.1.1"], fwd_port=5353)
+        self.assertIn("ip daddr 127.0.0.0/8 dnat ip to 127.0.0.1:5353", rules)
+        self.assertIn("ip daddr != 127.0.0.0/8 ip daddr != 1.1.1.1 dnat ip to 1.1.1.1", rules)
+        self.assertNotIn("127.0.0.1:", _split.ruleset(["1.1.1.1"]))
+
     def test_set_version_changes_every_place(self):
         import shutil
         import subprocess
@@ -3206,7 +3232,7 @@ class SplitTests(unittest.TestCase):
         calls = []
         from vpnman import platform as plat
         real = (m._split.start, m._split.stop, plat.default_gateway, m._lock_apply)
-        m._split.start = lambda gw, dev, dns=(), mode="exclude": (calls.append(mode), setattr(m._split, "active", True))
+        m._split.start = lambda gw, dev, dns=(), mode="exclude", **kw: (calls.append(mode), setattr(m._split, "active", True))
         m._split.stop = lambda: (calls.append("stop"), setattr(m._split, "active", False))
         m._lock_apply = lambda: None
         m.settings.update({"split": {"apps": [{"id": "a", "name": "A", "match": ["a"]}]}})
@@ -3235,7 +3261,7 @@ class SplitTests(unittest.TestCase):
                 m.split_set(dns=bad)
         started = []
         real = (m._split.start, plat.default_gateway, m._lock_apply)
-        m._split.start = lambda gw, dev, dns=(), mode="exclude": (started.append(list(dns)), setattr(m._split, "active", True))
+        m._split.start = lambda gw, dev, dns=(), mode="exclude", **kw: (started.append(list(dns)), setattr(m._split, "active", True))
         m._lock_apply = lambda: None
         m.settings.update({"split": {"apps": [{"id": "a", "name": "A", "match": ["a"]}]}})
         m.lock_engaged, m._split_ctx = True, None

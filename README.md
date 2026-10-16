@@ -239,7 +239,7 @@ installed it).
 * **App bypass** – the *Apps* tab (or `vpnman bypass`). Pick installed applications (read from the `.desktop` launchers,
   including Flatpak and Snap) or type a program name. While the VPN is up, those programs *and everything they start*
   keep using your normal connection; all other traffic stays in the tunnel and under the kill switch.
-  You can also choose the DNS server those programs use (automatic, a preset or your own: Apps tab, main page, or
+  You can also choose the DNS server those programs use (automatic, a preset or your own: Apps tab, or
   `vpnman bypass dns quad9`); everything inside the tunnel keeps the VPN's DNS.
 
   ```sh

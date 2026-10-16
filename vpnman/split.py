@@ -13,6 +13,7 @@ import os
 import threading
 
 from . import platform as plat
+from .dnsfwd import DnsForwarder
 
 MARK = 0x5652
 TABLE = 5652
@@ -39,8 +40,11 @@ def cgroup_name(mode):
     return CGROUP_VPN if mode == "include" else CGROUP
 
 
-def ruleset(dns=(), mark=MARK, mode="exclude"):
+def ruleset(dns=(), mark=MARK, mode="exclude", fwd_port=0):
     """nftables text.  `dns`: resolvers the bypassed programs should use instead of the tunnel's.
+
+    ``fwd_port``: with a chosen resolver, the DNS queries these programs send to loopback (systemd-resolved's stub,
+    dnsmasq...) go to the DNS forwarder on 127.0.0.1:fwd_port instead (dnsfwd.py), which asks ``dns[0]`` around the VPN.
 
     exclude (default): packets of programs in the cgroup get the bypass mark.
     include: every locally generated packet that carries no mark yet gets it, except the packets of programs in the
@@ -67,6 +71,8 @@ def ruleset(dns=(), mark=MARK, mode="exclude"):
         target = v4[0]
         lines += ["  chain bypass_dns {", "    type nat hook output priority -100; policy accept;"]
         for proto in ("udp", "tcp"):
+            if fwd_port:
+                lines.append("    %s %s dport 53 ip daddr 127.0.0.0/8 dnat ip to 127.0.0.1:%d" % (sel, proto, int(fwd_port)))
             lines.append("    %s %s dport 53 ip daddr != 127.0.0.0/8 ip daddr != %s dnat ip to %s"
                          % (sel, proto, target, target))
         lines.append("  }")
@@ -255,13 +261,16 @@ class SplitTunnel:
         self._thread = None
         self._lock = threading.Lock()
         self._rules = False
+        self._fwd = None
 
     @property
     def path(self):
         root = self.root or cgroup_root()
         return os.path.join(root, cgroup_name(self.mode)) if root else None
 
-    def start(self, gw, dev, dns=(), mode="exclude"):
+    def start(self, gw, dev, dns=(), mode="exclude", intercept_local=False):
+        """``intercept_local``: the resolver was chosen by the user, so queries to a resolver on this computer are taken over
+        too (they would otherwise reach the VPN's DNS through the local stub)."""
         ok, why = supported()
         if not ok:
             raise RuntimeError(why)
@@ -271,8 +280,18 @@ class SplitTunnel:
             self.stop_locked()
             self.mode = mode if mode in ("include", "exclude") else "exclude"
             os.makedirs(self.path, exist_ok=True)
-            rc, out = plat.run([plat.which("nft"), "-f", "-"], input=ruleset(dns, mode=self.mode))
+            fwd_port = 0
+            v4 = [d for d in dns if ":" not in str(d)]
+            if intercept_local and v4:
+                try:
+                    self._fwd = DnsForwarder(v4[0], MARK)
+                    fwd_port = self._fwd.start()
+                except OSError as e:
+                    self._fwd = None
+                    self.log("warn", "App bypass: the DNS forwarder could not start (%s); local resolvers stay as they are" % e)
+            rc, out = plat.run([plat.which("nft"), "-f", "-"], input=ruleset(dns, mode=self.mode, fwd_port=fwd_port))
             if rc:
+                self._stop_forwarder()
                 try:
                     os.rmdir(self.path)                  # do not leave the empty cgroup behind
                 except OSError:
@@ -296,6 +315,11 @@ class SplitTunnel:
             self._thread = threading.Thread(target=self._loop, args=(self._stop,), daemon=True, name="split-scan")
             self._thread.start()
 
+    def _stop_forwarder(self):
+        fwd, self._fwd = self._fwd, None
+        if fwd:
+            fwd.stop()
+
     def stop(self):
         with self._lock:
             self.stop_locked()
@@ -308,6 +332,7 @@ class SplitTunnel:
             t.join(3)
         self.active = False
         self._release()
+        self._stop_forwarder()
         nft, ip = plat.which("nft"), plat.which("ip")
         if self._rules and nft:
             plat.run([nft, "delete", "table", "inet", NFT_TABLE])

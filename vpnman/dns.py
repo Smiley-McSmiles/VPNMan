@@ -73,6 +73,19 @@ class DnsManager:
         restore_resolv_conf()
 
 
+def nss_resolve(path="/etc/nsswitch.conf"):
+    """True when programs resolve names through systemd-resolved's NSS module (Fedora, Arch, Ubuntu...): they ask it over a
+    local socket, not with DNS packets, so no firewall rule can steer them to another resolver."""
+    try:
+        with open(path) as fh:
+            for line in fh:
+                if line.split("#")[0].strip().startswith("hosts:"):
+                    return "resolve" in line.split("#")[0].replace("[", " ").replace("]", " ").split()
+    except OSError:
+        pass
+    return False
+
+
 def original_resolv_lines():
     """The lines of the resolver configuration as it was before VPNMan changed it.  While VPNMan has replaced the file
     (``# managed by vpnman``), they come from the saved copy - or from the file a symlink pointed at - never from the VPN's

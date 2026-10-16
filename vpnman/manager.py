@@ -900,7 +900,8 @@ class Manager:
             elif not (self._split.active and self._split_cur == ctx[:2] + (mode, tuple(self._bypass_dns(ctx)))):
                 try:
                     dns_for = self._bypass_dns(ctx)
-                    self._split.start(ctx[0], ctx[1], dns_for, mode=mode)
+                    self._split.start(ctx[0], ctx[1], dns_for, mode=mode,
+                                      intercept_local=bool(self.settings.get("split.dns")))
                     self._split_cur = ctx[:2] + (mode, tuple(dns_for))
                     apps = ", ".join(a["name"] for a in self.settings.get("split.apps"))
                     self.log.add("info", "%s: %s%s" % (
@@ -948,6 +949,7 @@ class Manager:
         return {"supported": ok, "reason": why, "active": self._split.active, "enabled": sp["enabled"],
                 "apps": sp["apps"], "moved": len(self._split.moved), "mode": sp.get("mode", "exclude"),
                 "dns": list(sp.get("dns") or []), "dns_original": system_dns(),
+                "dns_caveat": bool(sp.get("dns")) and dns.nss_resolve(),
                 "routes": [r.get("ip") or r.get("host") for r in self.settings.get("routes") if r.get("action") == "out"]}
 
     def split_set(self, apps=None, enabled=None, mode=None, dns=None):

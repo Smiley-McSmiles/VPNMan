@@ -171,22 +171,22 @@ class App(A.Application):
         CALLS.clear()
         bp._add_address(bp.addr_entry)
         assert CALLS[-1][1]["entries"] == ["10.0.0.0/8", "nas.example.com", "printer.lan", "192.168.5.5"], CALLS
-        # ---- the DNS of the apps that skip the VPN: the same rows in the Apps tab and on the main page
+        # ---- the DNS of the apps that skip the VPN: in the Apps tab only
         st = {"enabled": True, "supported": True, "reason": "", "active": False, "moved": 0, "apps": [], "mode": "exclude",
               "routes": [], "dns": ["9.9.9.9", "149.112.112.112"], "dns_original": ["192.168.1.1"]}
         w._on_split_status(st)
-        main = w.bypass_dns_main
-        assert bp.dns.row.get_selected() == main.row.get_selected() >= 1, "a preset is shown in both places"
+        assert not hasattr(w, "bypass_dns_main"), "no copy on the main page"
+        assert bp.dns.row.get_selected() >= 1, "a preset is shown"
         st["dns"] = []
         w._on_split_status(st)
-        assert bp.dns.row.get_selected() == main.row.get_selected() == 0 and "192.168.1.1" in main.row.get_subtitle()
+        assert bp.dns.row.get_selected() == 0 and "192.168.1.1" in bp.dns.row.get_subtitle()
         st["dns"] = ["10.20.30.40"]
         w._on_split_status(st)
-        assert main.entry.get_visible() and main.entry.get_text() == "10.20.30.40" and bp.dns.entry.get_visible()
-        bp.dns.rpc = main.rpc = fake_rpc
+        assert bp.dns.entry.get_visible() and bp.dns.entry.get_text() == "10.20.30.40"
+        bp.dns.rpc = fake_rpc
         CALLS.clear()
-        main.entry.set_text("10.1.1.1; 10.1.1.2")
-        main.entry.emit("apply")
+        bp.dns.entry.set_text("10.1.1.1; 10.1.1.2")
+        bp.dns.entry.emit("apply")
         assert CALLS[-1] == ("split.set", {"dns": ["10.1.1.1", "10.1.1.2"]}), CALLS
         CALLS.clear()
         bp.dns.row.set_selected(0)
