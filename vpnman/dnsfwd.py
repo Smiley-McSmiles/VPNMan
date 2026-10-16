@@ -23,6 +23,8 @@ class DnsForwarder:
         self._stop = threading.Event()
         self._socks = []
         self._threads = []
+        self.count = 0                  # queries forwarded so far
+        self.last = ""                  # the name asked last
 
     # ---- lifecycle
     def start(self):
@@ -63,6 +65,19 @@ class DnsForwarder:
             t.join(1)
         self._socks, self._threads = [], []
 
+    def _note(self, query):
+        """Count a query and remember its name (for the status: did anything reach the forwarder?)."""
+        self.count += 1
+        try:
+            name, pos = [], 12
+            while pos < len(query) and query[pos]:
+                n = query[pos]
+                name.append(query[pos + 1:pos + 1 + n].decode("ascii", "replace"))
+                pos += n + 1
+            self.last = ".".join(name)
+        except (IndexError, ValueError):
+            pass
+
     # ---- upstream
     def _upstream_socket(self, kind):
         s = socket.socket(socket.AF_INET, kind)
@@ -85,6 +100,7 @@ class DnsForwarder:
             threading.Thread(target=self._udp_query, args=(sock, data, peer), daemon=True).start()
 
     def _udp_query(self, sock, data, peer):
+        self._note(data)
         up = self._upstream_socket(socket.SOCK_DGRAM)
         try:
             up.sendto(data, (self.upstream, 53))
@@ -126,6 +142,7 @@ class DnsForwarder:
             while True:
                 size = struct.unpack("!H", self._read(conn, 2))[0]
                 query = self._read(conn, size)
+                self._note(query)
                 if up is None:
                     up = self._upstream_socket(socket.SOCK_STREAM)
                     up.connect((self.upstream, 53))

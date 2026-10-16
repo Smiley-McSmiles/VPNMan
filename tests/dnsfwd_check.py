@@ -56,6 +56,24 @@ def sh(*cmd):
     subprocess.run(cmd, check=True, capture_output=True)
 
 
+def query_connected(server, name, mark=0):
+    """The way glibc asks: a connect()ed UDP socket."""
+    q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + b"".join(
+        bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0\x00\x01\x00\x01"
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    if mark:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, mark)
+    s.settimeout(4)
+    try:
+        s.connect((server, 53))
+        s.send(q)
+        return socket.inet_ntoa(s.recv(512)[-4:])
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
 def query(server, name, tcp=False, mark=0):
     q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + b"".join(
         bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0\x00\x01\x00\x01"
@@ -151,6 +169,8 @@ def main():
         subprocess.run(["nft", "-f", "-"], input=rules(port), text=True, check=True)
         assert query("127.0.0.53", "b.test", mark=mark) == "10.2.2.2", "UDP to the stub goes to the chosen resolver"
         assert query("127.0.0.53", "c.test", tcp=True, mark=mark) == "10.2.2.2", "and so does TCP"
+        assert query_connected("127.0.0.53", "glibc.test", mark=mark) == "10.2.2.2", "a connect()ed socket (glibc) as well"
+        assert fwd.count == 3 and fwd.last == "glibc.test", (fwd.count, fwd.last)
         assert query("127.0.0.53", "d.test") == "10.1.1.1", "a program that is not part of the bypass keeps the stub"
         assert query("203.0.113.53", "e.test", mark=mark) == "10.2.2.2", "a direct query to the chosen resolver is untouched"
         fwd.stop()

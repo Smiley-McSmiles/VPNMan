@@ -292,7 +292,14 @@ class SplitTunnel:
                     self.log("warn", "App bypass: the DNS forwarder could not start (%s); local resolvers stay as they are" % e)
             rc, out = plat.run([plat.which("nft"), "-f", "-"], input=ruleset(dns, mode=self.mode, fwd_port=fwd_port))
             if not rc and fwd_port:
-                dnsmod.nss_bypass(True)                  # programs that ask systemd-resolved directly use its stub instead
+                # programs that ask systemd-resolved directly use its stub instead
+                if dnsmod.nss_resolve():
+                    done = dnsmod.nss_bypass(True)
+                    self.log("info" if done else "warn", "App bypass: name lookups moved from systemd-resolved's NSS module "
+                             "to its stub (/etc/nsswitch.conf)" if done else
+                             "App bypass: could not change /etc/nsswitch.conf; programs that ask systemd-resolved directly "
+                             "keep using the VPN's DNS")
+                self.log("info", "App bypass: DNS of those programs goes to %s (forwarder on 127.0.0.1:%d)" % (v4[0], fwd_port))
             if rc:
                 self._stop_forwarder()
                 try:
@@ -317,6 +324,11 @@ class SplitTunnel:
             self._stop = threading.Event()
             self._thread = threading.Thread(target=self._loop, args=(self._stop,), daemon=True, name="split-scan")
             self._thread.start()
+
+    def forwarded(self):
+        """(queries redirected to the chosen resolver so far, the last name) - zero while nothing reaches the forwarder."""
+        f = self._fwd
+        return (f.count, f.last) if f else (0, "")
 
     def _stop_forwarder(self):
         fwd, self._fwd = self._fwd, None
