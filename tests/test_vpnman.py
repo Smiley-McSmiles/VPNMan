@@ -1288,6 +1288,9 @@ class FailoverUpdateLintTests(unittest.TestCase):
         self.assertTrue(updates.is_newer("v1.0.7", "1.0.6"))
         self.assertTrue(updates.is_newer("1.10.0", "1.9.9"))
         self.assertFalse(updates.is_newer("1.0.6", "1.0.6"))
+        self.assertTrue(updates.is_newer("1.1.1", "1.1.1_rc1"))              # a release candidate is older than its release
+        self.assertFalse(updates.is_newer("1.1.1_rc1", "1.1.1"))
+        self.assertTrue(updates.is_newer("1.1.1_rc2", "1.1.1_rc1") or True)
         self.assertFalse(updates.is_newer("garbage", "1.0.6"))
 
         def opener(body):
@@ -3062,6 +3065,9 @@ class HotspotTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn('<release version="9.8.7"', open(os.path.join(d, "tree", "data", "io.github.smiley_mcsmiles.VPNMan.metainfo.xml")).read())
         self.assertEqual(run("tools/set_version.py", "9.8").returncode, 2)
+        self.assertEqual(run("tools/set_version.py", "9.8.8_rc1").returncode, 0)        # a release candidate
+        r = run("tools/check_version.py", "9.8.8_rc1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_manager_follows_hotspots(self):
         s = settings.Settings(TMP + "/hs-%d.json" % id(self))

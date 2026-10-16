@@ -12,8 +12,11 @@ PAGE = "https://github.com/Smiley-McSmiles/VPNMan/releases"
 
 def parse(v):
     """'v1.2.3' -> (1, 2, 3); anything unparsable -> None."""
-    m = re.match(r"^v?(\d+)\.(\d+)(?:\.(\d+))?", str(v).strip())
-    return tuple(int(x or 0) for x in m.groups()) if m else None
+    m = re.match(r"^v?(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?([_~-]?(?:rc|alpha|beta|pre|dev)\d*)?", str(v).strip())
+    if not m:
+        return None
+    *nums, pre = m.groups()
+    return tuple(int(x or 0) for x in nums) + (0 if pre else 1,)       # 1.1.1_rc1 comes before 1.1.1
 
 
 def is_newer(latest, current=__version__):

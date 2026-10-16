@@ -12,6 +12,7 @@ import re
 import sys
 import time
 
+VERSION_RE = r"\d+\.\d+\.\d+(\.\d+)?([_-]?(rc|alpha|beta|pre|dev)\d*)?"
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 META = "data/io.github.smiley_mcsmiles.VPNMan.metainfo.xml"
 
@@ -41,13 +42,14 @@ def main(argv):
         i = args.index("--note")
         note = args[i + 1] if i + 1 < len(args) else None
         del args[i:i + 2]
-    if len(args) != 1 or not re.fullmatch(r"\d+\.\d+\.\d+(\.\d+)?", args[0].lstrip("v")):
-        print("usage: set_version.py MAJOR.MINOR.PATCH[.BUILD] [--note TEXT]", file=sys.stderr)
+    if len(args) != 1 or not re.fullmatch(VERSION_RE, args[0].lstrip("v")):
+        print("usage: set_version.py MAJOR.MINOR.PATCH[.BUILD][_rc1] [--note TEXT]", file=sys.stderr)
         return 2
     version = args[0].lstrip("v")
     sub("vpnman/__init__.py", r'^__version__ = "[^"]+"', '__version__ = "%s"' % version, re.M)
-    sub("README.md", r"badge/version-[0-9][^-]*-blue\.svg\?style=flat-square\" alt=\"Version [^\"]*\"",
-        'badge/version-%s-blue.svg?style=flat-square" alt="Version %s"' % (version, version))
+    badge = version.replace("-", "--").replace("_", "__")             # shields.io: _ is a space, - a separator
+    sub("README.md", r"badge/version-[0-9][^\"]*?-blue\.svg\?style=flat-square\" alt=\"Version [^\"]*\"",
+        lambda m: 'badge/version-%s-blue.svg?style=flat-square" alt="Version %s"' % (badge, version))
     sub("data/vpnman.1", r'^\.TH VPNMAN 1 "[^"]*" "vpnman [^"]+"',
         '.TH VPNMAN 1 "%s" "vpnman %s"' % (time.strftime("%B %Y"), version), re.M)
     meta = read(META)
