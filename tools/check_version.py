@@ -19,8 +19,8 @@ def read(rel):
 def versions():
     found = {}
     found["vpnman/__init__.py"] = re.search(r'^__version__ = "([^"]+)"', read("vpnman/__init__.py"), re.M).group(1)
-    m = re.search(r"badge/version-([0-9][^-]*)-blue", read("README.md"))
-    found["README.md badge"] = m.group(1) if m else None
+    m = re.search(r"badge/version-([0-9].*?)-blue", read("README.md"))
+    found["README.md badge"] = m.group(1).replace("--", "-").replace("__", "_") if m else None
     m = re.search(r'^\.TH VPNMAN 1 "[^"]*" "vpnman ([^"]+)"', read("data/vpnman.1"), re.M)
     found["data/vpnman.1"] = m.group(1) if m else None
     m = re.search(r'<release version="([^"]+)"', read("data/io.github.smiley_mcsmiles.VPNMan.metainfo.xml"))

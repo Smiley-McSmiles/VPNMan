@@ -207,13 +207,21 @@ class Tray:
                 self.on_availability(value)
 
     # --------------------------------------------------------------- updates
-    def set_state(self, icon, tooltip, attention=False, title=None):
+    def set_state(self, icon, tooltip, attention=False, title=None, mode=None):
+        """``mode``: the state's colour (trayicon.COLORS); the icon is then also sent as pixels, and the host that cannot find
+        the named icon still shows it."""
+        status = "NeedsAttention" if attention else "Active"
+        same = (icon, mode, tooltip, status, title or self.title) == (
+            self.icon, getattr(self, "mode", None), self.tooltip, self.status, self.title)
         self.icon = icon
+        self.mode = mode
         self.tooltip = tooltip
-        self.status = "NeedsAttention" if attention else "Active"
+        self.status = status
         self.attention_icon = icon if attention else ""
         if title:
             self.title = title
+        if same:
+            return                      # called with every status update: tell the panel only about real changes
         if self._conn:
             for sig, args in (("NewIcon", None), ("NewAttentionIcon", None), ("NewToolTip", None),
                               ("NewStatus", GLib.Variant("(s)", (self.status,)))):
@@ -234,6 +242,11 @@ class Tray:
     # ------------------------------------------------------------------- SNI
     def _sni_get(self, conn, sender, path, iface, prop):
         pix = GLib.Variant("a(iiay)", [])
+        drawn = []
+        if getattr(self, "mode", None):
+            from .trayicon import pixmaps
+            drawn = pixmaps(self.mode)
+        icon_pix = GLib.Variant("a(iiay)", [(w, h, GLib.Variant("ay", data)) for w, h, data in drawn]) if drawn else pix
         table = {
             "Category": GLib.Variant("s", "ApplicationStatus"),
             "Id": GLib.Variant("s", self.app_id),
@@ -241,12 +254,12 @@ class Tray:
             "Status": GLib.Variant("s", self.status),
             "WindowId": GLib.Variant("u", 0),
             "IconThemePath": GLib.Variant("s", self.icon_theme_path),
-            "IconName": GLib.Variant("s", self.icon),
-            "IconPixmap": pix,
+            "IconName": GLib.Variant("s", "" if drawn else self.icon),     # drawn: the pixels are the icon
+            "IconPixmap": icon_pix,
             "OverlayIconName": GLib.Variant("s", ""),
             "OverlayIconPixmap": pix,
-            "AttentionIconName": GLib.Variant("s", self.attention_icon or self.icon),
-            "AttentionIconPixmap": pix,
+            "AttentionIconName": GLib.Variant("s", "" if drawn else (self.attention_icon or self.icon)),
+            "AttentionIconPixmap": icon_pix if self.attention_icon else pix,
             "AttentionMovieName": GLib.Variant("s", ""),
             "ToolTip": GLib.Variant("(sa(iiay)ss)", (self.icon, [], self.title, self.tooltip)),
             "ItemIsMenu": GLib.Variant("b", False),
@@ -430,7 +443,9 @@ class HelperTray:
                 self.on_availability(value)
 
     # same interface as Tray ------------------------------------------------
-    def set_state(self, icon, tooltip, attention=False, title=None):
+    def set_state(self, icon, tooltip, attention=False, title=None, mode=None):
+        if (icon, tooltip, attention) == getattr(self, "_last_state", None):
+            return
         self._last_state = (icon, tooltip, attention)
         self._send({"cmd": "state", "icon": icon, "tooltip": tooltip, "attention": attention})
 

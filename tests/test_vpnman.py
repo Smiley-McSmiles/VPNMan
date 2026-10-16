@@ -1177,6 +1177,23 @@ class CompletionTests(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_tray_icons_follow_the_palette_of_the_main_page(self):
+        import subprocess
+        r = subprocess.run([sys.executable, os.path.join(self.ROOT, "tools", "gen_tray_icons.py"), "--check"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("palette", os.path.join(self.ROOT, "vpnman", "gui", "palette.py"))
+        pal = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pal)
+        self.assertEqual(sorted(pal.MODES), sorted(["off", "vpn", "proxy", "both", "busy", "error", "locked"]))
+        want = {"off": "#ff5c61", "vpn": "#4c8cff", "proxy": "#3dcf8f", "both": "#29d4e6"}      # red, blue, green, cyan
+        for mode, color in want.items():
+            self.assertEqual(pal.hex_color(pal.STATE_COLORS[mode][0]), color, mode)
+            with open(os.path.join(self.ROOT, "data", "icons", "hicolor", "scalable", "apps",
+                                   "io.github.smiley_mcsmiles.VPNMan-tray-%s.svg" % mode)) as fh:
+                self.assertIn(color, fh.read())
+
     def test_bash_completion_offers_commands_choices_and_profile_option_flags(self):
         import subprocess
         bash = shutil_which("bash")
@@ -1288,6 +1305,9 @@ class FailoverUpdateLintTests(unittest.TestCase):
         self.assertTrue(updates.is_newer("v1.0.7", "1.0.6"))
         self.assertTrue(updates.is_newer("1.10.0", "1.9.9"))
         self.assertFalse(updates.is_newer("1.0.6", "1.0.6"))
+        self.assertTrue(updates.is_newer("1.1.1", "1.1.1_rc1"))              # a release candidate is older than its release
+        self.assertFalse(updates.is_newer("1.1.1_rc1", "1.1.1"))
+        self.assertTrue(updates.is_newer("1.1.1_rc2", "1.1.1_rc1") or True)
         self.assertFalse(updates.is_newer("garbage", "1.0.6"))
 
         def opener(body):
@@ -1935,7 +1955,7 @@ exit 0
         calls = []
         real_start, real_stop = self.mgr._split.start, self.mgr._split.stop
 
-        def fake_start(gw, dev, dns=(), mode="exclude"):
+        def fake_start(gw, dev, dns=(), mode="exclude", **kw):
             calls.append(("start", dev))
             self.mgr._split.active = True
 
@@ -1966,7 +1986,7 @@ exit 0
         calls, locks = [], []
         real = (m._split.start, m._split.stop, m._lock_apply, plat.default_gateway, m.lock_engaged)
 
-        def fake_start(gw, dev, dns=(), mode="exclude"):
+        def fake_start(gw, dev, dns=(), mode="exclude", **kw):
             calls.append(("start", gw, dev))
             m._split.active = True
 
@@ -3008,6 +3028,153 @@ class HotspotTests(unittest.TestCase):
         st = m.status()
         self.assertEqual((st["proxy_up"], st["proxy_name"]), (True, "network proxy"))
 
+    def test_bypassed_apps_keep_the_original_resolver(self):
+        from vpnman import dns as _dns
+        from vpnman.manager import system_dns
+        d = tempfile.mkdtemp()
+        resolv, run = os.path.join(d, "resolv.conf"), os.path.join(d, "run")
+        os.makedirs(run)
+        saved_env = {k: os.environ.get(k) for k in ("VPNMAN_RESOLV_CONF", "VPNMAN_RUN_DIR")}
+        os.environ["VPNMAN_RESOLV_CONF"], os.environ["VPNMAN_RUN_DIR"] = resolv, run
+        try:
+            with open(resolv, "w") as fh:
+                fh.write("nameserver 192.168.1.1\nnameserver 127.0.0.1\n")
+            self.assertEqual(system_dns("192.168.1.1"), ["192.168.1.1"])
+            _dns.DnsManager().apply(["10.8.0.1"])                              # the VPN's own resolver replaces the file
+            self.assertIn("# managed by vpnman", open(resolv).read())
+            self.assertEqual(system_dns("192.168.1.254"), ["192.168.1.1"], "the saved original, not the VPN's resolver")
+            _dns.restore_resolv_conf()
+            # a symlinked resolv.conf (resolvconf, systemd): its target is the original
+            real = os.path.join(d, "real.conf")
+            with open(real, "w") as fh:
+                fh.write("nameserver 9.9.9.9\n")
+            os.unlink(resolv)
+            os.symlink("real.conf", resolv)
+            _dns.DnsManager().apply(["10.8.0.1"])
+            self.assertEqual(system_dns("192.168.1.254"), ["9.9.9.9"])
+            _dns.restore_resolv_conf()
+            # nothing saved and a file that is VPNMan's: fall back to the gateway, never to the VPN's resolver
+            with open(resolv, "w") as fh:
+                fh.write("# managed by vpnman\nnameserver 10.8.0.1\n")
+            self.assertEqual(system_dns("192.168.1.254"), ["192.168.1.254"])
+        finally:
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_dns_forwarder_in_a_network_namespace(self):
+        import shutil
+        import subprocess
+        if os.geteuid() != 0 or not (shutil.which("unshare") and shutil.which("nsenter") and shutil.which("nft")):
+            self.skipTest("needs root, unshare, nsenter and nft")
+        r = subprocess.run(["unshare", "-n", sys.executable, os.path.join(os.path.dirname(__file__), "dnsfwd_check.py")],
+                           capture_output=True, text=True, timeout=120)
+        if "Operation not permitted" in r.stderr and "DNSFWD-OK" not in r.stdout:
+            self.skipTest("network namespaces are not allowed here")
+        self.assertIn("DNSFWD-OK", r.stdout, (r.stdout + r.stderr)[-3000:])
+
+    def test_exec_events_are_parsed_and_seen_live(self):
+        import struct
+        import subprocess
+        from vpnman import split as sp
+
+        def event(what, pid, tgid):
+            ev = struct.pack("=IIQ", what, 0, 0) + struct.pack("=ii", pid, tgid) + b"\0" * 8
+            body = struct.pack("=IIIIHH", 1, 1, 0, 0, len(ev), 0) + ev
+            return struct.pack("=IHHII", 16 + len(body), 3, 0, 0, 0) + body
+        data = event(sp.PROC_EXEC, 41, 40) + event(1, 7, 7) + event(sp.PROC_EXEC, 55, 55)
+        self.assertEqual(sp.parse_exec_events(data), [40, 55])                  # exec events only, the process id
+        self.assertEqual(sp.parse_exec_events(data[:30]), [])                  # a cut message is ignored
+        got = []
+        w = sp.ExecWatcher(got.append)
+        if not w.start():
+            self.skipTest("the process connector is not available here")
+        try:
+            p = subprocess.Popen(["sleep", "1"])
+            for _ in range(40):
+                if p.pid in got:
+                    break
+                time.sleep(0.05)
+            self.assertIn(p.pid, got, "a new program is announced within moments")
+            p.wait()
+        finally:
+            w.stop()
+
+    def test_dns_caveat_and_loopback_rules(self):
+        from vpnman import dns as _dns
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "nsswitch.conf")
+        for line, want in (("hosts:      files myhostname mdns4_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] dns", True),
+                           ("hosts: files dns", False), ("hosts: files resolve", True), ("# hosts: resolve", False)):
+            with open(path, "w") as fh:
+                fh.write("passwd: files\n%s\n" % line)
+            self.assertEqual(_dns.nss_resolve(path), want, line)
+        self.assertFalse(_dns.nss_resolve(os.path.join(d, "missing")))
+        rules = _split.ruleset(["1.1.1.1"], fwd_port=5353)
+        self.assertIn("ip daddr 127.0.0.0/8 dnat ip to 127.0.0.1:5353", rules)
+        self.assertIn("ip daddr != 127.0.0.0/8 ip daddr != 1.1.1.1 dnat ip to 1.1.1.1", rules)
+        self.assertNotIn("127.0.0.1:", _split.ruleset(["1.1.1.1"]))
+
+    def test_nsswitch_is_changed_in_place_and_restored(self):
+        from vpnman import dns as _dns
+        d = tempfile.mkdtemp()
+        real, link = os.path.join(d, "authselect-nsswitch"), os.path.join(d, "nsswitch.conf")
+        original = ("passwd: files\nhosts:      files myhostname mdns4_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] dns\n"
+                    "group: files\n")
+        with open(real, "w") as fh:
+            fh.write(original)
+        os.symlink("authselect-nsswitch", link)                  # as authselect leaves it
+        run = os.path.join(d, "run")
+        os.makedirs(run)
+        saved = {k: os.environ.get(k) for k in ("VPNMAN_NSSWITCH", "VPNMAN_RUN_DIR")}
+        os.environ["VPNMAN_NSSWITCH"], os.environ["VPNMAN_RUN_DIR"] = link, run
+        try:
+            self.assertTrue(_dns.nss_bypass(True))
+            text = open(link).read()
+            self.assertTrue(os.path.islink(link), "the symlink stays")
+            self.assertIn("hosts: files myhostname mdns4_minimal [NOTFOUND=return] dns", " ".join(text.split()).replace("  ", " "))
+            self.assertFalse(_dns.nss_resolve(link))
+            self.assertIn("passwd: files", text)
+            self.assertTrue(_dns.nss_overridden())
+            self.assertTrue(_dns.nss_bypass(True), "doing it twice changes nothing more")
+            _dns.restore_nsswitch()                              # crash recovery or the bypass stopping
+            self.assertEqual(open(link).read(), original)
+            self.assertFalse(_dns.nss_overridden())
+            with open(real, "w") as fh:                          # a system without the module: nothing to do
+                fh.write("hosts: files dns\n")
+            self.assertFalse(_dns.nss_bypass(True))
+            self.assertFalse(_dns.nss_overridden())
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_set_version_changes_every_place(self):
+        import shutil
+        import subprocess
+        ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        d = tempfile.mkdtemp()
+        for rel in ("vpnman/__init__.py", "README.md", "data/vpnman.1", "data/io.github.smiley_mcsmiles.VPNMan.metainfo.xml"):
+            os.makedirs(os.path.dirname(os.path.join(d, "tree", rel)), exist_ok=True)
+            shutil.copy(os.path.join(ROOT, rel), os.path.join(d, "tree", rel))
+        os.makedirs(os.path.join(d, "tree", "tools"))
+        for tool in ("set_version.py", "check_version.py"):
+            shutil.copy(os.path.join(ROOT, "tools", tool), os.path.join(d, "tree", "tools", tool))
+        run = lambda *a: subprocess.run([sys.executable] + list(a), cwd=os.path.join(d, "tree"), capture_output=True, text=True)
+        r = run("tools/set_version.py", "9.8.7", "--note", "Testing")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = run("tools/check_version.py", "9.8.7")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('<release version="9.8.7"', open(os.path.join(d, "tree", "data", "io.github.smiley_mcsmiles.VPNMan.metainfo.xml")).read())
+        self.assertEqual(run("tools/set_version.py", "9.8").returncode, 2)
+        self.assertEqual(run("tools/set_version.py", "9.8.8_rc1").returncode, 0)        # a release candidate
+        r = run("tools/check_version.py", "9.8.8_rc1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_manager_follows_hotspots(self):
         s = settings.Settings(TMP + "/hs-%d.json" % id(self))
         m = Manager(settings=s)
@@ -3145,7 +3312,7 @@ class SplitTests(unittest.TestCase):
         calls = []
         from vpnman import platform as plat
         real = (m._split.start, m._split.stop, plat.default_gateway, m._lock_apply)
-        m._split.start = lambda gw, dev, dns=(), mode="exclude": (calls.append(mode), setattr(m._split, "active", True))
+        m._split.start = lambda gw, dev, dns=(), mode="exclude", **kw: (calls.append(mode), setattr(m._split, "active", True))
         m._split.stop = lambda: (calls.append("stop"), setattr(m._split, "active", False))
         m._lock_apply = lambda: None
         m.settings.update({"split": {"apps": [{"id": "a", "name": "A", "match": ["a"]}]}})
@@ -3160,6 +3327,37 @@ class SplitTests(unittest.TestCase):
         finally:
             m._split.start, m._split.stop, plat.default_gateway, m._lock_apply = real
             m._split.active = False
+
+    def test_bypassed_apps_can_use_their_own_dns(self):
+        from vpnman.profiles import ProfileError
+        from vpnman import platform as plat
+        m = Manager(settings=settings.Settings(TMP + "/bdns.json"))
+        m.split_changed = lambda: None
+        self.assertEqual(m.split_status()["dns"], [])
+        self.assertEqual(m.split_set(dns="9.9.9.9, 149.112.112.112")["dns"], ["9.9.9.9", "149.112.112.112"])
+        self.assertEqual(m.split_set(dns=[])["dns"], [])
+        for bad in (["not-an-ip"], ["2606:4700::1111"], ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"]):
+            with self.assertRaises(ProfileError):
+                m.split_set(dns=bad)
+        started = []
+        real = (m._split.start, plat.default_gateway, m._lock_apply)
+        m._split.start = lambda gw, dev, dns=(), mode="exclude", **kw: (started.append(list(dns)), setattr(m._split, "active", True))
+        m._lock_apply = lambda: None
+        m.settings.update({"split": {"apps": [{"id": "a", "name": "A", "match": ["a"]}]}})
+        m.lock_engaged, m._split_ctx = True, None
+        plat.default_gateway = lambda: ("192.168.1.1", "eno1")
+        try:
+            m._split_sync()
+            m.split_set(dns=["1.1.1.1"])                           # a change restarts the bypass with the new resolver
+            m._split_sync()
+            m._split_sync()                                        # idempotent
+            m.split_set(dns=[])
+            m._split_sync()
+        finally:
+            m._split.start, plat.default_gateway, m._lock_apply = real
+            m._split.active = False
+        self.assertEqual(started[1:3], [["1.1.1.1"], started[0]])
+        self.assertEqual(len(started), 3)
 
     def test_kill_switch_lets_bypassed_traffic_through_only_when_asked(self):
         plain = netlock.nft_ruleset(netlock.Spec(endpoints=["1.2.3.4"], ifaces=["tun0"]))

@@ -10,13 +10,28 @@
 #                                    that package, the rest still build, and the summary says why
 #   ./package.sh --deb --arch        selected packages (the plain names work too: ./package.sh deb arch)
 #   ./package.sh --container --rpm   build inside a Fedora container (podman/docker) - works from any distro
+#   ./package.sh --version 1.1.1 --all   set the version everywhere (tools/set_version.py), then build
 #   ./package.sh --help
 # ==============================================================================
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
+# --version X.Y.Z sets the version everywhere first (code, README badge, man page, release notes entry): tools/set_version.py
+rest=(); new_version=""; skip=0
+for ((i = 1; i <= $#; i++)); do
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+    case "${!i}" in
+        --version) j=$((i + 1)); new_version=${!j:-}; skip=1; [ -n "$new_version" ] || { echo "--version needs a number, e.g. --version 1.2.0" >&2; exit 2; } ;;
+        --version=*) new_version=${!i#*=} ;;
+        *) rest+=("${!i}") ;;
+    esac
+done
+set -- ${rest[@]+"${rest[@]}"}
+if [ -n "$new_version" ]; then python3 "$ROOT/tools/set_version.py" "$new_version" || exit 2; fi
 VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' vpnman/__init__.py)
+# deb and rpm sort a pre-release before its release with "~": 1.1.1_rc1 -> 1.1.1~rc1 (also keeps "_" out of deb versions)
+PKGVER=$(printf '%s' "$VERSION" | sed -E 's/[_-]?(rc|alpha|beta|pre|dev)/~\1/')
 NAME=vpnman
 DIST=$ROOT/dist
 BUILD=$ROOT/build
@@ -71,7 +86,7 @@ build_deb() {
     size=$(du -sk "$root" | cut -f1)
     cat > "$root/DEBIAN/control" <<CTL
 Package: $NAME
-Version: $VERSION
+Version: $PKGVER
 Section: net
 Priority: optional
 Architecture: all
@@ -155,8 +170,8 @@ PRM
     chmod 755 "$root/DEBIAN/postinst" "$root/DEBIAN/prerm" "$root/DEBIAN/postrm"
     mkdir -p "$DIST"
     # works on any distribution: packaging/mkdeb.py writes the ar/tar structure itself
-    python3 "$ROOT/packaging/mkdeb.py" "$root" "$DIST/${NAME}_${VERSION}_all.deb"
-    log "  -> dist/${NAME}_${VERSION}_all.deb"
+    python3 "$ROOT/packaging/mkdeb.py" "$root" "$DIST/${NAME}_${PKGVER}_all.deb"
+    log "  -> dist/${NAME}_${PKGVER}_all.deb"
 }
 
 recipe_rpm() {
@@ -168,7 +183,7 @@ recipe_rpm() {
 %global source_date_epoch_from_changelog 0
 
 Name:           $NAME
-Version:        $VERSION
+Version:        $PKGVER
 Release:        1%{?dist}
 Summary:        $DESC
 License:        MIT
@@ -265,7 +280,7 @@ fi
 /usr/share/fish/vendor_completions.d/vpnman.fish
 
 %changelog
-* Mon Oct 05 2026 VPNMan contributors <noreply@example.invalid> - $VERSION-1
+* Mon Oct 05 2026 VPNMan contributors <noreply@example.invalid> - $PKGVER-1
 - Packaged VPNMan $VERSION
 SPEC
 }
@@ -286,7 +301,7 @@ build_rpm() {
         exit 1
     fi
     cp "$top"/RPMS/*/*.rpm "$DIST/"
-    log "  -> dist/$(cd "$DIST" && ls -- *"$VERSION"*.rpm)"
+    log "  -> dist/$(cd "$DIST" && ls -- *"$PKGVER"*.rpm)"
 }
 
 recipe_arch() {
@@ -485,6 +500,7 @@ Options:
   --openbsd     OpenBSD port recipe
   --recipes     Only the recipes (spec, PKGBUILD, template, APKBUILD, port) in dist/recipes/
   --container   Build inside a Fedora container (podman/docker), e.g. --container --rpm
+  --version X.Y.Z   Set the version first (code, README, man page, release notes entry), e.g. --version 1.1.1 --all
   --clean       Remove dist/ and build/
   --help, -h    Show this message
 
@@ -498,7 +514,7 @@ HELP
 # dist/SHA256SUMS for this version's release files (old versions left in dist/ are not listed)
 checksums() {
     local files=() f
-    for f in "$DIST"/*"$VERSION"*; do
+    for f in "$DIST"/*"$VERSION"* "$DIST"/*"$PKGVER"*; do
         case "$f" in
             *.tar.gz|*.deb|*.rpm|*.pkg.tar.*|*.xbps) [ -f "$f" ] && files+=("$(basename "$f")") ;;
         esac
@@ -523,7 +539,7 @@ summary() {
     local f
     echo
     ok "Packaging complete! Artifacts in $DIST/:"
-    for f in "$DIST"/*"$VERSION"* "$DIST/SHA256SUMS"; do
+    for f in "$DIST"/*"$VERSION"* "$DIST"/*"$PKGVER"* "$DIST/SHA256SUMS"; do
         [ -f "$f" ] && printf '    %s\n' "$(basename "$f")"
     done
     [ -d "$DIST/recipes" ] && printf '    recipes/  (%s)\n' "$(cd "$DIST/recipes" && ls | tr '\n' ' ' | sed 's/ $//')"

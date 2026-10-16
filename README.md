@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.1.0-blue.svg?style=flat-square" alt="Version 1.1.0"></a>
+  <a href="https://github.com/Smiley-McSmiles/VPNMan/releases"><img src="https://img.shields.io/badge/version-1.1.1-blue.svg?style=flat-square" alt="Version 1.1.1"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg?style=flat-square" alt="Python 3.9+"></a>
   <a href="https://gtk.org"><img src="https://img.shields.io/badge/toolkit-GTK4%20%7C%20Libadwaita-red.svg?style=flat-square" alt="GTK4 Libadwaita"></a>
@@ -237,6 +237,10 @@ installed it).
 * **App bypass** – the *Apps* tab (or `vpnman bypass`). Pick installed applications (read from the `.desktop` launchers,
   including Flatpak and Snap) or type a program name. While the VPN is up, those programs *and everything they start*
   keep using your normal connection; all other traffic stays in the tunnel and under the kill switch.
+  You can also choose the DNS server those programs use (automatic, a preset or your own: Apps tab, or
+  `vpnman bypass dns quad9`); everything inside the tunnel keeps the VPN's DNS. With systemd-resolved (Fedora...), VPNMan
+  takes its NSS module out of `/etc/nsswitch.conf` while a server is chosen (restored afterwards), so every program uses the
+  stub resolver and only the bypassed programs are redirected.
 
   ```sh
   vpnman bypass add steam firefox

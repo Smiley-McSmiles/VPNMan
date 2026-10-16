@@ -6,6 +6,7 @@
 """
 
 import os
+import re
 import shutil
 
 from . import paths
@@ -71,6 +72,118 @@ class DnsManager:
             plat.run([plat.which("resolvectl") or "resolvectl", "revert", self.iface])
         self.mode = self.iface = None
         restore_resolv_conf()
+
+
+def nss_resolve(path="/etc/nsswitch.conf"):
+    """True when programs resolve names through systemd-resolved's NSS module (Fedora, Arch, Ubuntu...): they ask it over a
+    local socket, not with DNS packets, so no firewall rule can steer them to another resolver."""
+    try:
+        with open(path) as fh:
+            for line in fh:
+                if line.split("#")[0].strip().startswith("hosts:"):
+                    return "resolve" in line.split("#")[0].replace("[", " ").replace("]", " ").split()
+    except OSError:
+        pass
+    return False
+
+
+def _nsswitch():
+    return os.environ.get("VPNMAN_NSSWITCH", "/etc/nsswitch.conf")
+
+
+def _nss_backup():
+    return os.path.join(paths.run_dir(), "nsswitch.conf.vpnman-backup")
+
+
+_NSS_RESOLVE = re.compile(r"\bresolve\b(\s*\[[^\]]*\])?")
+
+
+def nss_bypass(on):
+    """Programs that ask systemd-resolved over its local socket (NSS module "resolve") cannot be steered to another
+    resolver by the firewall: no DNS packet is sent.  While the apps that skip the VPN have a DNS server of their own,
+    the module is taken out of the ``hosts:`` line of /etc/nsswitch.conf, so every program uses the stub resolver
+    (127.0.0.53, the same systemd-resolved) with ordinary DNS packets - the firewall redirects those of the bypassed
+    apps, everybody else still ends up at systemd-resolved and the VPN's DNS.  The file is written in place (a symlink
+    into authselect's directory stays) and put back by ``nss_bypass(False)`` and by crash recovery.  Returns True when
+    the change is in place."""
+    path, backup = _nsswitch(), _nss_backup()
+    if not on:
+        if os.path.exists(backup):
+            try:
+                with open(backup) as fh:
+                    text = fh.read()
+                with open(path, "w") as fh:
+                    fh.write(text)
+                os.unlink(backup)
+            except OSError:
+                pass
+        return False
+    if os.path.exists(backup):
+        return True                                      # already done
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError:
+        return False
+    lines, changed = [], False
+    for line in text.splitlines(True):
+        body = line.split("#")[0]
+        if body.strip().startswith("hosts:") and _NSS_RESOLVE.search(body):
+            line = _NSS_RESOLVE.sub("", line, count=1)
+            line = re.sub(r"[ \t]{2,}", " ", line) if "hosts:" in line else line
+            changed = True
+        lines.append(line)
+    if not changed:
+        return False
+    try:
+        os.makedirs(paths.run_dir(), mode=0o755, exist_ok=True)
+        with open(backup, "w") as fh:
+            fh.write(text)
+        with open(path, "w") as fh:
+            fh.write("".join(lines))
+    except OSError:
+        try:
+            os.unlink(backup)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def nss_overridden():
+    return os.path.exists(_nss_backup())
+
+
+def restore_nsswitch():
+    """Crash recovery: put /etc/nsswitch.conf back if VPNMan changed it."""
+    nss_bypass(False)
+
+
+def original_resolv_lines():
+    """The lines of the resolver configuration as it was before VPNMan changed it.  While VPNMan has replaced the file
+    (``# managed by vpnman``), they come from the saved copy - or from the file a symlink pointed at - never from the VPN's
+    own entries: handing those to the programs that bypass the VPN gives them a resolver they cannot reach."""
+    rpath = _resolv()
+    try:
+        with open(rpath) as fh:
+            text = fh.read()
+    except OSError:
+        return []
+    if MARK not in text:
+        return text.splitlines()
+    for source in (_backup(), _linkfile()):
+        try:
+            if source == _linkfile():
+                with open(source) as fh:
+                    target = fh.read().strip()
+                source = os.path.join(os.path.dirname(rpath), target)
+            with open(source) as fh:
+                saved = fh.read()
+        except OSError:
+            continue
+        if saved.strip():
+            return saved.splitlines()
+    return []
 
 
 def restore_resolv_conf():

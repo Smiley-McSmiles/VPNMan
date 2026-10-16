@@ -301,6 +301,7 @@ class Manager:
         """Called once by the daemon: crash recovery and boot-time behaviour."""
         dns.restore_resolv_conf()
         if plat.os_family() == "linux":
+            dns.restore_nsswitch()
             split.cleanup()
             share.cleanup()
             hotspot.restore()
@@ -897,14 +898,18 @@ class Manager:
                     self._split.stop()
                     self._split_cur = None
                     self.log.add("info", "App bypass stopped")
-            elif not (self._split.active and self._split_cur == ctx[:2] + (mode,)):
+            elif not (self._split.active and self._split_cur == ctx[:2] + (mode, tuple(self._bypass_dns(ctx)))):
                 try:
-                    self._split.start(*ctx, mode=mode)
-                    self._split_cur = ctx[:2] + (mode,)
+                    dns_for = self._bypass_dns(ctx)
+                    self._split.start(ctx[0], ctx[1], dns_for, mode=mode,
+                                      intercept_local=bool(self.settings.get("split.dns")))
+                    self._split_cur = ctx[:2] + (mode, tuple(dns_for))
                     apps = ", ".join(a["name"] for a in self.settings.get("split.apps"))
                     self.log.add("info", "%s: %s%s" % (
                         "Only these apps use the VPN" if mode == "include" else "App bypass active for", apps,
                         "" if self._split_ctx else " (VPN down, network lock keeps them online)"))
+                    self.log.add("debug", "App bypass: those programs ask %s for names (gateway %s via %s)" % (
+                        ", ".join(dns_for) or "nobody", ctx[0], ctx[1]))
                 except Exception as e:  # noqa: BLE001
                     self._split_cur = None
                     self.log.add("warn", "App bypass unavailable: %s" % e)
@@ -934,15 +939,42 @@ class Manager:
         """The whitelist changed: apply it now."""
         self._split_sync()
 
+    def _bypass_dns(self, ctx):
+        """The resolvers the programs that skip the VPN ask: the ones set in the Apps tab, else the original ones."""
+        custom = [d for d in self.settings.get("split.dns") or [] if d]
+        return custom or list(ctx[2])
+
     def split_status(self):
         ok, why = split.supported()
         sp = self.settings.get("split")
         return {"supported": ok, "reason": why, "active": self._split.active, "enabled": sp["enabled"],
                 "apps": sp["apps"], "moved": len(self._split.moved), "mode": sp.get("mode", "exclude"),
+                "dns": list(sp.get("dns") or []), "dns_original": system_dns(),
+                "dns_caveat": bool(sp.get("dns")) and dns.nss_resolve(),
+                "dns_nss": dns.nss_overridden(),
                 "routes": [r.get("ip") or r.get("host") for r in self.settings.get("routes") if r.get("action") == "out"]}
 
-    def split_set(self, apps=None, enabled=None, mode=None):
+    def split_set(self, apps=None, enabled=None, mode=None, dns=None):
         tree = {}
+        if dns is not None:
+            if isinstance(dns, str):
+                dns = [x for x in dns.replace(";", ",").replace(" ", ",").split(",")]
+            clean = []
+            for d in dns:
+                d = str(d).strip()
+                if not d:
+                    continue
+                try:
+                    ip = ipaddress.ip_address(d)
+                except ValueError:
+                    raise ProfileError("not an IP address: %s" % d)
+                if ip.version != 4:
+                    raise ProfileError("the apps that skip the VPN can use IPv4 resolvers only: %s" % d)
+                if d not in clean:
+                    clean.append(d)
+            if len(clean) > 4:
+                raise ProfileError("give at most four DNS servers")
+            tree["dns"] = clean
         if mode is not None:
             if mode not in ("exclude", "include"):
                 raise ProfileError("mode must be 'exclude' (listed apps skip the VPN) or 'include' (only listed apps use it)")
@@ -1522,19 +1554,15 @@ class Manager:
 def system_dns(gw=None):
     """The resolvers in use before the tunnel comes up (what bypassed apps should keep using)."""
     found = []
-    try:
-        with open(os.environ.get("VPNMAN_RESOLV_CONF", "/etc/resolv.conf")) as fh:
-            for line in fh:
-                parts = line.split()
-                if len(parts) >= 2 and parts[0] == "nameserver":
-                    try:
-                        ip = ipaddress.ip_address(parts[1])
-                    except ValueError:
-                        continue
-                    if ip.version == 4 and not ip.is_loopback and parts[1] not in found:
-                        found.append(parts[1])
-    except OSError:
-        pass
+    for line in dns.original_resolv_lines():            # not the VPN's own entries if the file is VPNMan's right now
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "nameserver":
+            try:
+                ip = ipaddress.ip_address(parts[1])
+            except ValueError:
+                continue
+            if ip.version == 4 and not ip.is_loopback and parts[1] not in found:
+                found.append(parts[1])
     return found or ([gw] if gw else [])
 
 

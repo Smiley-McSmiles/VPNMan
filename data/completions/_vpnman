@@ -70,7 +70,7 @@ _vpnman() {
         backup) _arguments '--replace[import: make this computer match the backup (removes other profiles)]' '--settings[import: also restore the settings (always with --replace)]' '--force[export: overwrite an existing file]' '1:action:(export import)' ;;
         block) _arguments '*:profile:_vpnman_profiles' ;;
         blocks) _arguments '--proto[add: protocol (endpoint and port entries)]:value:(any tcp udp)' '--note[add: a reminder of why]' '--for[add: end the block after 30m, 2h, 1d... (minutes when there is no unit)]' '--until-reboot[add: end the block when the computer restarts]' '--json[print machine-readable JSON instead of text]' '1:action:(list status add remove rm enable disable on off)' ;;
-        bypass) _arguments '1:action:(list add remove rm available on off mode)' ;;
+        bypass) _arguments '1:action:(list add remove rm available on off mode dns)' ;;
         cleanup) _arguments '--force[even if the service is running]' ;;
         connect) _arguments '--fastest[measure all servers and use the one with the lowest latency]' '--last[use the last connected profile (the default without a profile)]' '--no-wait[return immediately instead of waiting for the tunnel]' '--timeout[how long to wait (default 90)]' '*:profile:_vpnman_profiles' ;;
         connections) _arguments '(--listening -l)'{--listening,-l}'[also show sockets that wait for connections]' '--local[also show connections within this computer (loopback)]' '(--resolve -r)'{--resolve,-r}'[show host names instead of addresses where reverse DNS knows them (sends DNS queries)]' '(--watch -w)'{--watch,-w}'[refresh every 2 seconds]' '--csv[print CSV with a header line (for spreadsheets)]' '--json[print machine-readable JSON instead of text]' ;;
@@ -106,7 +106,7 @@ _vpnman() {
         service) _arguments '--init[force the init system instead of auto-detecting it]:value:(systemd runit openrc sysv openbsd-rc bsd-rc)' '1:action:(install uninstall enable disable start stop restart status)' ;;
         set) _arguments '*:: :' ;;
         shell) _arguments '*:: :' ;;
-        split) _arguments '1:action:(list add remove rm available on off mode)' ;;
+        split) _arguments '1:action:(list add remove rm available on off mode dns)' ;;
         status) _arguments '--json[print machine-readable JSON instead of text]' ;;
         unblock) _arguments '*:profile:_vpnman_profiles' ;;
         unfav) _arguments '*:profile:_vpnman_profiles' ;;

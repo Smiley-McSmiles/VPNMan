@@ -88,7 +88,8 @@ class UserConfig:
             pass
 
 
-ICON_NAMES = [APP_ID] + ["%s-%s-symbolic" % (APP_ID, k) for k in ("connected", "connecting", "error", "disconnected")]
+ICON_NAMES = [APP_ID] + ["%s-%s-symbolic" % (APP_ID, k) for k in ("connected", "connecting", "error", "disconnected")] \
+    + ["%s-tray-%s" % (APP_ID, k) for k in ("off", "vpn", "proxy", "both", "busy", "error", "locked")]
 
 
 def private_icon_dir():
@@ -114,9 +115,6 @@ def ensure_icons():
         theme.add_search_path(d)
     Gtk.Window.set_default_icon_name(APP_ID)
 
-
-TRAY_ICONS = {"connected": "connected", "connecting": "connecting", "reconnecting": "connecting",
-              "disconnecting": "connecting", "error": "error", "disconnected": "disconnected"}
 
 
 class Hero(Gtk.Box):
@@ -820,8 +818,10 @@ class MainWindow(Adw.ApplicationWindow):
                "error": "Connection failed"}.get(state, state)
         if st["netlock"]["engaged"]:
             tip += " · Network Lock on"
-        tray.set_state("%s-%s-symbolic" % (APP_ID, TRAY_ICONS.get(state, "disconnected")), tip,
-                       attention=(state == "error"))
+        mode = mode_for("disconnecting" if self._disconnecting else state, state == "connected", bool(st.get("proxy_up")))
+        if mode == "off" and st["netlock"]["engaged"]:
+            mode = "locked"             # kill switch on, nothing connected: the shield with the "!" (traffic is blocked)
+        tray.set_state("%s-tray-%s" % (APP_ID, mode), tip, attention=(state == "error"), mode=mode)
         if key != getattr(self, "_tray_key", None):
             self._tray_key = key
             tray.update_menu()
@@ -996,6 +996,9 @@ class MainWindow(Adw.ApplicationWindow):
                 if ips == servers:
                     idx = k
         self.dns_row.set_selected(idx)
+        self.dns_row.set_subtitle(GLib.markup_escape_text(
+            "left unchanged" if not dns.get("force", True) else
+            ", ".join(servers) if servers else "the servers the VPN provider pushes"))
         self.dns_custom.set_visible(idx == n + 1)
         if idx == n + 1:
             self.dns_custom.set_text(", ".join(servers))
@@ -1798,6 +1801,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._poll_extras()
         return True
 
+    def _on_split_status(self, st):
+        self.bypass_page.update(st)
+
     def _on_proxy_status(self, st):
         self.proxy_page.update_status(st)
         self.netproxy.update(st.get("net"))
@@ -1839,7 +1845,7 @@ class MainWindow(Adw.ApplicationWindow):
         if full or slow:
             rpc("history", self.history_group.update, None, limit=8)
             rpc("schedule.status", self.sched_page.update, None)
-            rpc("split.status", self.bypass_page.update, None)
+            rpc("split.status", self._on_split_status, None)
         if full:
             self.proxy_page.reload()
             self.netproxy.refresh()
@@ -2284,7 +2290,7 @@ class Application(Adw.Application):
             # Cinnamon: XApp.StatusIcon in a GTK 3 helper process; fall back to StatusNotifier if it cannot start
             self.tray = HelperTray(*args, private_icon_dir(), on_failure=self._helper_failed)
             if self.tray.start():
-                self.tray.set_state("%s-disconnected-symbolic" % APP_ID, "VPNMan")
+                self.tray.set_state("%s-tray-off" % APP_ID, "VPNMan", mode="off")
                 return
         self._start_sni()
 
@@ -2295,7 +2301,7 @@ class Application(Adw.Application):
     def _start_sni(self):
         self.tray = Tray(APP_ID, APP_NAME, lambda: self.win.present(), self.win.tray_menu,
                          self._on_tray_availability, private_icon_dir())
-        self.tray.set_state("%s-disconnected-symbolic" % APP_ID, "VPNMan")
+        self.tray.set_state("%s-tray-off" % APP_ID, "VPNMan", mode="off")
         self.tray.start()
 
     def keep_in_tray(self):

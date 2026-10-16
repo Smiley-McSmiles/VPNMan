@@ -120,7 +120,7 @@ METHODS = {
     "settings.update": lambda m, tree: (m.settings.update(tree), _changed(m, "dns" if "dns" in tree else "", None),
                                         m.settings.get())[2],
     "split.status": lambda m: m.split_status(),
-    "split.set": lambda m, apps=None, enabled=None, mode=None: m.split_set(apps, enabled, mode),
+    "split.set": lambda m, apps=None, enabled=None, mode=None, dns=None: m.split_set(apps, enabled, mode, dns),
     "routes.set": lambda m, entries: m.routes_set(entries),
     "proxy.list": lambda m: m.proxy.list(),
     "proxy.status": lambda m: m.proxy.status(),

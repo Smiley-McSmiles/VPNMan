@@ -56,6 +56,7 @@ DEFAULTS = {
         "enabled": True,           # apps below keep using the normal connection while the VPN is up
         "mode": "exclude",         # exclude: listed apps skip the VPN | include: ONLY listed apps use the VPN
         "apps": [],                # [{id, name, match: [process names], icon}]
+        "dns": [],                 # resolver(s) the programs that skip the VPN ask; empty: the original one (automatic)
     },
     "routes": [],                  # [{"ip": "10.0.0.0/8", "action": "out"}]  out = bypass the VPN
     "blocks": {

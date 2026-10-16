@@ -10,9 +10,13 @@ The rule generation and process matching are pure functions so they can be teste
 
 import ipaddress
 import os
+import socket
+import struct
 import threading
 
+from . import dns as dnsmod
 from . import platform as plat
+from .dnsfwd import DnsForwarder
 
 MARK = 0x5652
 TABLE = 5652
@@ -39,8 +43,11 @@ def cgroup_name(mode):
     return CGROUP_VPN if mode == "include" else CGROUP
 
 
-def ruleset(dns=(), mark=MARK, mode="exclude"):
+def ruleset(dns=(), mark=MARK, mode="exclude", fwd_port=0):
     """nftables text.  `dns`: resolvers the bypassed programs should use instead of the tunnel's.
+
+    ``fwd_port``: with a chosen resolver, the DNS queries these programs send to loopback (systemd-resolved's stub,
+    dnsmasq...) go to the DNS forwarder on 127.0.0.1:fwd_port instead (dnsfwd.py), which asks ``dns[0]`` around the VPN.
 
     exclude (default): packets of programs in the cgroup get the bypass mark.
     include: every locally generated packet that carries no mark yet gets it, except the packets of programs in the
@@ -67,6 +74,8 @@ def ruleset(dns=(), mark=MARK, mode="exclude"):
         target = v4[0]
         lines += ["  chain bypass_dns {", "    type nat hook output priority -100; policy accept;"]
         for proto in ("udp", "tcp"):
+            if fwd_port:
+                lines.append("    %s %s dport 53 ip daddr 127.0.0.0/8 dnat ip to 127.0.0.1:%d" % (sel, proto, int(fwd_port)))
             lines.append("    %s %s dport 53 ip daddr != 127.0.0.0/8 ip daddr != %s dnat ip to %s"
                          % (sel, proto, target, target))
         lines.append("  }")
@@ -190,6 +199,83 @@ def matching_pids(wanted, proc="/proc", skip=()):
     return out
 
 
+# ------------------------------------------------------------------ new programs, as they start
+
+PROC_EXEC = 0x00000002
+
+
+def parse_exec_events(data):
+    """The process ids of the exec events in a buffer from the kernel's process connector (netlink)."""
+    pids, pos = [], 0
+    while pos + 16 <= len(data):
+        length = struct.unpack_from("=I", data, pos)[0]
+        if length < 16 or pos + length > len(data):
+            break
+        body = data[pos + 16:pos + length]
+        if len(body) >= 20 + 24:
+            what = struct.unpack_from("=I", body, 20)[0]
+            if what == PROC_EXEC:
+                pids.append(struct.unpack_from("=ii", body, 20 + 16)[1])          # the thread group (the process)
+        pos += (length + 3) & ~3
+    return pids
+
+
+class ExecWatcher:
+    """Tells ``callback(pid)`` about every program that starts, within milliseconds (Linux process connector).  A program
+    that lists in the bypass is then moved before it asks its first question: the periodic scan alone leaves it up to
+    a few seconds on the VPN's route at launch.  Needs root; without it the scan does the work."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self._sock = None
+        self._thread = None
+        self._stop = threading.Event()
+
+    def start(self):
+        try:
+            s = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, 11)               # NETLINK_CONNECTOR
+            s.bind((os.getpid(), 1))                                                  # CN_IDX_PROC
+            body = struct.pack("=IIIIHH", 1, 1, 0, 0, 4, 0) + struct.pack("=I", 1)    # PROC_CN_MCAST_LISTEN
+            s.send(struct.pack("=IHHII", 16 + len(body), 3, 0, 0, os.getpid()) + body)
+        except OSError:
+            return False
+        s.settimeout(0.5)
+        self._sock = s
+        self._thread = threading.Thread(target=self._run, daemon=True, name="split-exec")
+        self._thread.start()
+        return True
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                data = self._sock.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if self._stop.is_set():
+                    return
+                if e.errno == 105:                                                    # ENOBUFS: a burst; the scan catches up
+                    continue
+                return
+            for pid in parse_exec_events(data):
+                try:
+                    self.callback(pid)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def stop(self):
+        self._stop.set()
+        s, self._sock = self._sock, None
+        if s:
+            try:
+                s.close()
+            except OSError:
+                pass
+        t, self._thread = self._thread, None
+        if t and t is not threading.current_thread():
+            t.join(1)
+
+
 # ------------------------------------------------------------------ runtime
 
 def cgroup_root():
@@ -255,13 +341,17 @@ class SplitTunnel:
         self._thread = None
         self._lock = threading.Lock()
         self._rules = False
+        self._fwd = None
+        self._exec = None
 
     @property
     def path(self):
         root = self.root or cgroup_root()
         return os.path.join(root, cgroup_name(self.mode)) if root else None
 
-    def start(self, gw, dev, dns=(), mode="exclude"):
+    def start(self, gw, dev, dns=(), mode="exclude", intercept_local=False):
+        """``intercept_local``: the resolver was chosen by the user, so queries to a resolver on this computer are taken over
+        too (they would otherwise reach the VPN's DNS through the local stub)."""
         ok, why = supported()
         if not ok:
             raise RuntimeError(why)
@@ -271,8 +361,27 @@ class SplitTunnel:
             self.stop_locked()
             self.mode = mode if mode in ("include", "exclude") else "exclude"
             os.makedirs(self.path, exist_ok=True)
-            rc, out = plat.run([plat.which("nft"), "-f", "-"], input=ruleset(dns, mode=self.mode))
+            fwd_port = 0
+            v4 = [d for d in dns if ":" not in str(d)]
+            if intercept_local and v4:
+                try:
+                    self._fwd = DnsForwarder(v4[0], MARK)
+                    fwd_port = self._fwd.start()
+                except OSError as e:
+                    self._fwd = None
+                    self.log("warn", "App bypass: the DNS forwarder could not start (%s); local resolvers stay as they are" % e)
+            rc, out = plat.run([plat.which("nft"), "-f", "-"], input=ruleset(dns, mode=self.mode, fwd_port=fwd_port))
+            if not rc and fwd_port:
+                # programs that ask systemd-resolved directly use its stub instead
+                if dnsmod.nss_resolve():
+                    done = dnsmod.nss_bypass(True)
+                    self.log("info" if done else "warn", "App bypass: name lookups moved from systemd-resolved's NSS module "
+                             "to its stub (/etc/nsswitch.conf)" if done else
+                             "App bypass: could not change /etc/nsswitch.conf; programs that ask systemd-resolved directly "
+                             "keep using the VPN's DNS")
+                self.log("info", "App bypass: DNS of those programs goes to %s (forwarder on 127.0.0.1:%d)" % (v4[0], fwd_port))
             if rc:
+                self._stop_forwarder()
                 try:
                     os.rmdir(self.path)                  # do not leave the empty cgroup behind
                 except OSError:
@@ -295,6 +404,14 @@ class SplitTunnel:
             self._stop = threading.Event()
             self._thread = threading.Thread(target=self._loop, args=(self._stop,), daemon=True, name="split-scan")
             self._thread.start()
+            self._exec = ExecWatcher(self._on_exec)
+            if not self._exec.start():
+                self._exec = None                           # not allowed here: the scan every two seconds does it
+
+    def _stop_forwarder(self):
+        fwd, self._fwd = self._fwd, None
+        if fwd:
+            fwd.stop()
 
     def stop(self):
         with self._lock:
@@ -307,7 +424,12 @@ class SplitTunnel:
         if t and t.is_alive() and t is not threading.current_thread():
             t.join(3)
         self.active = False
+        ex, self._exec = self._exec, None
+        if ex:
+            ex.stop()
         self._release()
+        self._stop_forwarder()
+        dnsmod.nss_bypass(False)
         nft, ip = plat.which("nft"), plat.which("ip")
         if self._rules and nft:
             plat.run([nft, "delete", "table", "inet", NFT_TABLE])
@@ -358,6 +480,26 @@ class SplitTunnel:
             return True
         except OSError:
             return False
+
+    def _on_exec(self, pid):
+        """A program just started: if it is on the list, move it now (the scan also does it, a little later)."""
+        names = self.names_fn()
+        path = self.path
+        if not names or not path or not self.active:
+            return
+        st = _stat(self.proc, pid)
+        if not st:
+            return
+        argv = _argv(self.proc, pid)
+        found = _names_of(self.proc, pid, st[0], argv)
+        wanted = {w for w in names if w}
+        if not (found & wanted or {n[:15] for n in found} & {w[:15] for w in wanted}):
+            return
+        cur = self._cgroup_of(pid)
+        if cur is None or outranked(cur, cgroup_name(self.mode)):
+            return
+        if self._move(pid, path):
+            self.moved.setdefault(pid, cur)
 
     def scan_once(self):
         names = self.names_fn()

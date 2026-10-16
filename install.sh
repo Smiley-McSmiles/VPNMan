@@ -463,6 +463,7 @@ uninstall() {
           "$D$MANDIR/vpnman.1" "$D$SHAREDIR/bash-completion/completions/vpnman" \
           "$D$SHAREDIR/zsh/site-functions/_vpnman" "$D$SHAREDIR/fish/vendor_completions.d/vpnman.fish"
     rm -f "$D$SHAREDIR"/icons/hicolor/symbolic/apps/io.github.smiley_mcsmiles.VPNMan*.svg \
+          "$D$SHAREDIR"/icons/hicolor/scalable/apps/io.github.smiley_mcsmiles.VPNMan-tray-*.svg \
           "$D$SHAREDIR"/icons/hicolor/*/apps/io.github.smiley_mcsmiles.VPNMan.png
     if [ -z "$DESTDIR" ]; then unlink_system_dirs; refresh_icon_cache; fi
     rm -f "$D/etc/systemd/system/vpnmand.service" "$D/usr/lib/systemd/system/vpnmand.service" \

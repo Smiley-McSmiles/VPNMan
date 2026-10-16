@@ -16,6 +16,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from .palette import STATE_COLORS  # noqa: E402
+
 VIEW_W, VIEW_H = 280.0, 112.0
 COUNT, X0, STEP = 15, 68, 11          # chevrons per lane, where the first one is, the distance between them
 TX_Y, RX_Y = 44, 68                  # the two lanes; the icons are centred between them
@@ -31,15 +33,7 @@ FLOW_RATE = 256 * 1024  # bytes per second that count as a transfer: the whole l
 FLOW_HOLD = 1.8        # seconds a transfer stays lit after the last update that showed it
 PULSE_HZ = 1.1         # glow pulses per second along a lit lane
 
-COLORS = {             # (dark theme, light theme)
-    "off": ((1.00, 0.36, 0.38), (0.85, 0.23, 0.25)),
-    "vpn": ((0.30, 0.55, 1.00), (0.18, 0.44, 0.88)),
-    "proxy": ((0.24, 0.81, 0.56), (0.12, 0.60, 0.38)),
-    "both": ((0.16, 0.83, 0.90), (0.05, 0.62, 0.70)),
-    "busy": ((0.96, 0.70, 0.20), (0.80, 0.52, 0.04)),
-    "error": ((1.00, 0.36, 0.38), (0.85, 0.23, 0.25)),
-}
-MODES = tuple(COLORS)
+COLORS = STATE_COLORS
 POSITIONS = [X0 + k * STEP for k in range(COUNT)]
 
 

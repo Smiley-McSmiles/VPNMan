@@ -9,6 +9,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, GObject, Gtk  # noqa: E402
 
 from .. import apps as appmod, schedule as sched  # noqa: E402
+from ..settings import DNS_PRESETS  # noqa: E402
 from .keys import close_keys  # noqa: E402
 
 try:                                    # drawing needs pycairo (Debian/Ubuntu: python3-gi-cairo); without it the graph
@@ -305,7 +306,71 @@ class AppPicker(Adw.Window):
         self.close()
 
 
+class BypassDns:
+    """The name server the programs that skip the VPN use: automatic (the one the computer had before the VPN), a preset
+    or your own.  ``done(status)`` gets the new app-bypass status after a change."""
+
+    def __init__(self, rpc, fail, done, title="DNS for apps that skip the VPN"):
+        self.rpc, self.fail, self.done = rpc, fail, done
+        self._quiet = False
+        self.labels = ["Automatic (your normal DNS)"] + [n for n, _ in DNS_PRESETS] + ["Custom…"]
+        self.row = Adw.ComboRow(title=title, model=Gtk.StringList.new(self.labels))
+        self.row.add_prefix(Gtk.Image.new_from_icon_name("network-server-symbolic"))
+        self.row.connect("notify::selected", self._on_choice)
+        self.entry = Adw.EntryRow(title="Custom DNS servers (comma separated, the first is used)", show_apply_button=True,
+                                  visible=False)
+        self.entry.connect("apply", lambda r: self._save(self._parse(r.get_text())))
+        self.widgets = (self.row, self.entry)
+
+    @staticmethod
+    def _parse(text):
+        return [x.strip() for x in text.replace(";", ",").replace(" ", ",").split(",") if x.strip()]
+
+    def _save(self, servers):
+        self.rpc("split.set", self.done, self.fail, dns=servers)
+
+    def _on_choice(self, row, _p):
+        i, n = row.get_selected(), len(DNS_PRESETS)
+        self.entry.set_visible(i == n + 1)
+        if self._quiet:
+            return
+        if i == 0:
+            self._save([])
+        elif 1 <= i <= n:
+            self._save(DNS_PRESETS[i - 1][1])
+        elif self.entry.get_text():
+            self._save(self._parse(self.entry.get_text()))
+
+    def sync(self, st):
+        n = len(DNS_PRESETS)
+        servers = st.get("dns") or []
+        idx = 0
+        if servers:
+            idx = n + 1
+            for k, (_name, ips) in enumerate(DNS_PRESETS, 1):
+                if ips == servers:
+                    idx = k
+        self._quiet = True
+        self.row.set_selected(idx)
+        self.entry.set_visible(idx == n + 1)
+        if idx == n + 1 and self._parse(self.entry.get_text()) != servers:
+            self.entry.set_text(", ".join(servers))
+        self._quiet = False
+        orig = st.get("dns_original") or []
+        text = ", ".join(servers) if servers else ("now: " + ", ".join(orig) if orig else "your router")
+        self.row.set_subtitle(GLib.markup_escape_text(text))
+        for w in self.widgets:
+            w.set_sensitive(st.get("supported", True))
+
+
 class BypassPage(Adw.PreferencesPage):
+    DNS_TEXT = ("The name server the listed apps ask while they skip the VPN. Everything inside the tunnel keeps using the "
+                "VPN's or the DNS you chose on the main page.")
+    DNS_CAVEAT = (" Apps that resolve names through systemd-resolved itself (most GNOME apps on Fedora) are not redirected: "
+                  "they ask it directly, and it uses the VPN's DNS. Programs that read /etc/resolv.conf are.")
+    DNS_NSS = (" While this is on, name lookups on this computer go to systemd-resolved's stub instead of its NSS module "
+               "(/etc/nsswitch.conf is changed and restored when the bypass stops), so Firefox, GNOME apps and the rest can follow it.")
+
     def __init__(self, win, rpc):
         super().__init__()
         self.win, self.rpc = win, rpc
@@ -330,6 +395,11 @@ class BypassPage(Adw.PreferencesPage):
         g.add(self.status)
         self.add(g)
         self.top_group = g
+        self.dns = BypassDns(rpc, win._fail, lambda st: win._on_split_status(st))
+        self.dns_group = dg = Adw.PreferencesGroup(title="DNS for These Apps", description=self.DNS_TEXT)
+        for w in self.dns.widgets:
+            dg.add(w)
+        self.add(dg)
         self.group = Adw.PreferencesGroup(title="Apps")
         add = Gtk.Button(label="Add Apps…", valign=Gtk.Align.CENTER)
         add.add_css_class("suggested-action")
@@ -349,6 +419,9 @@ class BypassPage(Adw.PreferencesPage):
 
     def update(self, st):
         self.state = st
+        self.dns.sync(st)
+        self.dns_group.set_description(self.DNS_TEXT + (
+            self.DNS_CAVEAT if st.get("dns_caveat") else self.DNS_NSS if st.get("dns_nss") else ""))
         self._quiet = True
         self.enabled.set_active(st["enabled"])
         self.enabled.set_sensitive(st["supported"])
