@@ -368,6 +368,8 @@ class BypassPage(Adw.PreferencesPage):
                 "VPN's or the DNS you chose on the main page.")
     DNS_CAVEAT = (" Apps that resolve names through systemd-resolved itself (most GNOME apps on Fedora) are not redirected: "
                   "they ask it directly, and it uses the VPN's DNS. Programs that read /etc/resolv.conf are.")
+    DNS_NSS = (" While this is on, name lookups on this computer go to systemd-resolved's stub instead of its NSS module "
+               "(/etc/nsswitch.conf is changed and restored when the bypass stops), so Firefox, GNOME apps and the rest can follow it.")
 
     def __init__(self, win, rpc):
         super().__init__()
@@ -418,7 +420,8 @@ class BypassPage(Adw.PreferencesPage):
     def update(self, st):
         self.state = st
         self.dns.sync(st)
-        self.dns_group.set_description(self.DNS_TEXT + (self.DNS_CAVEAT if st.get("dns_caveat") else ""))
+        self.dns_group.set_description(self.DNS_TEXT + (
+            self.DNS_CAVEAT if st.get("dns_caveat") else self.DNS_NSS if st.get("dns_nss") else ""))
         self._quiet = True
         self.enabled.set_active(st["enabled"])
         self.enabled.set_sensitive(st["supported"])

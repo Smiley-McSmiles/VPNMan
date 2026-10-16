@@ -1170,7 +1170,7 @@ class Cli:
         return 1 if res["summary"] == "fail" else 0
 
     def cmd_cleanup(self, a):
-        from . import blocks, hotspot, netlock, share, split, xray
+        from . import blocks, dns, hotspot, netlock, share, split, xray
         if self.client.alive() and not a.force:
             raise RpcError("the VPNMan service is running and owns these rules - stop it first "
                            "(vpnman disconnect; vpnman lock off), or use --force")
@@ -1181,6 +1181,7 @@ class Cli:
             split.cleanup()
             share.cleanup()
             hotspot.restore()
+            dns.restore_nsswitch()
             if xray.cleanup():
                 gone = list(gone) + ["proxy redirect"]
             if blocks.cleanup():

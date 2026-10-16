@@ -12,6 +12,7 @@ import ipaddress
 import os
 import threading
 
+from . import dns as dnsmod
 from . import platform as plat
 from .dnsfwd import DnsForwarder
 
@@ -290,6 +291,8 @@ class SplitTunnel:
                     self._fwd = None
                     self.log("warn", "App bypass: the DNS forwarder could not start (%s); local resolvers stay as they are" % e)
             rc, out = plat.run([plat.which("nft"), "-f", "-"], input=ruleset(dns, mode=self.mode, fwd_port=fwd_port))
+            if not rc and fwd_port:
+                dnsmod.nss_bypass(True)                  # programs that ask systemd-resolved directly use its stub instead
             if rc:
                 self._stop_forwarder()
                 try:
@@ -333,6 +336,7 @@ class SplitTunnel:
         self.active = False
         self._release()
         self._stop_forwarder()
+        dnsmod.nss_bypass(False)
         nft, ip = plat.which("nft"), plat.which("ip")
         if self._rules and nft:
             plat.run([nft, "delete", "table", "inet", NFT_TABLE])

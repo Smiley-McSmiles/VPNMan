@@ -996,6 +996,9 @@ class MainWindow(Adw.ApplicationWindow):
                 if ips == servers:
                     idx = k
         self.dns_row.set_selected(idx)
+        self.dns_row.set_subtitle(GLib.markup_escape_text(
+            "left unchanged" if not dns.get("force", True) else
+            ", ".join(servers) if servers else "the servers the VPN provider pushes"))
         self.dns_custom.set_visible(idx == n + 1)
         if idx == n + 1:
             self.dns_custom.set_text(", ".join(servers))

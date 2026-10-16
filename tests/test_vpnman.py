@@ -3073,6 +3073,42 @@ class HotspotTests(unittest.TestCase):
         self.assertIn("ip daddr != 127.0.0.0/8 ip daddr != 1.1.1.1 dnat ip to 1.1.1.1", rules)
         self.assertNotIn("127.0.0.1:", _split.ruleset(["1.1.1.1"]))
 
+    def test_nsswitch_is_changed_in_place_and_restored(self):
+        from vpnman import dns as _dns
+        d = tempfile.mkdtemp()
+        real, link = os.path.join(d, "authselect-nsswitch"), os.path.join(d, "nsswitch.conf")
+        original = ("passwd: files\nhosts:      files myhostname mdns4_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] dns\n"
+                    "group: files\n")
+        with open(real, "w") as fh:
+            fh.write(original)
+        os.symlink("authselect-nsswitch", link)                  # as authselect leaves it
+        run = os.path.join(d, "run")
+        os.makedirs(run)
+        saved = {k: os.environ.get(k) for k in ("VPNMAN_NSSWITCH", "VPNMAN_RUN_DIR")}
+        os.environ["VPNMAN_NSSWITCH"], os.environ["VPNMAN_RUN_DIR"] = link, run
+        try:
+            self.assertTrue(_dns.nss_bypass(True))
+            text = open(link).read()
+            self.assertTrue(os.path.islink(link), "the symlink stays")
+            self.assertIn("hosts: files myhostname mdns4_minimal [NOTFOUND=return] dns", " ".join(text.split()).replace("  ", " "))
+            self.assertFalse(_dns.nss_resolve(link))
+            self.assertIn("passwd: files", text)
+            self.assertTrue(_dns.nss_overridden())
+            self.assertTrue(_dns.nss_bypass(True), "doing it twice changes nothing more")
+            _dns.restore_nsswitch()                              # crash recovery or the bypass stopping
+            self.assertEqual(open(link).read(), original)
+            self.assertFalse(_dns.nss_overridden())
+            with open(real, "w") as fh:                          # a system without the module: nothing to do
+                fh.write("hosts: files dns\n")
+            self.assertFalse(_dns.nss_bypass(True))
+            self.assertFalse(_dns.nss_overridden())
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     def test_set_version_changes_every_place(self):
         import shutil
         import subprocess

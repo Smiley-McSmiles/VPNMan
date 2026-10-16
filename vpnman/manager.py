@@ -301,6 +301,7 @@ class Manager:
         """Called once by the daemon: crash recovery and boot-time behaviour."""
         dns.restore_resolv_conf()
         if plat.os_family() == "linux":
+            dns.restore_nsswitch()
             split.cleanup()
             share.cleanup()
             hotspot.restore()
@@ -950,6 +951,7 @@ class Manager:
                 "apps": sp["apps"], "moved": len(self._split.moved), "mode": sp.get("mode", "exclude"),
                 "dns": list(sp.get("dns") or []), "dns_original": system_dns(),
                 "dns_caveat": bool(sp.get("dns")) and dns.nss_resolve(),
+                "dns_nss": dns.nss_overridden(),
                 "routes": [r.get("ip") or r.get("host") for r in self.settings.get("routes") if r.get("action") == "out"]}
 
     def split_set(self, apps=None, enabled=None, mode=None, dns=None):

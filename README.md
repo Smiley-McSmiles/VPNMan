@@ -240,7 +240,9 @@ installed it).
   including Flatpak and Snap) or type a program name. While the VPN is up, those programs *and everything they start*
   keep using your normal connection; all other traffic stays in the tunnel and under the kill switch.
   You can also choose the DNS server those programs use (automatic, a preset or your own: Apps tab, or
-  `vpnman bypass dns quad9`); everything inside the tunnel keeps the VPN's DNS.
+  `vpnman bypass dns quad9`); everything inside the tunnel keeps the VPN's DNS. With systemd-resolved (Fedora...), VPNMan
+  takes its NSS module out of `/etc/nsswitch.conf` while a server is chosen (restored afterwards), so every program uses the
+  stub resolver and only the bypassed programs are redirected.
 
   ```sh
   vpnman bypass add steam firefox
