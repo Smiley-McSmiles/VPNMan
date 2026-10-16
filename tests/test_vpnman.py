@@ -3014,6 +3014,7 @@ class HotspotTests(unittest.TestCase):
         d = tempfile.mkdtemp()
         resolv, run = os.path.join(d, "resolv.conf"), os.path.join(d, "run")
         os.makedirs(run)
+        saved_env = {k: os.environ.get(k) for k in ("VPNMAN_RESOLV_CONF", "VPNMAN_RUN_DIR")}
         os.environ["VPNMAN_RESOLV_CONF"], os.environ["VPNMAN_RUN_DIR"] = resolv, run
         try:
             with open(resolv, "w") as fh:
@@ -3037,8 +3038,11 @@ class HotspotTests(unittest.TestCase):
                 fh.write("# managed by vpnman\nnameserver 10.8.0.1\n")
             self.assertEqual(system_dns("192.168.1.254"), ["192.168.1.254"])
         finally:
-            os.environ.pop("VPNMAN_RESOLV_CONF", None)
-            os.environ.pop("VPNMAN_RUN_DIR", None)
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_manager_follows_hotspots(self):
         s = settings.Settings(TMP + "/hs-%d.json" % id(self))
