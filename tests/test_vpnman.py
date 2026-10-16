@@ -1186,7 +1186,7 @@ class CompletionTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("palette", os.path.join(self.ROOT, "vpnman", "gui", "palette.py"))
         pal = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(pal)
-        self.assertEqual(sorted(pal.MODES), sorted(["off", "vpn", "proxy", "both", "busy", "error"]))
+        self.assertEqual(sorted(pal.MODES), sorted(["off", "vpn", "proxy", "both", "busy", "error", "locked"]))
         want = {"off": "#ff5c61", "vpn": "#4c8cff", "proxy": "#3dcf8f", "both": "#29d4e6"}      # red, blue, green, cyan
         for mode, color in want.items():
             self.assertEqual(pal.hex_color(pal.STATE_COLORS[mode][0]), color, mode)
@@ -3074,6 +3074,33 @@ class HotspotTests(unittest.TestCase):
         if "Operation not permitted" in r.stderr and "DNSFWD-OK" not in r.stdout:
             self.skipTest("network namespaces are not allowed here")
         self.assertIn("DNSFWD-OK", r.stdout, (r.stdout + r.stderr)[-3000:])
+
+    def test_exec_events_are_parsed_and_seen_live(self):
+        import struct
+        import subprocess
+        from vpnman import split as sp
+
+        def event(what, pid, tgid):
+            ev = struct.pack("=IIQ", what, 0, 0) + struct.pack("=ii", pid, tgid) + b"\0" * 8
+            body = struct.pack("=IIIIHH", 1, 1, 0, 0, len(ev), 0) + ev
+            return struct.pack("=IHHII", 16 + len(body), 3, 0, 0, 0) + body
+        data = event(sp.PROC_EXEC, 41, 40) + event(1, 7, 7) + event(sp.PROC_EXEC, 55, 55)
+        self.assertEqual(sp.parse_exec_events(data), [40, 55])                  # exec events only, the process id
+        self.assertEqual(sp.parse_exec_events(data[:30]), [])                  # a cut message is ignored
+        got = []
+        w = sp.ExecWatcher(got.append)
+        if not w.start():
+            self.skipTest("the process connector is not available here")
+        try:
+            p = subprocess.Popen(["sleep", "1"])
+            for _ in range(40):
+                if p.pid in got:
+                    break
+                time.sleep(0.05)
+            self.assertIn(p.pid, got, "a new program is announced within moments")
+            p.wait()
+        finally:
+            w.stop()
 
     def test_dns_caveat_and_loopback_rules(self):
         from vpnman import dns as _dns

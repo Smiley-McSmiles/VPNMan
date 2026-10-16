@@ -27,9 +27,9 @@ LINE = 'stroke-linecap="round" stroke-linejoin="round"'
 
 def svg(mode):
     c = palette.hex_color(palette.STATE_COLORS[mode][0])
-    if mode in ("vpn", "proxy", "both", "error"):
+    if mode in ("vpn", "proxy", "both", "error", "locked"):
         body = '<path d="%s" fill="%s"/>\n  ' % (SHIELD, c)
-        if mode == "error":
+        if mode in ("error", "locked"):
             body += ('<path d="M8 4.8 L8 9" fill="none" stroke="#ffffff" stroke-width="1.5" %s/>\n  '
                      '<circle cx="8" cy="11.2" r="0.5" fill="#ffffff" stroke="#ffffff" stroke-width="0.5"/>' % LINE)
         else:

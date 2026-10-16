@@ -88,7 +88,7 @@ def client():
                      GLib.Variant("(s)", ("org.kde.StatusNotifierItem",))).unpack()[0]
         assert props["Status"] == "NeedsAttention" and props["IconName"] == "test-icon", props
         # drawn icons: the pixels go to the host, so it needs no icon theme (the GNOME extension shows dots without one)
-        for mode in ("off", "vpn", "proxy", "both", "busy", "error"):
+        for mode in ("off", "vpn", "proxy", "both", "busy", "error", "locked"):
             tray.set_state("name-not-in-any-theme", "tip", mode=mode)
             props = call("/StatusNotifierItem", "org.freedesktop.DBus.Properties", "GetAll",
                          GLib.Variant("(s)", ("org.kde.StatusNotifierItem",))).unpack()[0]

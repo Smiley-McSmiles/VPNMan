@@ -952,7 +952,6 @@ class Manager:
                 "dns": list(sp.get("dns") or []), "dns_original": system_dns(),
                 "dns_caveat": bool(sp.get("dns")) and dns.nss_resolve(),
                 "dns_nss": dns.nss_overridden(),
-                "dns_forwarded": self._split.forwarded()[0], "dns_last": self._split.forwarded()[1],
                 "routes": [r.get("ip") or r.get("host") for r in self.settings.get("routes") if r.get("action") == "out"]}
 
     def split_set(self, apps=None, enabled=None, mode=None, dns=None):

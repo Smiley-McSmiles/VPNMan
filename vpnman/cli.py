@@ -413,8 +413,7 @@ class Cli:
             if not st["supported"]:
                 print(yellow("  not available here: %s" % st["reason"]))
             if st.get("dns"):
-                print("  DNS for them: %s%s" % (", ".join(st["dns"]), dim("  (%d lookups redirected%s)" % (
-                    st.get("dns_forwarded", 0), ", last: " + st["dns_last"] if st.get("dns_last") else ""))))
+                print("  DNS for them: %s" % ", ".join(st["dns"]))
             for ap in cur:
                 print("  %-28s %s" % (ap["name"], dim(", ".join(ap["match"]))))
             if not cur:

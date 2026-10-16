@@ -170,7 +170,6 @@ def main():
         assert query("127.0.0.53", "b.test", mark=mark) == "10.2.2.2", "UDP to the stub goes to the chosen resolver"
         assert query("127.0.0.53", "c.test", tcp=True, mark=mark) == "10.2.2.2", "and so does TCP"
         assert query_connected("127.0.0.53", "glibc.test", mark=mark) == "10.2.2.2", "a connect()ed socket (glibc) as well"
-        assert fwd.count == 3 and fwd.last == "glibc.test", (fwd.count, fwd.last)
         assert query("127.0.0.53", "d.test") == "10.1.1.1", "a program that is not part of the bypass keeps the stub"
         assert query("203.0.113.53", "e.test", mark=mark) == "10.2.2.2", "a direct query to the chosen resolver is untouched"
         fwd.stop()

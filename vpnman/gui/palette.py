@@ -11,6 +11,7 @@ STATE_COLORS = {
     "both": ((0.16, 0.83, 0.90), (0.05, 0.62, 0.70)),
     "busy": ((0.96, 0.70, 0.20), (0.80, 0.52, 0.04)),
     "error": ((1.00, 0.36, 0.38), (0.85, 0.23, 0.25)),
+    "locked": ((1.00, 0.36, 0.38), (0.85, 0.23, 0.25)),     # tray only: the kill switch is on and nothing is connected
 }
 MODES = tuple(STATE_COLORS)
 

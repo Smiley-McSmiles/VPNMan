@@ -89,7 +89,7 @@ class UserConfig:
 
 
 ICON_NAMES = [APP_ID] + ["%s-%s-symbolic" % (APP_ID, k) for k in ("connected", "connecting", "error", "disconnected")] \
-    + ["%s-tray-%s" % (APP_ID, k) for k in ("off", "vpn", "proxy", "both", "busy", "error")]
+    + ["%s-tray-%s" % (APP_ID, k) for k in ("off", "vpn", "proxy", "both", "busy", "error", "locked")]
 
 
 def private_icon_dir():
@@ -819,6 +819,8 @@ class MainWindow(Adw.ApplicationWindow):
         if st["netlock"]["engaged"]:
             tip += " · Network Lock on"
         mode = mode_for("disconnecting" if self._disconnecting else state, state == "connected", bool(st.get("proxy_up")))
+        if mode == "off" and st["netlock"]["engaged"]:
+            mode = "locked"             # kill switch on, nothing connected: the shield with the "!" (traffic is blocked)
         tray.set_state("%s-tray-%s" % (APP_ID, mode), tip, attention=(state == "error"), mode=mode)
         if key != getattr(self, "_tray_key", None):
             self._tray_key = key

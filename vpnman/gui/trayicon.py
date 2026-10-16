@@ -31,13 +31,13 @@ def draw(cr, mode, size):
     cr.scale(size / 16.0, size / 16.0)
     cr.set_line_cap(1)
     cr.set_line_join(1)
-    if mode in ("vpn", "proxy", "both", "error"):
+    if mode in ("vpn", "proxy", "both", "error", "locked"):
         _shield(cr)
         cr.set_source_rgb(r, g, b)
         cr.fill()
         cr.set_source_rgb(1, 1, 1)
         cr.set_line_width(1.5)
-        if mode == "error":
+        if mode in ("error", "locked"):
             cr.move_to(8, 4.8)
             cr.line_to(8, 9)
             cr.stroke()

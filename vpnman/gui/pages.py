@@ -358,9 +358,6 @@ class BypassDns:
         self._quiet = False
         orig = st.get("dns_original") or []
         text = ", ".join(servers) if servers else ("now: " + ", ".join(orig) if orig else "your router")
-        if servers and st.get("active"):
-            text += "  ·  %d lookups redirected%s" % (st.get("dns_forwarded", 0),
-                                                      " (last: %s)" % st["dns_last"] if st.get("dns_last") else "")
         self.row.set_subtitle(GLib.markup_escape_text(text))
         for w in self.widgets:
             w.set_sensitive(st.get("supported", True))

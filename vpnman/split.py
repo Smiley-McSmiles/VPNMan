@@ -10,6 +10,8 @@ The rule generation and process matching are pure functions so they can be teste
 
 import ipaddress
 import os
+import socket
+import struct
 import threading
 
 from . import dns as dnsmod
@@ -197,6 +199,83 @@ def matching_pids(wanted, proc="/proc", skip=()):
     return out
 
 
+# ------------------------------------------------------------------ new programs, as they start
+
+PROC_EXEC = 0x00000002
+
+
+def parse_exec_events(data):
+    """The process ids of the exec events in a buffer from the kernel's process connector (netlink)."""
+    pids, pos = [], 0
+    while pos + 16 <= len(data):
+        length = struct.unpack_from("=I", data, pos)[0]
+        if length < 16 or pos + length > len(data):
+            break
+        body = data[pos + 16:pos + length]
+        if len(body) >= 20 + 24:
+            what = struct.unpack_from("=I", body, 20)[0]
+            if what == PROC_EXEC:
+                pids.append(struct.unpack_from("=ii", body, 20 + 16)[1])          # the thread group (the process)
+        pos += (length + 3) & ~3
+    return pids
+
+
+class ExecWatcher:
+    """Tells ``callback(pid)`` about every program that starts, within milliseconds (Linux process connector).  A program
+    that lists in the bypass is then moved before it asks its first question: the periodic scan alone leaves it up to
+    a few seconds on the VPN's route at launch.  Needs root; without it the scan does the work."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self._sock = None
+        self._thread = None
+        self._stop = threading.Event()
+
+    def start(self):
+        try:
+            s = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, 11)               # NETLINK_CONNECTOR
+            s.bind((os.getpid(), 1))                                                  # CN_IDX_PROC
+            body = struct.pack("=IIIIHH", 1, 1, 0, 0, 4, 0) + struct.pack("=I", 1)    # PROC_CN_MCAST_LISTEN
+            s.send(struct.pack("=IHHII", 16 + len(body), 3, 0, 0, os.getpid()) + body)
+        except OSError:
+            return False
+        s.settimeout(0.5)
+        self._sock = s
+        self._thread = threading.Thread(target=self._run, daemon=True, name="split-exec")
+        self._thread.start()
+        return True
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                data = self._sock.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if self._stop.is_set():
+                    return
+                if e.errno == 105:                                                    # ENOBUFS: a burst; the scan catches up
+                    continue
+                return
+            for pid in parse_exec_events(data):
+                try:
+                    self.callback(pid)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def stop(self):
+        self._stop.set()
+        s, self._sock = self._sock, None
+        if s:
+            try:
+                s.close()
+            except OSError:
+                pass
+        t, self._thread = self._thread, None
+        if t and t is not threading.current_thread():
+            t.join(1)
+
+
 # ------------------------------------------------------------------ runtime
 
 def cgroup_root():
@@ -263,6 +342,7 @@ class SplitTunnel:
         self._lock = threading.Lock()
         self._rules = False
         self._fwd = None
+        self._exec = None
 
     @property
     def path(self):
@@ -324,11 +404,9 @@ class SplitTunnel:
             self._stop = threading.Event()
             self._thread = threading.Thread(target=self._loop, args=(self._stop,), daemon=True, name="split-scan")
             self._thread.start()
-
-    def forwarded(self):
-        """(queries redirected to the chosen resolver so far, the last name) - zero while nothing reaches the forwarder."""
-        f = self._fwd
-        return (f.count, f.last) if f else (0, "")
+            self._exec = ExecWatcher(self._on_exec)
+            if not self._exec.start():
+                self._exec = None                           # not allowed here: the scan every two seconds does it
 
     def _stop_forwarder(self):
         fwd, self._fwd = self._fwd, None
@@ -346,6 +424,9 @@ class SplitTunnel:
         if t and t.is_alive() and t is not threading.current_thread():
             t.join(3)
         self.active = False
+        ex, self._exec = self._exec, None
+        if ex:
+            ex.stop()
         self._release()
         self._stop_forwarder()
         dnsmod.nss_bypass(False)
@@ -399,6 +480,26 @@ class SplitTunnel:
             return True
         except OSError:
             return False
+
+    def _on_exec(self, pid):
+        """A program just started: if it is on the list, move it now (the scan also does it, a little later)."""
+        names = self.names_fn()
+        path = self.path
+        if not names or not path or not self.active:
+            return
+        st = _stat(self.proc, pid)
+        if not st:
+            return
+        argv = _argv(self.proc, pid)
+        found = _names_of(self.proc, pid, st[0], argv)
+        wanted = {w for w in names if w}
+        if not (found & wanted or {n[:15] for n in found} & {w[:15] for w in wanted}):
+            return
+        cur = self._cgroup_of(pid)
+        if cur is None or outranked(cur, cgroup_name(self.mode)):
+            return
+        if self._move(pid, path):
+            self.moved.setdefault(pid, cur)
 
     def scan_once(self):
         names = self.names_fn()
