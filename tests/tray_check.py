@@ -97,6 +97,12 @@ def client():
             data = bytes(data)
             assert len(data) == w * h * 4 and data[:4] == b"\0\0\0\0", "a transparent corner"
             assert any(data[i] == 255 for i in range(0, len(data), 4)), "and opaque pixels"
+        from vpnman.gui import trayicon
+        assert trayicon.pixmaps("vpn") is trayicon.pixmaps("vpn"), "the icon is drawn once per mode, not for every property"
+        t0 = time.monotonic()
+        for _ in range(50):
+            tray.set_state("name-not-in-any-theme", "tip", mode="vpn")        # an unchanged state is not announced again
+        assert time.monotonic() - t0 < 0.05, "set_state with nothing new is free"
         tray.set_state("test-icon", "tip")                    # without a mode: the icon name alone, as before
         props = call("/StatusNotifierItem", "org.freedesktop.DBus.Properties", "GetAll",
                      GLib.Variant("(s)", ("org.kde.StatusNotifierItem",))).unpack()[0]

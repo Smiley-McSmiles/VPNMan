@@ -64,8 +64,19 @@ def draw(cr, mode, size):
         cr.stroke()
 
 
+_cache = {}
+
+
 def pixmaps(mode, sizes=SIZES):
-    """[(width, height, ARGB32 bytes in network order)] for ``mode``, or [] without cairo."""
+    """[(width, height, ARGB32 bytes in network order)] for ``mode``, or [] without cairo.  Drawn once per mode: the panel
+    asks for the properties one by one, after every change."""
+    key = (mode, tuple(sizes))
+    if key not in _cache:
+        _cache[key] = _draw_all(mode, sizes)
+    return _cache[key]
+
+
+def _draw_all(mode, sizes):
     if cairo is None:
         return []
     out = []
