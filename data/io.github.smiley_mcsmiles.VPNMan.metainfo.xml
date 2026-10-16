@@ -17,6 +17,14 @@
   <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.1.1" date="2026-10-16">
+      <description>
+        <ul>
+          <li>New: choose the DNS server the whitelisted apps use while they skip the VPN (Apps tab and main page, or vpnman bypass dns): automatic, a preset or your own</li>
+          <li>Fixed: with a file-based /etc/resolv.conf (Void, Alpine and others without systemd-resolved), whitelisted apps could lose DNS while connected. They were sent to the VPN's own resolver, which they cannot reach outside the tunnel, when VPNMan had already replaced the file. They now keep the original resolver</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-10-10">
       <description>
         <ul>
@@ -24,8 +32,6 @@
           <li>Hotspots: the devices behind a Wi-Fi hotspot (GNOME, KDE Plasma, Cinnamon, hostapd) or a shared connection now take the same way out as the computer: VPN only, proxy only, VPN then proxy, or proxy then VPN, whichever you start first. With the kill switch on, only through the tunnel</li>
           <li>The proxy (system-wide mode) and the Network Proxy also carry the hotspot's devices (TCP and DNS), and their kill switch blocks them while the proxy is down</li>
           <li>Fixed: hotspot devices connected but "no internet" while a VPN was up (forwarding was off for the tunnel, so the answers coming back through it were dropped; TCP segment size too big for the tunnel; the kill switch dropped the hotspot's DHCP requests)</li>
-          <li>New: choose the DNS server the whitelisted apps use while they skip the VPN (Apps tab and main page, or vpnman bypass dns): automatic, a preset or your own</li>
-          <li>Fixed: with a file-based /etc/resolv.conf (Void, Alpine and others without systemd-resolved), whitelisted apps could lose DNS while connected. They were sent to the VPN's own resolver, which they cannot reach outside the tunnel, when VPNMan had already replaced the file. They now keep the original resolver</li>
           <li>Connections the devices opened before the VPN or the proxy came on are reset so they start again over the right route</li>
           <li>New settings connection.share_tunnel (on) and connection.share_ifaces (more interfaces, such as a libvirt bridge)</li>
           <li>The packages remove an older script install in /usr/local that would hide the packaged version</li>

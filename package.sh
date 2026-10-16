@@ -10,12 +10,25 @@
 #                                    that package, the rest still build, and the summary says why
 #   ./package.sh --deb --arch        selected packages (the plain names work too: ./package.sh deb arch)
 #   ./package.sh --container --rpm   build inside a Fedora container (podman/docker) - works from any distro
+#   ./package.sh --version 1.1.1 --all   set the version everywhere (tools/set_version.py), then build
 #   ./package.sh --help
 # ==============================================================================
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$ROOT"
+# --version X.Y.Z sets the version everywhere first (code, README badge, man page, release notes entry): tools/set_version.py
+rest=(); new_version=""; skip=0
+for ((i = 1; i <= $#; i++)); do
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+    case "${!i}" in
+        --version) j=$((i + 1)); new_version=${!j:-}; skip=1; [ -n "$new_version" ] || { echo "--version needs a number, e.g. --version 1.2.0" >&2; exit 2; } ;;
+        --version=*) new_version=${!i#*=} ;;
+        *) rest+=("${!i}") ;;
+    esac
+done
+set -- ${rest[@]+"${rest[@]}"}
+if [ -n "$new_version" ]; then python3 "$ROOT/tools/set_version.py" "$new_version" || exit 2; fi
 VERSION=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' vpnman/__init__.py)
 NAME=vpnman
 DIST=$ROOT/dist
@@ -485,6 +498,7 @@ Options:
   --openbsd     OpenBSD port recipe
   --recipes     Only the recipes (spec, PKGBUILD, template, APKBUILD, port) in dist/recipes/
   --container   Build inside a Fedora container (podman/docker), e.g. --container --rpm
+  --version X.Y.Z   Set the version first (code, README, man page, release notes entry), e.g. --version 1.1.1 --all
   --clean       Remove dist/ and build/
   --help, -h    Show this message
 

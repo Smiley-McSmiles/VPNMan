@@ -3044,6 +3044,25 @@ class HotspotTests(unittest.TestCase):
                 else:
                     os.environ[k] = v
 
+    def test_set_version_changes_every_place(self):
+        import shutil
+        import subprocess
+        ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        d = tempfile.mkdtemp()
+        for rel in ("vpnman/__init__.py", "README.md", "data/vpnman.1", "data/io.github.smiley_mcsmiles.VPNMan.metainfo.xml"):
+            os.makedirs(os.path.dirname(os.path.join(d, "tree", rel)), exist_ok=True)
+            shutil.copy(os.path.join(ROOT, rel), os.path.join(d, "tree", rel))
+        os.makedirs(os.path.join(d, "tree", "tools"))
+        for tool in ("set_version.py", "check_version.py"):
+            shutil.copy(os.path.join(ROOT, "tools", tool), os.path.join(d, "tree", "tools", tool))
+        run = lambda *a: subprocess.run([sys.executable] + list(a), cwd=os.path.join(d, "tree"), capture_output=True, text=True)
+        r = run("tools/set_version.py", "9.8.7", "--note", "Testing")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = run("tools/check_version.py", "9.8.7")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('<release version="9.8.7"', open(os.path.join(d, "tree", "data", "io.github.smiley_mcsmiles.VPNMan.metainfo.xml")).read())
+        self.assertEqual(run("tools/set_version.py", "9.8").returncode, 2)
+
     def test_manager_follows_hotspots(self):
         s = settings.Settings(TMP + "/hs-%d.json" % id(self))
         m = Manager(settings=s)
