@@ -73,6 +73,33 @@ class DnsManager:
         restore_resolv_conf()
 
 
+def original_resolv_lines():
+    """The lines of the resolver configuration as it was before VPNMan changed it.  While VPNMan has replaced the file
+    (``# managed by vpnman``), they come from the saved copy - or from the file a symlink pointed at - never from the VPN's
+    own entries: handing those to the programs that bypass the VPN gives them a resolver they cannot reach."""
+    rpath = _resolv()
+    try:
+        with open(rpath) as fh:
+            text = fh.read()
+    except OSError:
+        return []
+    if MARK not in text:
+        return text.splitlines()
+    for source in (_backup(), _linkfile()):
+        try:
+            if source == _linkfile():
+                with open(source) as fh:
+                    target = fh.read().strip()
+                source = os.path.join(os.path.dirname(rpath), target)
+            with open(source) as fh:
+                saved = fh.read()
+        except OSError:
+            continue
+        if saved.strip():
+            return saved.splitlines()
+    return []
+
+
 def restore_resolv_conf():
     """Undo a file-based change.  Safe to call at any time."""
     rpath = _resolv()

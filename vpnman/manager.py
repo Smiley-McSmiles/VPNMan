@@ -905,6 +905,8 @@ class Manager:
                     self.log.add("info", "%s: %s%s" % (
                         "Only these apps use the VPN" if mode == "include" else "App bypass active for", apps,
                         "" if self._split_ctx else " (VPN down, network lock keeps them online)"))
+                    self.log.add("debug", "App bypass: those programs ask %s for names (gateway %s via %s)" % (
+                        ", ".join(ctx[2]) or "nobody", ctx[0], ctx[1]))
                 except Exception as e:  # noqa: BLE001
                     self._split_cur = None
                     self.log.add("warn", "App bypass unavailable: %s" % e)
@@ -1522,19 +1524,15 @@ class Manager:
 def system_dns(gw=None):
     """The resolvers in use before the tunnel comes up (what bypassed apps should keep using)."""
     found = []
-    try:
-        with open(os.environ.get("VPNMAN_RESOLV_CONF", "/etc/resolv.conf")) as fh:
-            for line in fh:
-                parts = line.split()
-                if len(parts) >= 2 and parts[0] == "nameserver":
-                    try:
-                        ip = ipaddress.ip_address(parts[1])
-                    except ValueError:
-                        continue
-                    if ip.version == 4 and not ip.is_loopback and parts[1] not in found:
-                        found.append(parts[1])
-    except OSError:
-        pass
+    for line in dns.original_resolv_lines():            # not the VPN's own entries if the file is VPNMan's right now
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "nameserver":
+            try:
+                ip = ipaddress.ip_address(parts[1])
+            except ValueError:
+                continue
+            if ip.version == 4 and not ip.is_loopback and parts[1] not in found:
+                found.append(parts[1])
     return found or ([gw] if gw else [])
 
 

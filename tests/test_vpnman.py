@@ -3008,6 +3008,38 @@ class HotspotTests(unittest.TestCase):
         st = m.status()
         self.assertEqual((st["proxy_up"], st["proxy_name"]), (True, "network proxy"))
 
+    def test_bypassed_apps_keep_the_original_resolver(self):
+        from vpnman import dns as _dns
+        from vpnman.manager import system_dns
+        d = tempfile.mkdtemp()
+        resolv, run = os.path.join(d, "resolv.conf"), os.path.join(d, "run")
+        os.makedirs(run)
+        os.environ["VPNMAN_RESOLV_CONF"], os.environ["VPNMAN_RUN_DIR"] = resolv, run
+        try:
+            with open(resolv, "w") as fh:
+                fh.write("nameserver 192.168.1.1\nnameserver 127.0.0.1\n")
+            self.assertEqual(system_dns("192.168.1.1"), ["192.168.1.1"])
+            _dns.DnsManager().apply(["10.8.0.1"])                              # the VPN's own resolver replaces the file
+            self.assertIn("# managed by vpnman", open(resolv).read())
+            self.assertEqual(system_dns("192.168.1.254"), ["192.168.1.1"], "the saved original, not the VPN's resolver")
+            _dns.restore_resolv_conf()
+            # a symlinked resolv.conf (resolvconf, systemd): its target is the original
+            real = os.path.join(d, "real.conf")
+            with open(real, "w") as fh:
+                fh.write("nameserver 9.9.9.9\n")
+            os.unlink(resolv)
+            os.symlink("real.conf", resolv)
+            _dns.DnsManager().apply(["10.8.0.1"])
+            self.assertEqual(system_dns("192.168.1.254"), ["9.9.9.9"])
+            _dns.restore_resolv_conf()
+            # nothing saved and a file that is VPNMan's: fall back to the gateway, never to the VPN's resolver
+            with open(resolv, "w") as fh:
+                fh.write("# managed by vpnman\nnameserver 10.8.0.1\n")
+            self.assertEqual(system_dns("192.168.1.254"), ["192.168.1.254"])
+        finally:
+            os.environ.pop("VPNMAN_RESOLV_CONF", None)
+            os.environ.pop("VPNMAN_RUN_DIR", None)
+
     def test_manager_follows_hotspots(self):
         s = settings.Settings(TMP + "/hs-%d.json" % id(self))
         m = Manager(settings=s)
