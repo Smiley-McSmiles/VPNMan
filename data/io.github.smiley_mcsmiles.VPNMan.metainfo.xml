@@ -17,13 +17,19 @@
   <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="1.1.1" date="2026-10-16">
+    <release version="1.1.2" date="2026-10-17">
       <description>
         <ul>
           <li>Security: settings that run programs as root (event hooks, extra OpenVPN arguments, access) and backup export are for administrators only (root, wheel, sudo, admin); profiles imported or edited by other users connect without script hooks (OpenVPN up/plugin/..., WireGuard PostUp/...) and extra arguments; a profile's config can no longer point outside its folder</li>
           <li>Ctrl+W closes the window and keeps VPNMan in the tray; Ctrl+Q quits</li>
           <li>Fixed: the app could disappear from the GNOME menu after installing the package over an older install.sh copy in /usr/local (its launcher stayed behind and hid the new one); the packages now remove that copy completely</li>
           <li>Fixed: the animation on the main page stuttered about once a second (the tray icon was rebuilt byte by byte every time the panel asked for it)</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.1.1" date="2026-10-16">
+      <description>
+        <ul>
           <li>Whitelisted apps are moved out of the VPN the moment they start (Linux process events) instead of up to two seconds later, so their first DNS lookups no longer go the VPN's way</li>
           <li>The tray icon is the shield with an exclamation mark while the kill switch is on and nothing is connected</li>
           <li>New tray icon: a shield in the same colours as the status picture on the main page (red nothing, blue VPN, green proxy, cyan both, amber connecting). It follows the state on GNOME, KDE, Cinnamon and other desktops, and is sent to the panel as pixels too, so the GNOME AppIndicator extension no longer shows three dots when it cannot find the named icon</li>
