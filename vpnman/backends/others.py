@@ -57,6 +57,7 @@ class OpenConnect(Backend):
 
 
 class OpenFortiVPN(Backend):
+    restricted_line = staticmethod(lambda line: bool(re.match(r"^\\s*(pppd-plugin|pppd-log|pppd-call|pppd-ipparam|user-cert|user-key|ca-file)\\s*=", line, re.I)))
     id = "openfortivpn"
     label = "Fortinet SSL VPN"
     description = "FortiGate SSL-VPN via openfortivpn"
@@ -93,7 +94,8 @@ class OpenFortiVPN(Backend):
         else:
             text = "host = %s\nport = %s\n" % (p["server"], p.get("port") or 443)
         if p.get("username"):
-            text += "\nusername = %s\npassword = %s\n" % (p["username"], p.get("password", ""))
+            one = lambda v: str(v).replace("\r", " ").replace("\n", " ")       # a field is one line, never a new option
+            text += "\nusername = %s\npassword = %s\n" % (one(p["username"]), one(p.get("password", "")))
         ctx.state["path"] = ctx.write("forti.conf", text)
 
     def connect_cmd(self, ctx):
@@ -154,6 +156,7 @@ class PPTP(SSTP):
 
 
 class StrongSwan(Backend):
+    restricted_line = staticmethod(lambda line: bool(re.match(r"^\\s*(updown|include)\\b", line, re.I)))
     id = "ikev2"
     label = "IKEv2 / IPsec"
     description = "IKEv2/IPsec through strongSwan (swanctl.conf)"
@@ -212,6 +215,7 @@ class StrongSwan(Backend):
 
 
 class VPNC(Backend):
+    restricted_line = staticmethod(lambda line: bool(re.match(r"^\\s*Script\\b", line, re.I)))
     id = "vpnc"
     label = "Cisco IPsec (vpnc)"
     description = "Legacy Cisco IPsec/PSK concentrators via vpnc"
@@ -233,6 +237,7 @@ class VPNC(Backend):
 
 
 class Nebula(Backend):
+    restricted_line = staticmethod(lambda line: bool(re.match(r"^\\s*(\\S+:\\s*)?(ca|cert|key)\\s*:\\s*/", line, re.I)))
     id = "nebula"
     label = "Nebula"
     description = "Slack Nebula overlay network"

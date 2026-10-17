@@ -240,13 +240,25 @@ class Tray:
             pass
 
     # ------------------------------------------------------------------- SNI
+    _pix_cache = {}
+
+    @classmethod
+    def _pixmap_variant(cls, mode):
+        """The icon of ``mode`` as an a(iiay) value - built once: made byte by byte it costs a noticeable moment, and the
+        panel asks for it after every change (it froze the animation on the main page)."""
+        if mode not in cls._pix_cache:
+            from .trayicon import pixmaps
+            items = [GLib.Variant.new_tuple(GLib.Variant("i", w), GLib.Variant("i", h),
+                                            GLib.Variant.new_from_bytes(GLib.VariantType("ay"), GLib.Bytes.new(data), True))
+                     for w, h, data in pixmaps(mode)]
+            cls._pix_cache[mode] = GLib.Variant.new_array(GLib.VariantType("(iiay)"), items) if items else None
+        return cls._pix_cache[mode]
+
     def _sni_get(self, conn, sender, path, iface, prop):
         pix = GLib.Variant("a(iiay)", [])
-        drawn = []
-        if getattr(self, "mode", None):
-            from .trayicon import pixmaps
-            drawn = pixmaps(self.mode)
-        icon_pix = GLib.Variant("a(iiay)", [(w, h, GLib.Variant("ay", data)) for w, h, data in drawn]) if drawn else pix
+        icon_pix = self._pixmap_variant(self.mode) if getattr(self, "mode", None) else None
+        drawn = icon_pix is not None
+        icon_pix = icon_pix or pix
         table = {
             "Category": GLib.Variant("s", "ApplicationStatus"),
             "Id": GLib.Variant("s", self.app_id),

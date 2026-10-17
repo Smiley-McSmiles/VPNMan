@@ -813,6 +813,16 @@ class App(A.Application):
         w.show_warnings(["a: Will be ignored: 'register-dns'"])
         w._update_result({"current": "1.0.6", "latest": "9.9.9", "newer": True, "url": "https://github.com/x", "notes": "n"}, False)
         w._update_result({"error": "offline"}, True)
+        # Ctrl+W closes the window: with a tray the main window only hides and the app keeps running; Ctrl+Q quits
+        assert self.get_accels_for_action("window.close") == ["<Control>w"], self.get_accels_for_action("window.close")
+        assert self.get_accels_for_action("app.quit") == ["<Control>q"]
+        keep = self.keep_in_tray
+        self.keep_in_tray = lambda: True
+        w.present()
+        w.activate_action("window.close", None)
+        assert not w.get_visible() and self.win is w, "hidden to the tray, not destroyed"
+        self.keep_in_tray = keep
+        w.present()
         print("FEATURES-OK")
         self.quit()
         return False

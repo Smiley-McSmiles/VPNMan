@@ -14,6 +14,7 @@ import struct
 import threading
 
 TIMEOUT = 5.0
+MAX_BUSY = 64                       # queries in flight at once; a flood beyond that is dropped (DNS clients retry)
 
 
 class DnsForwarder:
@@ -23,6 +24,7 @@ class DnsForwarder:
         self._stop = threading.Event()
         self._socks = []
         self._threads = []
+        self._busy = threading.BoundedSemaphore(MAX_BUSY)
 
     # ---- lifecycle
     def start(self):
@@ -82,7 +84,8 @@ class DnsForwarder:
                 continue
             except OSError:
                 return
-            threading.Thread(target=self._udp_query, args=(sock, data, peer), daemon=True).start()
+            if self._busy.acquire(blocking=False):
+                threading.Thread(target=self._udp_query, args=(sock, data, peer), daemon=True).start()
 
     def _udp_query(self, sock, data, peer):
         up = self._upstream_socket(socket.SOCK_DGRAM)
@@ -97,6 +100,7 @@ class DnsForwarder:
             pass
         finally:
             up.close()
+            self._busy.release()
 
     # ---- TCP
     def _tcp_loop(self, sock):
@@ -107,7 +111,10 @@ class DnsForwarder:
                 continue
             except OSError:
                 return
-            threading.Thread(target=self._tcp_session, args=(conn,), daemon=True).start()
+            if self._busy.acquire(blocking=False):
+                threading.Thread(target=self._tcp_session, args=(conn,), daemon=True).start()
+            else:
+                conn.close()
 
     @staticmethod
     def _read(conn, n):
@@ -138,3 +145,4 @@ class DnsForwarder:
             conn.close()
             if up:
                 up.close()
+            self._busy.release()

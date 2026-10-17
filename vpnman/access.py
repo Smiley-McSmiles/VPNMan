@@ -21,6 +21,34 @@ from . import platform as plat
 _cache = {}
 _lock = threading.Lock()
 TTL = 5.0
+ADMIN_GROUPS = {"wheel", "sudo", "admin"}         # members can become root anyway
+_admin_cache = {}
+_caller = threading.local()
+
+
+def set_caller(uid):
+    """The daemon calls this for every request (``None``: the platform cannot tell who connected; the socket's own
+    permissions decide).  Everything the request does runs in this thread."""
+    _caller.uid = uid
+    if uid is None or uid == 0:
+        _caller.admin = True
+        return
+    now = time.time()
+    with _lock:
+        hit = _admin_cache.get(uid)
+    if hit and hit[0] > now:
+        _caller.admin = hit[1]
+        return
+    _caller.admin = bool(_groups_of(uid) & ADMIN_GROUPS)          # (the GUI asks every second: no group lookup each time)
+    with _lock:
+        _admin_cache[uid] = (now + TTL, _caller.admin)
+
+
+def caller_is_admin():
+    """May the current caller make the daemon run programs of its choosing as root (hooks, scripts in profiles)?
+    Root and members of wheel/sudo/admin may; a user who is only allowed in as the logged-in desktop user or as a
+    member of the vpnman group may not.  Code that does not run for a request (the daemon itself, tests) may."""
+    return getattr(_caller, "admin", True)
 
 
 def _groups_of(uid):
