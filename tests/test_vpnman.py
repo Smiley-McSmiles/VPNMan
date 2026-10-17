@@ -3075,6 +3075,29 @@ class HotspotTests(unittest.TestCase):
             self.skipTest("network namespaces are not allowed here")
         self.assertIn("DNSFWD-OK", r.stdout, (r.stdout + r.stderr)[-3000:])
 
+    def test_bypass_lists_its_processes_by_app(self):
+        from vpnman import split as sp
+        d = tempfile.mkdtemp()
+        proc, root = os.path.join(d, "proc"), os.path.join(d, "cg")
+        for pid, comm, ppid, argv in ((100, "firefox", 1, "/usr/lib64/firefox/firefox"), (101, "Socket Process", 100, ""),
+                                      (102, "Web Content", 100, ""), (300, "steam", 1, "steam"), (400, "bash", 1, "bash")):
+            os.makedirs(os.path.join(proc, str(pid)))
+            with open(os.path.join(proc, str(pid), "stat"), "w") as fh:
+                fh.write("%d (%s) S %d 0 0" % (pid, comm, ppid))
+            with open(os.path.join(proc, str(pid), "cmdline"), "w") as fh:
+                fh.write(argv.replace(" ", "\0"))
+        os.makedirs(os.path.join(root, sp.CGROUP))
+        with open(os.path.join(root, sp.CGROUP, "cgroup.procs"), "w") as fh:
+            fh.write("100\n101\n102\n300\n")
+        t = sp.SplitTunnel(lambda: [], proc=proc, root=root)
+        self.assertEqual(t.processes([{"name": "Firefox", "match": ["firefox"]}]), [])        # not running: nothing
+        t.active = True
+        got = t.processes([{"name": "Firefox", "match": ["firefox"]}, {"name": "Steam", "match": ["steam"]}])
+        self.assertEqual([(p["app"], p["pid"], p["name"]) for p in got],
+                         [("Firefox", 100, "firefox"), ("Firefox", 101, "Socket Process"), ("Firefox", 102, "Web Content"),
+                          ("Steam", 300, "steam")])
+        self.assertEqual(t._describe([100, 101], proc), "firefox (100), Socket Process (101)")
+
     def test_exec_events_are_parsed_and_seen_live(self):
         import struct
         import subprocess

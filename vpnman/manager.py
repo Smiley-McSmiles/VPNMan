@@ -160,6 +160,8 @@ class Manager:
             s = dict(self._status)
         s["netlock"] = self.netlock_status()
         s["hotspots"] = sorted(self.hotspots)
+        cur = self._current
+        s["vpn_dns"] = self._tunnel_dns(cur[0]) if cur and s["state"] == "connected" else []   # what the tunnel uses
         s["proxy_up"], s["proxy_name"] = self.proxy.up()
         if s["state"] != "connected":
             s["rx_rate"], s["tx_rate"] = self._open_rates()          # no tunnel to count: the way out itself
@@ -856,11 +858,16 @@ class Manager:
             pass
 
     # ------------------------------------------------------------ DNS / routes
-    def _apply_dns(self, ctx, iface):
+    def _tunnel_dns(self, ctx):
+        """The name servers the tunnel's traffic uses: the chosen ones, else the profile's, else the VPN's (empty when DNS
+        is left alone)."""
         s = self.settings
         if not s.get("dns.force"):
-            return
-        servers = s.get("dns.servers") or ctx.profile.get("dns") or ctx.dns
+            return []
+        return list(s.get("dns.servers") or ctx.profile.get("dns") or ctx.dns)
+
+    def _apply_dns(self, ctx, iface):
+        servers = self._tunnel_dns(ctx)
         if servers:
             try:
                 self.log.add("info", self._dns.apply(servers, iface))
@@ -951,11 +958,15 @@ class Manager:
     def split_status(self):
         ok, why = split.supported()
         sp = self.settings.get("split")
+        cur = self._split_cur if self._split.active else None      # (gateway, device, mode, dns) the bypass runs with
         return {"supported": ok, "reason": why, "active": self._split.active, "enabled": sp["enabled"],
                 "apps": sp["apps"], "moved": len(self._split.moved), "mode": sp.get("mode", "exclude"),
                 "dns": list(sp.get("dns") or []), "dns_original": system_dns(),
                 "dns_caveat": bool(sp.get("dns")) and dns.nss_resolve(),
                 "dns_nss": dns.nss_overridden(),
+                "processes": self._split.processes(sp["apps"]),
+                "route": {"gateway": cur[0], "device": cur[1]} if cur else None,
+                "dns_now": list(cur[3]) if cur and len(cur) > 3 else [],
                 "routes": [r.get("ip") or r.get("host") for r in self.settings.get("routes") if r.get("action") == "out"]}
 
     def split_set(self, apps=None, enabled=None, mode=None, dns=None):

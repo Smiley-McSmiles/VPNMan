@@ -306,6 +306,35 @@ class AppPicker(Adw.Window):
         self.close()
 
 
+def bypass_details(st):
+    """What the app bypass is doing right now, as (title, text) pairs: one per app with its processes, then the way out,
+    the DNS of those apps and the addresses that skip the VPN.  Shared by the Apps tab and the Log tab."""
+    out = []
+    by_app = {}
+    for p in st.get("processes") or []:
+        by_app.setdefault(p["app"], []).append(p)
+    for a in st.get("apps") or []:
+        procs = by_app.pop(a["name"], [])
+        out.append((a["name"], ", ".join("%s (%d)" % (p["name"], p["pid"]) for p in procs) if procs else "not running"))
+    for app, procs in sorted(by_app.items()):
+        out.append((app, ", ".join("%s (%d)" % (p["name"], p["pid"]) for p in procs)))
+    route = st.get("route")
+    if route:
+        out.append(("Way out", "%s%s" % (route.get("device") or "?",
+                                          " via %s" % route["gateway"] if route.get("gateway") else "")))
+    dns = st.get("dns_now") or []
+    if st.get("active"):
+        how = []
+        if st.get("dns"):
+            how.append("chosen in this tab")
+        if st.get("dns_nss"):
+            how.append("lookups through systemd-resolved are switched to its stub")
+        out.append(("DNS", (", ".join(dns) or "unchanged") + (" (%s)" % "; ".join(how) if how else "")))
+    if st.get("routes"):
+        out.append(("Addresses", ", ".join(st["routes"])))
+    return out
+
+
 class BypassDns:
     """The name server the programs that skip the VPN use: automatic (the one the computer had before the VPN), a preset
     or your own.  ``done(status)`` gets the new app-bypass status after a change."""
@@ -390,8 +419,9 @@ class BypassPage(Adw.PreferencesPage):
             ["Skip the VPN", "Are the only ones using the VPN (experimental)"]))
         self.mode.connect("notify::selected", self._on_mode)
         g.add(self.mode)
-        self.status = Adw.ActionRow(title="Status")
-        self.status.add_css_class("property")
+        # click to see what is bypassed right now: each app and its processes, the way out, the DNS
+        self.status = Adw.ExpanderRow(title="Status")
+        self._detail_rows, self._detail_key = [], None
         g.add(self.status)
         self.add(g)
         self.top_group = g
@@ -437,10 +467,17 @@ class BypassPage(Adw.PreferencesPage):
         if not st["supported"]:
             self.status.set_subtitle(GLib.markup_escape_text("Unavailable: " + st["reason"]))
         elif st["active"]:
-            self.status.set_subtitle("Active - %d process(es) bypassing the VPN" % st.get("moved", 0))
+            n = len(st.get("processes") or []) or st.get("moved", 0)
+            self.status.set_subtitle("Active - %d process%s bypassing the VPN" % (n, "" if n == 1 else "es"))
         else:
             self.status.set_subtitle("Applies as soon as the VPN is connected")
-        self._update_addresses(st.get("routes", []))
+        self._update_details(bypass_details(st) if st.get("active") else [])
+        if st.get("routes", []) != self.routes:
+            self._update_addresses(st.get("routes", []))
+        apps_key = [(a["id"], a["name"], tuple(a["match"]), a.get("icon")) for a in st["apps"]]
+        if apps_key == getattr(self, "_apps_key", None):
+            return                                      # the list did not change: leave the rows alone
+        self._apps_key = apps_key
         _clear(self.group, self._rows)
         if not st["apps"]:
             row = Adw.ActionRow(title="No apps yet", subtitle="Add Steam, Firefox or any other program.")
@@ -457,6 +494,20 @@ class BypassPage(Adw.PreferencesPage):
             row.add_suffix(rm)
             self.group.add(row)
             self._rows.append(row)
+
+    def _update_details(self, details):
+        if details == self._detail_key:
+            return                                      # unchanged: keep the rows (and the reader's place) as they are
+        self._detail_key = details
+        for row in self._detail_rows:
+            self.status.remove(row)
+        self._detail_rows = []
+        for title, text in details or [("Nothing to show", "The bypass runs while the VPN is connected")]:
+            row = Adw.ActionRow(title=GLib.markup_escape_text(title), subtitle=GLib.markup_escape_text(text))
+            row.add_css_class("property")
+            row.set_subtitle_selectable(True)
+            self.status.add_row(row)
+            self._detail_rows.append(row)
 
     def _update_addresses(self, routes):
         self.routes = list(routes)
