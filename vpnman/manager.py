@@ -19,10 +19,10 @@ import threading
 import time
 import urllib.request
 
-from . import __version__, backends, backup, blocks, dns, history, hotspot, leaktest, netlock, network, paths, proxysvc, schedule, share, split, stunnel, xray
+from . import __version__, access, backends, backup, blocks, dns, history, hotspot, leaktest, netlock, network, paths, proxysvc, schedule, share, split, stunnel, xray
 from . import platform as plat
 from .backends.base import CredentialsRequired
-from .profiles import ProfileError, ProfileStore, public_view
+from .profiles import ProfileError, ProfileStore, public_view, safe_filename
 from .settings import Settings
 
 
@@ -130,6 +130,8 @@ class Manager:
         self._net_stop = threading.Event()
         self._routes_added = []   # networks routed around the tunnel right now (mutated in place on network change)
         self._host_ips = {}       # domain -> IPv4 list, for "addresses that skip the VPN" given as names
+        self._open_last = None    # (time, device, rx, tx) of the last look at the way out without a tunnel (_open_rates)
+        self._open_dev, self._open_dev_at = None, 0.0
         self._host_checked = 0.0
         self.proxy = proxysvc.ProxyService(self)
         self.blocks = blocks.BlockService(self)
@@ -169,11 +171,11 @@ class Manager:
     def _open_rates(self):
         """Bytes per second in and out on the interface that carries the traffic (no VPN: the default route)."""
         now = time.time()
-        if now - getattr(self, "_open_dev_at", 0) > 5:                 # the route is looked up now and then, not every call
+        if now - self._open_dev_at > 5:                 # the route is looked up now and then, not every call
             self._open_dev, self._open_dev_at = plat.default_gateway()[1], now
         dev = self._open_dev
         st = plat.iface_stats(dev) if dev else None
-        last, self._open_last = getattr(self, "_open_last", None), None
+        last, self._open_last = self._open_last, None
         if st:
             self._open_last = (now, dev, st[0], st[1])
         if not st or not last or last[1] != dev or now - last[0] <= 0:
@@ -554,6 +556,8 @@ class Manager:
         problems = backend.validate(profile)
         if problems:
             raise FatalError("%s: %s" % (profile["name"], "; ".join(problems)))
+        if profile.get("untrusted"):
+            profile = self._restricted(backend, profile)
         oneshot = backend.mode == "oneshot"
         workdir = os.path.join(paths.run_dir(), "conn", profile["id"])
         shutil.rmtree(workdir, ignore_errors=True)
@@ -1372,6 +1376,7 @@ class Manager:
         for fn, b64 in (files or {}).items():
             import base64
             allfiles[fn] = base64.b64decode(b64)
+        self._taint(p)
         with self._import_lock:             # two imports of the same name racing must not both pick the same name
             self._unique_name(p)
             self.store.save(p, allfiles)
@@ -1389,7 +1394,10 @@ class Manager:
             if k in p and k not in ("id", "created"):
                 p[k] = v
         p["options"].update(options or {})
+        if p.get("config"):
+            p["config"] = safe_filename(p["config"])
         self._unique_name(p)
+        self._taint(p)
         import base64
         self.store.save(p, {fn: base64.b64decode(b) for fn, b in (files or {}).items()})
         return public_view(p)
@@ -1397,8 +1405,55 @@ class Manager:
     def set_profile_file(self, ident, name, b64):
         import base64
         p = self.store.find(ident)
+        self._taint(p)
         self.store.save(p, {name: base64.b64decode(b64)})
         return public_view(p)
+
+    def update_profile(self, ident, changes):
+        p = self.store.update(ident, changes)
+        if not access.caller_is_admin() and not p.get("untrusted"):
+            self._taint(p)
+            self.store.save(p)
+        return public_view(p)
+
+    @staticmethod
+    def _taint(p):
+        """A profile written or changed by someone who is not an administrator may not run programs as root: its script
+        hooks and extra tool arguments are left out when it connects (see _restricted)."""
+        if not access.caller_is_admin():
+            p["untrusted"] = True
+
+    def _restricted(self, backend, profile):
+        """The profile as it may run when it is untrusted: no extra tool arguments, and a copy of its config without the
+        lines that make the VPN program run commands or touch files outside the profile.  Returns (profile, notes)."""
+        import copy
+        q = copy.deepcopy(profile)
+        notes = []
+        if (q.get("options") or {}).pop("extra_args", None):
+            notes.append("extra program arguments")
+        if q.get("config") and backend.restricted_line:
+            pdir = self.store.dir_of(profile)
+            try:
+                with open(os.path.join(pdir, safe_filename(q["config"])), errors="replace") as fh:
+                    lines = fh.read().splitlines()
+            except OSError:
+                lines = None
+            if lines is not None:
+                kept = []
+                for line in lines:
+                    if backend.restricted_line(line):
+                        notes.append(line.strip().split(None, 1)[0] if line.strip() else "")
+                    else:
+                        kept.append(line)
+                name = ".restricted-" + safe_filename(q["config"])
+                fd = os.open(os.path.join(pdir, name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as fh:
+                    fh.write("\n".join(kept) + "\n")
+                q["config"] = name
+        if notes:
+            self.log.add("warn", "%s was added or changed by a user who is not an administrator, so these are left out: %s"
+                         % (profile["name"], ", ".join(sorted(set(n for n in notes if n)))))
+        return q
 
     # ------------------------------------------------------------ backup
     def backup_export(self):
@@ -1426,10 +1481,15 @@ class Manager:
             existing = set()
             self.proxy.remove([q["id"] for q in self.proxy.store.list()])
         added = skipped = 0
+        admin = access.caller_is_admin()
         for pid, files in sorted(profiles.items()):
             if pid in existing:
                 skipped += 1
                 continue
+            if not admin:                       # restored by a user who is not an administrator: no scripts as root
+                meta = json.loads(files["profile.json"])
+                meta["untrusted"] = True
+                files = dict(files, **{"profile.json": json.dumps(meta, indent=2).encode()})
             backup.write_profile(self.store.root, pid, files)
             added += 1
         have = {q["id"] for q in self.proxy.store.list()}
@@ -1442,7 +1502,12 @@ class Manager:
         if do_settings:
             from .settings import DEFAULTS, _merge
             with self.settings._lock:
-                self.settings.data = _merge(DEFAULTS, new_settings)
+                merged = _merge(DEFAULTS, new_settings)
+                if not admin:                   # the settings that run programs as root keep their values
+                    for key in ("events", "access"):
+                        merged[key] = self.settings.data[key]
+                    merged["connection"]["openvpn_args"] = self.settings.data["connection"]["openvpn_args"]
+                self.settings.data = merged
                 self.settings.save()
             self.split_changed()
             self.proxy.changed()

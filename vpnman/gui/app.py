@@ -2244,6 +2244,8 @@ class Application(Adw.Application):
             self.add_action(act)
             if accel:
                 self.set_accels_for_action("app." + name, [accel])
+        # Ctrl+W closes the window (the main one hides to the tray, the VPN and the tray icon stay); Ctrl+Q quits the app
+        self.set_accels_for_action("window.close", ["<primary>w"])
 
     @staticmethod
     def _version_on_disk():

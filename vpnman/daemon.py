@@ -16,11 +16,41 @@ from .profiles import ProfileError, public_view
 from .settings import Settings
 
 
+ADMIN_ONLY = ("events", "access", "connection.openvpn_args")       # settings that run programs as root, or decide who may
+
+
+def _check_admin(keys):
+    """Refuse a change of an admin-only setting from a caller who is not an administrator."""
+    if access.caller_is_admin():
+        return
+    for key in keys:
+        if any(key == k or key.startswith(k + ".") or k.startswith(key + ".") for k in ADMIN_ONLY):
+            raise ProfileError("only an administrator (root, or a member of wheel, sudo or admin) can change %s" % key)
+
+
+def _require_admin(what):
+    if not access.caller_is_admin():
+        raise ProfileError("only an administrator (root, or a member of wheel, sudo or admin) can %s" % what)
+
+
+def _tree_keys(tree, prefix=""):
+    """The settings a ``settings.update`` tree changes (its leaves: ``{"connection": {"timeout": 9}}`` -> connection.timeout)."""
+    for k, v in (tree or {}).items():
+        key = prefix + str(k)
+        if isinstance(v, dict) and v:
+            yield from _tree_keys(v, key + ".")
+        else:
+            yield key
+
+
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         mgr = self.server.manager
+        access.set_caller(None)
         if ipc.peercred_supported() and plat.is_root():
             uid = ipc.peer_uid(self.request)
+            if uid is not None:
+                access.set_caller(uid)
             if uid is None or not access.authorized(uid, mgr.settings):
                 mgr.log.add("warn", "Denied connection from uid %s" % uid)
                 try:
@@ -105,7 +135,7 @@ METHODS = {
     "profiles.add": lambda m, name, protocol, fields=None, options=None, files=None: m.add_profile(
         name, protocol, fields, options, files),
     "profiles.setfile": lambda m, ident, name, data: m.set_profile_file(ident, name, data),
-    "profiles.update": lambda m, ident, changes: public_view(m.store.update(ident, changes)),
+    "profiles.update": lambda m, ident, changes: m.update_profile(ident, changes),
     "profiles.remove": lambda m, ident: _remove_one(m, ident),
     "profiles.remove_many": lambda m, ids: m.remove_profiles(ids),
     "profiles.update_many": lambda m, ids, changes: m.update_profiles(ids, changes),
@@ -116,9 +146,9 @@ METHODS = {
     "netlock.enable": lambda m: m.netlock_enable(),
     "netlock.disable": lambda m: m.netlock_disable(),
     "settings.get": lambda m, key=None: _masked(m.settings.get(key), key),
-    "settings.set": lambda m, key, value: _changed(m, key, m.settings.set(key, value)),
-    "settings.update": lambda m, tree: (m.settings.update(tree), _changed(m, "dns" if "dns" in tree else "", None),
-                                        m.settings.get())[2],
+    "settings.set": lambda m, key, value: (_check_admin([key]), _changed(m, key, m.settings.set(key, value)))[1],
+    "settings.update": lambda m, tree: (_check_admin(list(_tree_keys(tree))), m.settings.update(tree),
+                                        _changed(m, "dns" if "dns" in tree else "", None), m.settings.get())[3],
     "split.status": lambda m: m.split_status(),
     "split.set": lambda m, apps=None, enabled=None, mode=None, dns=None: m.split_set(apps, enabled, mode, dns),
     "routes.set": lambda m, entries: m.routes_set(entries),
@@ -149,7 +179,7 @@ METHODS = {
     "network.trust": lambda m, name=None, trusted=True: m.network_trust(name, trusted),
     "network.rule": lambda m, network=None, server="", netproxy="", xray_proxy="":
         m.network_rule_set(network, server, netproxy, xray_proxy),
-    "backup.export": lambda m: m.backup_export(),
+    "backup.export": lambda m: (_require_admin("export a backup (it holds every password and key)"), m.backup_export())[1],
     "backup.import": lambda m, data, replace=False, restore_settings=None: m.backup_import(data, replace, restore_settings),
     "history": lambda m, limit=50: m.history.list(limit),
     "history.clear": lambda m: m.history.clear() or True,

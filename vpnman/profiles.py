@@ -134,6 +134,8 @@ class ProfileStore:
                 continue
             if k not in p and k != "failover":      # profiles saved before the field existed
                 raise ProfileError("unknown field: %s" % k)
+            if k == "config" and v:
+                v = safe_filename(v)                # a file of this profile, never a path to somewhere else
             p[k] = v
         return self.save(p)
 

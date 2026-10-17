@@ -42,6 +42,9 @@ class Backend:
     ready_re = None           # regex that marks the tunnel as established
     iface_fallback = False    # treat "a new interface appeared" as connected
     named_iface = False       # tool accepts a caller-chosen interface name (Linux only)
+    # untrusted profiles (added by a user who is not an administrator): config lines that would let the VPN program,
+    # which runs as root, start commands or read and write files outside the profile.  ``line -> bool`` or None.
+    restricted_line = None
     needs_credentials = False
     fields = ()               # extra profile fields the GUI/CLI should ask for
     lock_note = ""            # caveat shown when the kill switch is combined with this protocol

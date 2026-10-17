@@ -982,6 +982,14 @@ needed). On systems without a session manager any regular local user is allowed.
 trusted by \fBsession\fR mode. With \fBaccess.mode group\fR only root and group members may connect. Decisions are cached
 for a few seconds. The installer adds the user who ran \fBsudo\fR to the \fBvpnman\fR group.
 .PP
+Some things are for \fIadministrators\fR only - root and members of \fBwheel\fR, \fBsudo\fR or \fBadmin\fR - because they
+would let a user run programs as root or read every secret: changing \fBevents.*\fR, \fBconnection.openvpn_args\fR and
+\fBaccess.*\fR, and exporting a backup. Profiles that a user who is not an administrator imports, adds or edits are marked as
+such and connect without the lines of their configuration that run commands or touch files outside the profile (OpenVPN
+\fBup\fR, \fBdown\fR, \fBplugin\fR, \fBscript\-security\fR, \fBlog\fR, file options with paths...; WireGuard
+\fBPreUp\fR/\fBPostUp\fR/\fBPreDown\fR/\fBPostDown\fR; vpnc \fBScript\fR; strongSwan \fBupdown\fR) and without extra program
+arguments; the log names what was left out. Re\-import such a profile as an administrator to lift this.
+.PP
 Stored passwords never leave the daemon: clients only see whether a password exists.
 .SH INSTALLATION
 Install a package (\fB.deb\fR, \fB.rpm\fR, Arch \fB.pkg.tar.xz\fR, Void \fB.xbps\fR; recipes for Alpine and OpenBSD are

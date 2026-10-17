@@ -44,8 +44,11 @@ The daemon is the only privileged part. Packages and `install.sh` enable and sta
 stopped the GUI offers a **Start Service** button (admin password via polkit). On Linux every connection is
 authorized by the peer's uid: root, members of `vpnman`/`wheel`/`sudo`, and anyone with an **active local login
 session** may use the CLI/GUI - no group setup or re-login needed (`vpnman set access.mode group` restricts it to
-groups). On BSD the socket is `root:wheel 0660`. Anyone with access is effectively root (hooks and custom commands
-run as root). Pure Python 3.9+ standard library; the GUI additionally needs PyGObject,
+groups). On BSD the socket is `root:wheel 0660`. What would let someone run programs as root - event hooks, extra
+OpenVPN arguments, who may connect (`events.*`, `connection.openvpn_args`, `access.*`) - and exporting a backup (it holds
+every password and key) are for administrators only: root and members of `wheel`, `sudo` or `admin`. Profiles a
+non-administrator imports or edits connect without their script hooks (OpenVPN `up`/`plugin`/..., WireGuard
+`PostUp`/...) and extra program arguments. Pure Python 3.9+ standard library; the GUI additionally needs PyGObject,
 GTK 4 and libadwaita ≥ 1.4.
 
 ## Protocols

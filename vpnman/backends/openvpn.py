@@ -20,10 +20,32 @@ _WINDOWS_ONLY = {"register-dns", "dhcp-renew", "dhcp-release", "ip-win32", "tap-
                  "allow-nonadmin", "cryptoapicert", "cryptoapicertstore", "dhcp-pre-release",
                  "ip-remove-uses-dhcp", "tap-window", "block-outside-dns"}
 _HOOK_LINE = re.compile(r"^\s*(%s)\s+(.+?)\s*$" % "|".join(re.escape(h) for h in _HOOKS), re.I)
+# what an untrusted profile may not do: run scripts or plugins, change where OpenVPN looks for programs or writes files,
+# or point a file option outside the profile directory (``auth-user-pass /etc/shadow`` would send a root-only file to the
+# server, ``log /etc/...`` would overwrite it)
+_EXEC = ("up", "down", "route-up", "route-pre-down", "ipchange", "up-restart", "client-connect", "client-disconnect",
+         "tls-verify", "auth-user-pass-verify", "learn-address", "plugin", "script-security", "iproute", "config", "cd",
+         "chroot", "daemon", "log", "log-append", "writepid", "status", "management", "tmp-dir", "setenv", "setenv-safe",
+         "x509-track", "dev-node")
+_FILES = _EXEC + ("ca", "cert", "key", "dh", "pkcs12", "crl-verify", "tls-auth", "tls-crypt", "tls-crypt-v2", "secret",
+                  "extra-certs", "auth-user-pass", "askpass", "http-proxy-user-pass", "capath")
+
+
+def restricted(line):
+    st = line.strip()
+    if not st or st.startswith(("#", ";", "<", "</")):
+        return False
+    parts = st.split(None, 1)
+    word = parts[0].lower().lstrip("-")
+    arg = parts[1] if len(parts) > 1 else ""
+    return word in _EXEC or (word in _FILES and ("/" in arg or "\\" in arg))
+
+
 _REMOTE = re.compile(r"^\s*remote\s+(\S+)(?:\s+(\d+))?(?:\s+(udp6?|tcp6?(?:-client)?))?", re.M | re.I)
 
 
 class OpenVPN(Backend):
+    restricted_line = staticmethod(restricted)
     id = "openvpn"
     label = "OpenVPN"
     description = "OpenVPN (TLS, UDP/TCP) - .ovpn profiles"
@@ -208,6 +230,8 @@ class OpenVPN(Backend):
             cmd += ["--askpass", ctx.write("askpass", p["key_password"] + "\n")]
         cmd += [str(a) for a in ctx.settings.get("connection.openvpn_args")]
         cmd += [str(a) for a in p.get("options", {}).get("extra_args", [])]
+        if p.get("untrusted"):
+            cmd += ["--script-security", "1"]       # last word: no user-defined scripts, whatever the config says
         return cmd
 
     def parse_line(self, line, ctx):

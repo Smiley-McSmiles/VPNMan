@@ -38,6 +38,9 @@ def split_endpoint(ep):
 
 
 class WireGuard(Backend):
+    # wg-quick runs these lines as shell commands, as root
+    restricted_line = staticmethod(lambda line: bool(re.match(r"^\s*(PreUp|PostUp|PreDown|PostDown|SaveConfig)\s*=",
+                                                                line, re.I)))
     id = "wireguard"
     label = "WireGuard"
     description = "WireGuard (kernel or userspace) - wg-quick .conf files"
