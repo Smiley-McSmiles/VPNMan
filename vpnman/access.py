@@ -22,6 +22,7 @@ _cache = {}
 _lock = threading.Lock()
 TTL = 5.0
 ADMIN_GROUPS = {"wheel", "sudo", "admin"}         # members can become root anyway
+_admin_cache = {}
 _caller = threading.local()
 
 
@@ -29,7 +30,18 @@ def set_caller(uid):
     """The daemon calls this for every request (``None``: the platform cannot tell who connected; the socket's own
     permissions decide).  Everything the request does runs in this thread."""
     _caller.uid = uid
-    _caller.admin = uid is None or uid == 0 or bool(_groups_of(uid) & ADMIN_GROUPS)
+    if uid is None or uid == 0:
+        _caller.admin = True
+        return
+    now = time.time()
+    with _lock:
+        hit = _admin_cache.get(uid)
+    if hit and hit[0] > now:
+        _caller.admin = hit[1]
+        return
+    _caller.admin = bool(_groups_of(uid) & ADMIN_GROUPS)          # (the GUI asks every second: no group lookup each time)
+    with _lock:
+        _admin_cache[uid] = (now + TTL, _caller.admin)
 
 
 def caller_is_admin():
