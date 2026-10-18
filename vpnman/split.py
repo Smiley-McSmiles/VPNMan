@@ -463,6 +463,48 @@ class SplitTunnel:
         self.log("info", "App bypass: moved its routing rule ahead of the VPN's (priority %d -> %d)" % (old, new))
 
     # -- process handling
+    def processes(self, apps):
+        """The programs the bypass holds right now: [{"pid", "name", "app"}] - every process in our cgroup (children
+        included, they inherit it), each named after the listed app it belongs to (``apps``: [{name, match}])."""
+        path = self.path
+        if not self.active or not path:
+            return []
+        try:
+            with open(os.path.join(path, "cgroup.procs")) as fh:
+                pids = [int(x) for x in fh.read().split()]
+        except (OSError, ValueError):
+            return []
+        info = {}
+        for pid in pids:
+            st = _stat(self.proc, pid)
+            if st:
+                info[pid] = st
+        owner = {}
+
+        def app_of(pid, depth=0):
+            if pid in owner:
+                return owner[pid]
+            comm, ppid = info[pid]
+            names = _names_of(self.proc, pid, comm, _argv(self.proc, pid))
+            short = {n[:15] for n in names}
+            hit = next((a["name"] for a in apps if set(a.get("match", [])) & names
+                        or {m[:15] for m in a.get("match", [])} & short), None)
+            if hit is None and ppid in info and depth < 64:
+                hit = app_of(ppid, depth + 1)                  # a child (a browser's helper processes) of a listed app
+            owner[pid] = hit
+            return hit
+        return sorted(({"pid": pid, "name": info[pid][0], "app": app_of(pid) or "other"} for pid in info),
+                      key=lambda p: (p["app"], p["pid"]))
+
+    @staticmethod
+    def _describe(pids, proc="/proc", limit=6):
+        names = []
+        for pid in pids[:limit]:
+            st = _stat(proc, pid)
+            names.append("%s (%s)" % (st[0] if st else "?", pid))
+        more = len(pids) - limit
+        return ", ".join(names) + (" and %d more" % more if more > 0 else "")
+
     def _cgroup_of(self, pid):
         try:
             with open(os.path.join(self.proc, str(pid), "cgroup")) as fh:
@@ -500,12 +542,22 @@ class SplitTunnel:
             return
         if self._move(pid, path):
             self.moved.setdefault(pid, cur)
+            self.log("info", "App bypass: %s started and was moved out of the VPN" % self._describe([pid], self.proc))
+
+    def _prune(self, path):
+        """Forget the processes we moved that have exited (or left our cgroup), so `moved` counts live ones only."""
+        name = os.path.basename(path)
+        for pid in list(self.moved):
+            cur = self._cgroup_of(pid)
+            if cur is None or os.path.basename(cur) != name:
+                del self.moved[pid]
 
     def scan_once(self):
         names = self.names_fn()
         path = self.path
         if not path:
             return []
+        self._prune(path)
         added = []
         for pid in matching_pids(names, self.proc):
             cur = self._cgroup_of(pid)
@@ -515,7 +567,7 @@ class SplitTunnel:
                 self.moved.setdefault(pid, cur)
                 added.append(pid)
         if added:
-            self.log("debug", "App bypass: moved %d process(es) out of the VPN" % len(added))
+            self.log("info", "App bypass: moved out of the VPN: %s" % self._describe(sorted(added), self.proc))
         return added
 
     def _release(self):

@@ -23,7 +23,7 @@ from .caps_lock import attach_caps_lock_hint
 from .connpage import ConnectionsGroup
 from .files import choose_files, save_file
 from .keys import close_keys, restore_scroll
-from .pages import BypassPage, HistoryGroup, SchedulePage, TrafficGraph
+from .pages import BypassPage, bypass_details, HistoryGroup, SchedulePage, TrafficGraph
 from .proxypage import ProxyPage
 from .statusart import mode_for
 from .statusart import StatusArt
@@ -1473,8 +1473,42 @@ class MainWindow(Adw.ApplicationWindow):
         clear.connect("clicked", lambda *_: self.logbuf.set_text(""))
         bar.append(clear)
         box.append(bar)
+        # what is going on right now (the log below says how it got there): refreshed while this tab is shown
+        self.log_now = Gtk.Label(xalign=0, yalign=0, selectable=True, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR,
+                                 css_classes=["monospace"], margin_start=12, margin_end=12, margin_bottom=6)
+        self.log_now.set_text("…")
+        exp = Gtk.Expander(label="Right now", expanded=True, margin_start=12, margin_end=12)
+        exp.set_child(self.log_now)
+        box.append(exp)
+        box.append(Gtk.Separator())
         box.append(scroll)
         return box
+
+    def _update_log_now(self, split_st):
+        st = self.status or {}
+        lines = []
+        state = st.get("state", "disconnected")
+        if state == "connected":
+            lines.append("VPN          connected to %s (%s) through %s" % (st.get("profile"), st.get("protocol"),
+                                                                       st.get("iface") or "?"))
+            lines.append("VPN DNS      %s" % (", ".join(st.get("vpn_dns") or []) or "left unchanged"))
+        else:
+            lines.append("VPN          %s" % state.replace("disconnected", "not connected"))
+        lines.append("Kill switch  %s" % ("on" if (st.get("netlock") or {}).get("engaged") else "off"))
+        if st.get("proxy_up"):
+            lines.append("Proxy        %s" % (st.get("proxy_name") or "on"))
+        if st.get("hotspots"):
+            lines.append("Hotspot      %s" % ", ".join(st["hotspots"]))
+        if split_st.get("active"):
+            lines.append("App bypass   active (%s)" % ("only the listed apps use the VPN" if split_st.get("mode") == "include"
+                                                       else "the listed apps skip the VPN"))
+            for title, text in bypass_details(split_st):
+                lines.append("  %-11s %s" % (title, text))
+        elif split_st.get("apps"):
+            lines.append("App bypass   waiting for the VPN (%s)" % ", ".join(a["name"] for a in split_st["apps"]))
+        else:
+            lines.append("App bypass   no apps listed")
+        self.log_now.set_text("\n".join(lines))
 
     def _append_log(self, entries):
         for e in entries:
@@ -1826,6 +1860,10 @@ class MainWindow(Adw.ApplicationWindow):
             rpc("connections", self.conn_group.update, None, **self.conn_group.params())
             if self._ticks % 20 == 0:
                 self.conn_group.refresh_blocked()
+        elif page == "bypass" and self._ticks % 3 == 0:
+            rpc("split.status", self._on_split_status, None)        # the Status row shows what is bypassed right now
+        elif page == "log" and self._ticks % 2 == 0:
+            rpc("split.status", self._update_log_now, None)
         elif page == "servers" and self.srv_tabs.get_visible_child_name() == "proxy" and self._ticks % 3 == 0:
             rpc("proxy.status", self._on_proxy_status, None)
 

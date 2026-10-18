@@ -171,6 +171,36 @@ class App(A.Application):
         CALLS.clear()
         bp._add_address(bp.addr_entry)
         assert CALLS[-1][1]["entries"] == ["10.0.0.0/8", "nas.example.com", "printer.lan", "192.168.5.5"], CALLS
+        # ---- the Status row opens to show what is bypassed right now; the Log tab says the same
+        st = {"enabled": True, "supported": True, "reason": "", "active": True, "moved": 1, "mode": "exclude", "routes": ["10.0.0.0/8"],
+              "apps": [{"id": "f", "name": "Firefox", "match": ["firefox"], "icon": ""},
+                       {"id": "s", "name": "Steam", "match": ["steam"], "icon": ""}],
+              "processes": [{"pid": 1234, "name": "firefox", "app": "Firefox"},
+                            {"pid": 1240, "name": "Socket Process", "app": "Firefox"}],
+              "route": {"gateway": "192.168.1.1", "device": "eno1"}, "dns": ["9.9.9.9"], "dns_now": ["9.9.9.9"],
+              "dns_nss": True, "dns_original": ["192.168.1.1"]}
+        bp.update(st)
+        assert isinstance(bp.status, A.Adw.ExpanderRow) and "2 processes" in bp.status.get_subtitle(), bp.status.get_subtitle()
+        rows = {r.get_title(): r.get_subtitle() for r in bp._detail_rows}
+        assert rows["Firefox"] == "firefox (1234), Socket Process (1240)" and rows["Steam"] == "not running", rows
+        assert rows["Way out"] == "eno1 via 192.168.1.1" and "9.9.9.9" in rows["DNS"] and "stub" in rows["DNS"], rows
+        assert rows["Addresses"] == "10.0.0.0/8"
+        first = bp._detail_rows[0]
+        bp.update(st)
+        assert bp._detail_rows[0] is first, "an unchanged state keeps the rows (an open list does not jump)"
+        saved_status = w.status
+        w.status = {"state": "connected", "profile": "Toronto", "protocol": "openvpn", "iface": "tun0", "vpn_dns": ["10.8.0.1"],
+                    "netlock": {"engaged": True}, "proxy_up": False, "hotspots": []}
+        w._update_log_now(st)
+        now = w.log_now.get_text()
+        for want in ("connected to Toronto", "VPN DNS      10.8.0.1", "Kill switch  on", "firefox (1234)", "eno1 via 192.168.1.1"):
+            assert want in now, (want, now)
+        w._update_log_now(dict(st, active=False))
+        assert "waiting for the VPN (Firefox, Steam)" in w.log_now.get_text()
+        w.status = saved_status
+        st["active"] = False
+        bp.update(st)
+        assert [r.get_title() for r in bp._detail_rows] == ["Nothing to show"]
         # ---- the DNS of the apps that skip the VPN: in the Apps tab only
         st = {"enabled": True, "supported": True, "reason": "", "active": False, "moved": 0, "apps": [], "mode": "exclude",
               "routes": [], "dns": ["9.9.9.9", "149.112.112.112"], "dns_original": ["192.168.1.1"]}

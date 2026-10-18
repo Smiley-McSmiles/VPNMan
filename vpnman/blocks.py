@@ -266,6 +266,7 @@ class AppBlocker(split.SplitTunnel):
         path = self.path
         if not path:
             return []
+        self._prune(path)
         added = []
         for pid in split.matching_pids(self.names_fn(), self.proc):
             cur = self._cgroup_of(pid)

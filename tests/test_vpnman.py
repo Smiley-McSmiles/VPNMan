@@ -3075,6 +3075,43 @@ class HotspotTests(unittest.TestCase):
             self.skipTest("network namespaces are not allowed here")
         self.assertIn("DNSFWD-OK", r.stdout, (r.stdout + r.stderr)[-3000:])
 
+    def test_bypass_lists_its_processes_by_app(self):
+        from vpnman import split as sp
+        d = tempfile.mkdtemp()
+        proc, root = os.path.join(d, "proc"), os.path.join(d, "cg")
+        for pid, comm, ppid, argv in ((100, "firefox", 1, "/usr/lib64/firefox/firefox"), (101, "Socket Process", 100, ""),
+                                      (102, "Web Content", 100, ""), (300, "steam", 1, "steam"), (400, "bash", 1, "bash")):
+            os.makedirs(os.path.join(proc, str(pid)))
+            with open(os.path.join(proc, str(pid), "stat"), "w") as fh:
+                fh.write("%d (%s) S %d 0 0" % (pid, comm, ppid))
+            with open(os.path.join(proc, str(pid), "cmdline"), "w") as fh:
+                fh.write(argv.replace(" ", "\0"))
+        os.makedirs(os.path.join(root, sp.CGROUP))
+        with open(os.path.join(root, sp.CGROUP, "cgroup.procs"), "w") as fh:
+            fh.write("100\n101\n102\n300\n")
+        t = sp.SplitTunnel(lambda: [], proc=proc, root=root)
+        self.assertEqual(t.processes([{"name": "Firefox", "match": ["firefox"]}]), [])        # not running: nothing
+        t.active = True
+        got = t.processes([{"name": "Firefox", "match": ["firefox"]}, {"name": "Steam", "match": ["steam"]}])
+        self.assertEqual([(p["app"], p["pid"], p["name"]) for p in got],
+                         [("Firefox", 100, "firefox"), ("Firefox", 101, "Socket Process"), ("Firefox", 102, "Web Content"),
+                          ("Steam", 300, "steam")])
+        self.assertEqual(t._describe([100, 101], proc), "firefox (100), Socket Process (101)")
+
+    def test_bypass_forgets_processes_that_exited(self):
+        from vpnman import split as sp
+        d = tempfile.mkdtemp()
+        proc, root = os.path.join(d, "proc"), os.path.join(d, "cg")
+        for pid, cg in ((100, "/" + sp.CGROUP), (200, "/user.slice")):
+            os.makedirs(os.path.join(proc, str(pid)))
+            with open(os.path.join(proc, str(pid), "cgroup"), "w") as fh:
+                fh.write("0::%s\n" % cg)
+        os.makedirs(os.path.join(root, sp.CGROUP))
+        t = sp.SplitTunnel(lambda: [], proc=proc, root=root)
+        t.moved = {100: "/user.slice", 200: "/user.slice", 300: "/user.slice"}   # 200 left our cgroup, 300 exited
+        t.scan_once()
+        self.assertEqual(list(t.moved), [100], "only processes still in the bypass are counted")
+
     def test_exec_events_are_parsed_and_seen_live(self):
         import struct
         import subprocess
