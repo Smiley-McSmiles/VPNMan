@@ -3098,6 +3098,20 @@ class HotspotTests(unittest.TestCase):
                           ("Steam", 300, "steam")])
         self.assertEqual(t._describe([100, 101], proc), "firefox (100), Socket Process (101)")
 
+    def test_bypass_forgets_processes_that_exited(self):
+        from vpnman import split as sp
+        d = tempfile.mkdtemp()
+        proc, root = os.path.join(d, "proc"), os.path.join(d, "cg")
+        for pid, cg in ((100, "/" + sp.CGROUP), (200, "/user.slice")):
+            os.makedirs(os.path.join(proc, str(pid)))
+            with open(os.path.join(proc, str(pid), "cgroup"), "w") as fh:
+                fh.write("0::%s\n" % cg)
+        os.makedirs(os.path.join(root, sp.CGROUP))
+        t = sp.SplitTunnel(lambda: [], proc=proc, root=root)
+        t.moved = {100: "/user.slice", 200: "/user.slice", 300: "/user.slice"}   # 200 left our cgroup, 300 exited
+        t.scan_once()
+        self.assertEqual(list(t.moved), [100], "only processes still in the bypass are counted")
+
     def test_exec_events_are_parsed_and_seen_live(self):
         import struct
         import subprocess

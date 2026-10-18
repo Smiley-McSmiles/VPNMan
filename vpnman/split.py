@@ -544,11 +544,20 @@ class SplitTunnel:
             self.moved.setdefault(pid, cur)
             self.log("info", "App bypass: %s started and was moved out of the VPN" % self._describe([pid], self.proc))
 
+    def _prune(self, path):
+        """Forget the processes we moved that have exited (or left our cgroup), so `moved` counts live ones only."""
+        name = os.path.basename(path)
+        for pid in list(self.moved):
+            cur = self._cgroup_of(pid)
+            if cur is None or os.path.basename(cur) != name:
+                del self.moved[pid]
+
     def scan_once(self):
         names = self.names_fn()
         path = self.path
         if not path:
             return []
+        self._prune(path)
         added = []
         for pid in matching_pids(names, self.proc):
             cur = self._cgroup_of(pid)

@@ -467,7 +467,7 @@ class BypassPage(Adw.PreferencesPage):
         if not st["supported"]:
             self.status.set_subtitle(GLib.markup_escape_text("Unavailable: " + st["reason"]))
         elif st["active"]:
-            n = len(st.get("processes") or []) or st.get("moved", 0)
+            n = len(st["processes"]) if "processes" in st else st.get("moved", 0)
             self.status.set_subtitle("Active - %d process%s bypassing the VPN" % (n, "" if n == 1 else "es"))
         else:
             self.status.set_subtitle("Applies as soon as the VPN is connected")
