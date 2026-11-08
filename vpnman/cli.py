@@ -1498,16 +1498,54 @@ def _flatten(tree, prefix=""):
             yield prefix + k, v
 
 
+def _autoconnect_options(profiles):
+    """off / last / fastest / one row per profile, for the boot-time connect picker."""
+    rows = [{"name": "Off", "value": "off"},
+            {"name": "Last used server", "value": "last"},
+            {"name": "Fastest server", "value": "fastest"}]
+    for prof in profiles:
+        rows.append({"name": "%s (%s)" % (prof["name"], prof["protocol"]), "value": prof["id"]})
+    return rows
+
+
+def _autoconnect_label(value, rows):
+    for row in rows:
+        if row["value"] == value:
+            return row["name"]
+    if str(value).lower() in ("on", "true", "yes", "1"):     # what older releases stored
+        return "Last used server"
+    return str(value) or "off"
+
+
+def _autoconnect_menu(cli) -> None:
+    profiles = cli.call("profiles.list") or []
+    rows = _autoconnect_options(profiles)
+    current = cli.call("settings.get", key="connection.autoconnect")
+    print("Connect at system start: %s" % cyan(_autoconnect_label(current, rows)))
+    choice = pick(rows, "Connect at start", lambda r: r["name"])
+    if not choice:
+        return
+    try:
+        cli.call("settings.set", key="connection.autoconnect", value=choice["value"])
+        print(green("Saved: %s" % choice["name"]))
+    except RpcError as e:
+        print(red(str(e)))
+
+
 def _settings_menu(cli):
     items = [{"name": k, "value": v} for k, v in _flatten(cli.call("settings.get")) if k != "routes"]
     p = pick(items, "Change setting", lambda i: "%-32s %s" % (i["name"], cyan(json.dumps(i["value"]))))
-    if p:
-        new = ask("New value for %s" % p["name"], json.dumps(p["value"]) if not isinstance(p["value"], str) else p["value"])
-        try:
-            cli.call("settings.set", key=p["name"], value=new)
-            print(green("Saved."))
-        except RpcError as e:
-            print(red(str(e)))
+    if not p:
+        return
+    if p["name"] == "connection.autoconnect":
+        _autoconnect_menu(cli)
+        return
+    new = ask("New value for %s" % p["name"], json.dumps(p["value"]) if not isinstance(p["value"], str) else p["value"])
+    try:
+        cli.call("settings.set", key=p["name"], value=new)
+        print(green("Saved."))
+    except RpcError as e:
+        print(red(str(e)))
 
 
 # ----------------------------------------------------------------------- parser
