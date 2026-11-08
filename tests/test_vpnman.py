@@ -219,6 +219,15 @@ class AutostartTests(unittest.TestCase):
         self.assertFalse(autostart.is_enabled())
         autostart.disable()   # idempotent
 
+    def test_autoconnect_on_means_last_server(self):
+        from vpnman.manager import normalise_autoconnect
+        for value in ("on", "ON", "true", "yes", "1", "enabled", " on "):
+            self.assertEqual("last", normalise_autoconnect(value))
+        for value in ("off", "none", "no", "false", "0", "", None, "disabled"):
+            self.assertEqual("off", normalise_autoconnect(value))
+        self.assertEqual("fastest", normalise_autoconnect("fastest"))
+        self.assertEqual("abc123", normalise_autoconnect("abc123"))
+
     def test_boot_autoconnect_waits_for_network(self):
         from vpnman import platform as plat
         fake = TMP + "/bin/openvpn"

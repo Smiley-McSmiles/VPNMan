@@ -355,6 +355,8 @@ class Cli:
             t = a.target.lower()
             if t in ("off", "none", "no"):
                 val = "off"
+            elif t in ("on", "yes", "true"):      # "on" used to be stored verbatim, which the daemon
+                val = "last"                      # then tried to use as a profile name
             elif t in ("last", "fastest"):
                 val = t
             else:

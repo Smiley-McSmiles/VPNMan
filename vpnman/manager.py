@@ -91,6 +91,23 @@ def resolve_host(host, cache):
     return cache.get(host, [])
 
 
+# "on" is what the GUI toggle and older CLIs wrote; the daemon wants a selector, so
+# treat the truthy spellings as "last used server" instead of a profile called "on".
+_AUTOCONNECT_ON = {"on", "true", "yes", "1", "enabled"}
+_AUTOCONNECT_OFF = {"", "off", "none", "no", "false", "0", "disabled"}
+
+
+def normalise_autoconnect(value) -> str:
+    """Turn the stored setting into off | last | fastest | <profile id or name>."""
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if lowered in _AUTOCONNECT_OFF:
+        return "off"
+    if lowered in _AUTOCONNECT_ON:
+        return "last"
+    return text
+
+
 class Manager:
     def __init__(self, store=None, settings=None):
         self.store = store or ProfileStore()
@@ -332,12 +349,15 @@ class Manager:
             if stale:
                 self.log.add("warn", "Removed a stale network lock left by a previous run (%s)" % ", ".join(stale))
         self.proxy.sync()
-        auto = self.settings.get("connection.autoconnect")
-        if auto and auto != "off":
+        auto = normalise_autoconnect(self.settings.get("connection.autoconnect"))
+        if auto != "off":
             self._autoconnect(auto)
 
     def _autoconnect(self, auto):
         """Boot-time connect: wait for a network, then keep retrying until it works."""
+        auto = normalise_autoconnect(auto)
+        if auto == "off":
+            return
         end = time.time() + self.settings.get("connection.autoconnect_wait")
         if not plat.default_gateway()[0]:
             self.log.add("info", "Auto-connect: waiting for a network connection")
