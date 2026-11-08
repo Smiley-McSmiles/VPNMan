@@ -23,6 +23,7 @@
           <li>Apps tab: click Status to see which apps and processes are bypassing the VPN, their way out, DNS and addresses</li>
           <li>Log tab: new "Right now" summary with VPN, VPN DNS, kill switch, proxy, hotspot and app bypass details</li>
           <li>App bypass moves are logged with process names</li>
+          <li>Auto-connect at system start works when the setting was stored as "on" (it was read as a profile name and failed)</li>
         </ul>
       </description>
     </release>
