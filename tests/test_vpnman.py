@@ -219,6 +219,16 @@ class AutostartTests(unittest.TestCase):
         self.assertFalse(autostart.is_enabled())
         autostart.disable()   # idempotent
 
+    def test_autoconnect_picker_rows(self):
+        from vpnman.cli import _autoconnect_label, _autoconnect_options
+        rows = _autoconnect_options([{"id": "abc", "name": "Work", "protocol": "openvpn"}])
+        self.assertEqual(["off", "last", "fastest", "abc"], [r["value"] for r in rows])
+        self.assertEqual("Work (openvpn)", rows[3]["name"])
+        self.assertEqual("Fastest server", _autoconnect_label("fastest", rows))
+        self.assertEqual("Last used server", _autoconnect_label("on", rows))
+        self.assertEqual("Work (openvpn)", _autoconnect_label("abc", rows))
+        self.assertEqual("off", _autoconnect_label("", rows))
+
     def test_autoconnect_on_means_last_server(self):
         from vpnman.manager import normalise_autoconnect
         for value in ("on", "ON", "true", "yes", "1", "enabled", " on "):
