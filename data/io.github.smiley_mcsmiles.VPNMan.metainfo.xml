@@ -17,6 +17,13 @@
   <url type="homepage">https://github.com/Smiley-McSmiles/VPNMan</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.1.4" date="2026-11-19">
+      <description>
+        <ul>
+          <li>Security, leak, and stability fixes across daemon/IPC, VPN backends, proxy/split-tunneling, CLI/backup, and GTK4 GUI; improve AirVPN OpenVPN compatibility</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.3" date="2026-11-07">
       <description>
         <ul>

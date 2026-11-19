@@ -1059,7 +1059,8 @@ class LeakTestTests(unittest.TestCase):
         self.assertEqual(lt.ipv6_check("tun0", lambda a: None, lambda: False, False, False)["status"], "ok")
         self.assertEqual(lt.ipv6_check("tun0", lambda a: "tun0", lambda: False, False, False)["status"], "ok")
         self.assertEqual(lt.ipv6_check("tun0", lambda a: "eth0", lambda: True, False, False)["status"], "fail")
-        self.assertEqual(lt.ipv6_check("tun0", lambda a: "eth0", lambda: True, True, True)["status"], "ok")
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: "eth0", lambda: True, True, True)["status"], "fail")
+        self.assertEqual(lt.ipv6_check("tun0", lambda a: "eth0", lambda: False, True, True)["status"], "ok")
         self.assertEqual(lt.ipv6_check("tun0", lambda a: "eth0", lambda: False, False, False)["status"], "warn")
 
     def test_kill_switch_decisions(self):
