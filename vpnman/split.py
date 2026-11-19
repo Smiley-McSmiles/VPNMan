@@ -79,7 +79,9 @@ def ruleset(dns=(), mark=MARK, mode="exclude", fwd_port=0):
             lines.append("    %s %s dport 53 ip daddr != 127.0.0.0/8 ip daddr != %s dnat ip to %s"
                          % (sel, proto, target, target))
         lines.append("  }")
-    lines += ["  chain bypass_post {", "    type nat hook postrouting priority 100; policy accept;",
+    lines += ["  chain bypass_guard {", "    type filter hook output priority -95; policy accept;",
+              "    meta mark 0x%x meta nfproto ipv6 drop" % mark, "  }",
+              "  chain bypass_post {", "    type nat hook postrouting priority 100; policy accept;",
               '    meta mark 0x%x oifname != "lo" masquerade' % mark, "  }", "}"]
     return "\n".join(lines) + "\n"
 
@@ -232,12 +234,18 @@ class ExecWatcher:
         self._stop = threading.Event()
 
     def start(self):
+        s = None
         try:
             s = socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, 11)               # NETLINK_CONNECTOR
             s.bind((os.getpid(), 1))                                                  # CN_IDX_PROC
             body = struct.pack("=IIIIHH", 1, 1, 0, 0, 4, 0) + struct.pack("=I", 1)    # PROC_CN_MCAST_LISTEN
             s.send(struct.pack("=IHHII", 16 + len(body), 3, 0, 0, os.getpid()) + body)
         except OSError:
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
             return False
         s.settimeout(0.5)
         self._sock = s
@@ -308,8 +316,11 @@ def cleanup():
                 with open(os.path.join(root, name, "cgroup.procs")) as fh:
                     pids = fh.read().split()
                 for pid in pids:
-                    with open(os.path.join(root, "cgroup.procs"), "w") as out:
-                        out.write(pid)
+                    try:
+                        with open(os.path.join(root, "cgroup.procs"), "w") as out:
+                            out.write(pid)
+                    except ProcessLookupError:
+                        continue
                 os.rmdir(os.path.join(root, name))
             except OSError:
                 pass
@@ -340,6 +351,7 @@ class SplitTunnel:
         self._stop = threading.Event()
         self._thread = None
         self._lock = threading.Lock()
+        self._moved_lock = threading.RLock()
         self._rules = False
         self._fwd = None
         self._exec = None
@@ -537,35 +549,41 @@ class SplitTunnel:
         wanted = {w for w in names if w}
         if not (found & wanted or {n[:15] for n in found} & {w[:15] for w in wanted}):
             return
-        cur = self._cgroup_of(pid)
-        if cur is None or outranked(cur, cgroup_name(self.mode)):
-            return
-        if self._move(pid, path):
-            self.moved.setdefault(pid, cur)
-            self.log("info", "App bypass: %s started and was moved out of the VPN" % self._describe([pid], self.proc))
+        with self._moved_lock:
+            if not self.active:
+                return
+            cur = self._cgroup_of(pid)
+            if cur is None or outranked(cur, cgroup_name(self.mode)):
+                return
+            if self._move(pid, path):
+                self.moved.setdefault(pid, cur)
+                self.log("info", "App bypass: %s started and was moved out of the VPN" % self._describe([pid], self.proc))
 
     def _prune(self, path):
         """Forget the processes we moved that have exited (or left our cgroup), so `moved` counts live ones only."""
         name = os.path.basename(path)
-        for pid in list(self.moved):
-            cur = self._cgroup_of(pid)
-            if cur is None or os.path.basename(cur) != name:
-                del self.moved[pid]
+        with self._moved_lock:
+            for pid in list(self.moved):
+                cur = self._cgroup_of(pid)
+                if cur is None or os.path.basename(cur) != name:
+                    del self.moved[pid]
 
     def scan_once(self):
         names = self.names_fn()
         path = self.path
         if not path:
             return []
-        self._prune(path)
+        pids = matching_pids(names, self.proc)
         added = []
-        for pid in matching_pids(names, self.proc):
-            cur = self._cgroup_of(pid)
-            if cur is None or outranked(cur, cgroup_name(self.mode)):
-                continue
-            if self._move(pid, path):
-                self.moved.setdefault(pid, cur)
-                added.append(pid)
+        with self._moved_lock:
+            self._prune(path)
+            for pid in pids:
+                cur = self._cgroup_of(pid)
+                if cur is None or outranked(cur, cgroup_name(self.mode)):
+                    continue
+                if self._move(pid, path):
+                    self.moved.setdefault(pid, cur)
+                    added.append(pid)
         if added:
             self.log("info", "App bypass: moved out of the VPN: %s" % self._describe(sorted(added), self.proc))
         return added
@@ -573,12 +591,13 @@ class SplitTunnel:
     def _release(self):
         """Put every process we moved back where it came from."""
         root = self.root or cgroup_root()
-        for pid, orig in list(self.moved.items()):
-            if root and self._cgroup_of(pid):
-                dest = os.path.join(root, orig.lstrip("/"))
-                if not os.path.isdir(dest) or not self._move(pid, dest):
-                    self._move(pid, root)
-        self.moved.clear()
+        with self._moved_lock:
+            for pid, orig in list(self.moved.items()):
+                if root and self._cgroup_of(pid):
+                    dest = os.path.join(root, orig.lstrip("/"))
+                    if not os.path.isdir(dest) or not self._move(pid, dest):
+                        self._move(pid, root)
+            self.moved.clear()
         # children forked since the last scan are still in our cgroup: hand them to the root cgroup
         path = self.path
         if path and root:

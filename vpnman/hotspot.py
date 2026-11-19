@@ -23,6 +23,7 @@ from . import paths
 from . import platform as plat
 
 _ADDR = re.compile(r"^\d+:\s+(\S+?)(?:@\S+)?\s+inet\s+(\S+)")
+_IFACE = re.compile(r"^[A-Za-z0-9_.-]{1,15}\Z")
 
 
 def _private(net):
@@ -114,6 +115,8 @@ def _state_file():
 
 
 def _sysctl(dev):
+    if not isinstance(dev, str) or not _IFACE.match(dev):
+        raise ValueError("invalid interface name: %r" % (dev,))
     return "/proc/sys/net/ipv4/conf/%s/route_localnet" % dev
 
 
@@ -178,7 +181,7 @@ def _attrs(data):
     pos = 0
     while pos + 4 <= len(data):
         ln, typ = struct.unpack_from("=HH", data, pos)
-        if ln < 4:
+        if ln < 4 or pos + ln > len(data):
             break
         yield typ & 0x3FFF, data[pos:pos + ln], data[pos + 4:pos + ln]
         pos += (ln + 3) & ~3
@@ -205,7 +208,7 @@ def _entries(sock, seq=1):
         pos = 0
         while pos + 16 <= len(data):
             ln, typ = struct.unpack_from("=IH", data, pos)
-            if ln < 16:
+            if ln < 16 or pos + ln > len(data):
                 return found
             if typ == NLMSG_DONE:
                 return found

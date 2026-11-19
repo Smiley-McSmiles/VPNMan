@@ -18,9 +18,14 @@ from . import platform as plat
 
 NFT_TABLE = "vpnman_share"
 LAN4 = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+_IFACE = re.compile(r"^[A-Za-z0-9_.-]{1,15}\Z")
 
 
 def ruleset(ifaces):
+    ifaces = list(ifaces)
+    for i in ifaces:
+        if not isinstance(i, str) or not _IFACE.match(i):
+            raise ValueError("invalid interface name: %r" % (i,))
     ifs = ", ".join('"%s"' % i for i in sorted(ifaces))
     return "\n".join([
         "table inet %s" % NFT_TABLE, "delete table inet %s" % NFT_TABLE, "table inet %s {" % NFT_TABLE,
@@ -32,7 +37,6 @@ def ruleset(ifaces):
         "  }", "}"]) + "\n"
 
 
-_IFACE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,15}$")
 _was = {}                  # interface -> the forwarding value it had before
 
 

@@ -266,15 +266,17 @@ class AppBlocker(split.SplitTunnel):
         path = self.path
         if not path:
             return []
-        self._prune(path)
+        pids = split.matching_pids(self.names_fn(), self.proc)
         added = []
-        for pid in split.matching_pids(self.names_fn(), self.proc):
-            cur = self._cgroup_of(pid)
-            if cur is None or split.outranked(cur, self.cgroup):
-                continue
-            if self._move(pid, path):
-                self.moved.setdefault(pid, cur)
-                added.append(pid)
+        with self._moved_lock:
+            self._prune(path)
+            for pid in pids:
+                cur = self._cgroup_of(pid)
+                if cur is None or split.outranked(cur, self.cgroup):
+                    continue
+                if self._move(pid, path):
+                    self.moved.setdefault(pid, cur)
+                    added.append(pid)
         return added
 
     def _loop(self, stop):
@@ -306,8 +308,11 @@ def cleanup():
             with open(os.path.join(root, name, "cgroup.procs")) as fh:
                 pids = fh.read().split()
             for pid in pids:
-                with open(os.path.join(root, "cgroup.procs"), "w") as out:
-                    out.write(pid)
+                try:
+                    with open(os.path.join(root, "cgroup.procs"), "w") as out:
+                        out.write(pid)
+                except ProcessLookupError:
+                    continue
             os.rmdir(os.path.join(root, name))
             removed = True
         except OSError:

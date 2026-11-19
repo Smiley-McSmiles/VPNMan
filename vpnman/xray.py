@@ -22,6 +22,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import warnings
 
 from . import platform as plat
 
@@ -37,6 +38,9 @@ def fetch(url, timeout=15):
     """Download a subscription (as whoever calls it: the CLI or the app, never the daemon).  At most 5 MiB."""
     import urllib.request
     from . import __version__
+    scheme = urllib.parse.urlsplit(url or "").scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ProxyError("subscription URL must use http:// or https://")
     req = urllib.request.Request(url, headers={"User-Agent": "vpnman/%s" % __version__})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read(5 << 20).decode("utf-8", "replace")
@@ -98,7 +102,7 @@ def _host(value):
     return value
 
 
-def stream_settings(net, security, q, host):
+def stream_settings(net, security, q, host, allow_insecure=False):
     """The ``streamSettings`` object for the transport (``net``) and security of a link; ``q`` holds the query-style
     parameters (path, host, sni, fp, alpn, pbk, sid, spx, serviceName, mode, headerType, seed, allowInsecure)."""
     net = {"h2": "http", "mkcp": "kcp", "splithttp": "xhttp", "": "tcp", "raw": "tcp"}.get(net, net)
@@ -131,8 +135,12 @@ def stream_settings(net, security, q, host):
             tls["fingerprint"] = fp
         if _first(q, "alpn"):
             tls["alpn"] = [a for a in _first(q, "alpn").split(",") if a]
-        if _first(q, "allowInsecure", "insecure") in ("1", "true"):
-            tls["allowInsecure"] = True
+        if _first(q, "allowInsecure", "insecure").lower() in ("1", "true"):
+            if allow_insecure:
+                tls["allowInsecure"] = True
+            else:
+                warnings.warn("share link requested allowInsecure=True; ignoring it unless explicitly allowed",
+                              UserWarning, stacklevel=2)
         st["tlsSettings"] = tls
     elif st["security"] == "reality":
         if not _first(q, "pbk", "publicKey"):
@@ -485,8 +493,9 @@ def netproxy_config(upstreams, *, redirect, dns, mark=None, dns_server="1.1.1.1"
         if kind in upstreams:
             rules.append({"type": "field", "inboundTag": ["redirect-in"], "port": port, "outboundTag": "up-" + kind})
     rules.append({"type": "field", "inboundTag": ["redirect-in"], "outboundTag": fallback})
+    dns_host = "[%s]" % dns_server if ":" in dns_server and not dns_server.startswith("[") else dns_server
     return {"log": {"loglevel": loglevel},
-            "dns": {"servers": ["tcp://%s:53" % dns_server], "queryStrategy": "UseIPv4", "tag": "dns-internal"},
+            "dns": {"servers": ["tcp://%s:53" % dns_host], "queryStrategy": "UseIPv4", "tag": "dns-internal"},
             "inbounds": inbounds, "outbounds": outbounds,
             "routing": {"domainStrategy": "AsIs", "rules": rules}}
 
@@ -519,9 +528,9 @@ def redirect_ruleset(tcp_port, dns_port, *, exclude=(), allow_lan=True, split_ma
         lines.append("    meta mark %s return" % m)
     if skip_cgroup:
         lines.append('    socket cgroupv2 level 1 "%s" return' % skip_cgroup)
-    lines += ["    ip daddr { %s } return" % ", ".join(skip),
-              "    meta nfproto ipv4 udp dport 53 redirect to :%d" % dns_port,
+    lines += ["    meta nfproto ipv4 udp dport 53 redirect to :%d" % dns_port,
               "    meta nfproto ipv4 tcp dport 53 redirect to :%d" % dns_port,
+              "    ip daddr { %s } return" % ", ".join(skip),
               "    meta nfproto ipv4 meta l4proto tcp redirect to :%d" % tcp_port,
               "  }",
               "  chain guard_out {",
@@ -553,9 +562,9 @@ def redirect_ruleset(tcp_port, dns_port, *, exclude=(), allow_lan=True, split_ma
             "    type nat hook prerouting priority -110; policy accept;",
             "    iifname != { %s } return" % hs,
             "    fib daddr type local return",                # the hotspot's own DNS / DHCP
-            "    ip daddr { %s } return" % ", ".join(skip),
             "    meta nfproto ipv4 udp dport 53 dnat ip to 127.0.0.1:%d" % dns_port,
             "    meta nfproto ipv4 tcp dport 53 dnat ip to 127.0.0.1:%d" % dns_port,
+            "    ip daddr { %s } return" % ", ".join(skip),
             "    meta nfproto ipv4 meta l4proto tcp dnat ip to 127.0.0.1:%d" % tcp_port,
             "  }",
             "  chain guard_fwd {",
@@ -703,7 +712,12 @@ class Runner:
         end = time.time() + timeout
         while True:
             if self.proc.poll() is not None:
+                proc = self.proc
                 self._reader.join(2)
+                try:
+                    proc.stdout.close()
+                except (OSError, ValueError, AttributeError):
+                    pass
                 tail = "; ".join(self._tail[-3:])
                 self.proc = None
                 raise ProxyError("xray exited immediately%s" % (": " + tail if tail else ""))

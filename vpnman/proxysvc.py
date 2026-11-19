@@ -90,6 +90,7 @@ class ProxyService:
         self.ports = {}
         self._fw_on = False
         self._rules = None       # builds the redirect ruleset for a list of hotspot interfaces
+        self._hs = ()
         self._routes = []
         self.server_ip = ""
         self.probe = connect_ms       # replaced in tests
@@ -295,13 +296,14 @@ class ProxyService:
                 import time
                 self.m.log.add("warn", "Proxy %s: %s - switching to %s" % (cur["name"], reason, p["name"]))
                 self.last_failover = {"from": cur["name"], "to": p["name"], "reason": reason, "at": int(time.time())}
-                self._fails, self._deaths = 0, []
+                with self.lock:
+                    self._fails, self._deaths = 0, []
                 self.m.settings.update({"proxy": {"selected": p["id"]}})
                 self.changed()
                 return _view(p)
         self.m.log.add("error", "Proxy %s: %s, and no other proxy answers" % (cur["name"], reason))
-        self._fails = 0
         with self.lock:
+            self._fails = 0
             if self.owner == "local" and not self.runner.alive():
                 self.key = None
                 self.sync()
@@ -513,8 +515,14 @@ class ProxyService:
 
     def _apply_rules(self):
         hs = sorted(self.m.hotspots)
+        prev = self._hs if self._fw_on else ()
         hotspot.route_localnet(hs)
-        xray.apply_ruleset(self._rules(hs))
+        try:
+            xray.apply_ruleset(self._rules(hs))
+        except xray.ProxyError:
+            hotspot.route_localnet(prev)
+            raise
+        self._hs = tuple(hs)
 
     def hotspots_changed(self):
         """A hotspot appeared or went away: redirect (or stop redirecting) its devices; the proxy keeps running."""
@@ -549,6 +557,7 @@ class ProxyService:
                     skip_cgroup=blocks.NOPROXY_CGROUP if self.exempt.active else ""))
                 self._fw_on = True
                 self._rules = None
+                self._hs = ()
                 hotspot.route_localnet(())
                 self._flush_hotspots()                 # what the devices behind a hotspot have open must stop, too
                 self.net_blocked = True
@@ -559,6 +568,7 @@ class ProxyService:
             xray.remove_ruleset()
             self._fw_on = False
             self._rules = None
+            self._hs = ()
             hotspot.route_localnet(())
             self._flush_hotspots()
         if not block:
@@ -603,11 +613,14 @@ class ProxyService:
             if not (p and ip):
                 return
             if self.probe(ip, p["port"]) is not None:
-                self._fails = 0
+                with self.lock:
+                    self._fails = 0
                 return
-            self._fails += 1
-            if self._fails < HEALTH_FAILS:
-                self.m.log.add("debug", "Proxy %s did not answer (%d/%d)" % (p["name"], self._fails, HEALTH_FAILS))
+            with self.lock:
+                self._fails += 1
+                fails = self._fails
+            if fails < HEALTH_FAILS:
+                self.m.log.add("debug", "Proxy %s did not answer (%d/%d)" % (p["name"], fails, HEALTH_FAILS))
                 return
             reason = "the server stopped answering"
         self.fail_over(reason)
@@ -823,7 +836,8 @@ class ProxyService:
             rc, out = plat.run(["ip", "route", "replace", ips[0] + "/32", "via", gw]) if plat.os_family() == "linux" \
                 else plat.run(["route", "-q", "add", "-host", ips[0], gw])
             if rc == 0:
-                self._routes.append(ips[0])
+                with self.lock:
+                    self._routes.append(ips[0])
             else:
                 self.m.log.add("warn", "route to the proxy server failed: %s" % out.strip())
         info = {"port": local, "proto": "tcp" if proto.startswith("tcp") else "udp", "ip": ips[0]}

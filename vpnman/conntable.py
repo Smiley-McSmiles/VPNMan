@@ -167,14 +167,23 @@ class Resolver:
 
     def _work(self, ip):
         try:
-            name = str(self.lookup(ip) or "").rstrip(".")
-        except (OSError, ValueError, UnicodeError):
-            name = ""
+            try:
+                name = str(self.lookup(ip) or "").rstrip(".")
+            except (OSError, ValueError, UnicodeError):
+                name = ""
+            with self._lock:
+                if len(self._cache) >= self.MAX:
+                    self._cache.clear()
+                self._cache[ip] = (name, time.time() + (self.TTL if name else self.NEG_TTL))
+        finally:
+            with self._lock:
+                self._pending.discard(ip)
+
+    def shutdown(self, wait=True):
         with self._lock:
-            if len(self._cache) >= self.MAX:
-                self._cache.clear()
-            self._cache[ip] = (name, time.time() + (self.TTL if name else self.NEG_TTL))
-            self._pending.discard(ip)
+            pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.shutdown(wait=wait)
 
 
 RESOLVER = Resolver()
@@ -234,7 +243,7 @@ def to_csv(rows):
 
     def safe(v):
         v = "" if v is None else str(v)
-        return "'" + v if v[:1] in ("=", "+", "-", "@") and not re.match(r"^-?\d", v) else v
+        return "'" + v if v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
     w.writerow(CSV_FIELDS)
