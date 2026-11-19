@@ -23,6 +23,8 @@ class DnsForwarder:
         self.port = port
         self._stop = threading.Event()
         self._socks = []
+        self._active_socks = set()
+        self._lock = threading.Lock()
         self._threads = []
         self._busy = threading.BoundedSemaphore(MAX_BUSY)
 
@@ -56,7 +58,10 @@ class DnsForwarder:
 
     def stop(self):
         self._stop.set()
-        for s in self._socks:
+        with self._lock:
+            active = list(self._active_socks)
+            self._active_socks.clear()
+        for s in self._socks + active:
             try:
                 s.close()
             except OSError:
@@ -85,15 +90,18 @@ class DnsForwarder:
             except OSError:
                 return
             if self._busy.acquire(blocking=False):
-                threading.Thread(target=self._udp_query, args=(sock, data, peer), daemon=True).start()
+                try:
+                    threading.Thread(target=self._udp_query, args=(sock, data, peer), daemon=True).start()
+                except Exception:
+                    self._busy.release()
 
     def _udp_query(self, sock, data, peer):
         up = self._upstream_socket(socket.SOCK_DGRAM)
         try:
             up.sendto(data, (self.upstream, 53))
             while True:
-                reply, _ = up.recvfrom(65535)
-                if reply[:2] == data[:2]:          # the answer to this query (ids match)
+                reply, src = up.recvfrom(65535)
+                if src[:2] == (self.upstream, 53) and reply[:2] == data[:2]:
                     break
             sock.sendto(reply, peer)
         except OSError:
@@ -112,7 +120,11 @@ class DnsForwarder:
             except OSError:
                 return
             if self._busy.acquire(blocking=False):
-                threading.Thread(target=self._tcp_session, args=(conn,), daemon=True).start()
+                try:
+                    threading.Thread(target=self._tcp_session, args=(conn,), daemon=True).start()
+                except Exception:
+                    self._busy.release()
+                    conn.close()
             else:
                 conn.close()
 
@@ -129,12 +141,16 @@ class DnsForwarder:
     def _tcp_session(self, conn):
         conn.settimeout(TIMEOUT)
         up = None
+        with self._lock:
+            self._active_socks.add(conn)
         try:
             while True:
                 size = struct.unpack("!H", self._read(conn, 2))[0]
                 query = self._read(conn, size)
                 if up is None:
                     up = self._upstream_socket(socket.SOCK_STREAM)
+                    with self._lock:
+                        self._active_socks.add(up)
                     up.connect((self.upstream, 53))
                 up.sendall(struct.pack("!H", len(query)) + query)
                 rsize = struct.unpack("!H", self._read(up, 2))[0]
@@ -142,6 +158,10 @@ class DnsForwarder:
         except OSError:
             pass
         finally:
+            with self._lock:
+                self._active_socks.discard(conn)
+                if up:
+                    self._active_socks.discard(up)
             conn.close()
             if up:
                 up.close()

@@ -88,12 +88,13 @@ def nft_ruleset(spec):
         out.append("ip6 daddr { %s } accept" % ", ".join(LAN6))
         inn.append("ip6 saddr { %s } accept" % ", ".join(LAN6))
     if spec.allow_dhcp:
-        out.append("udp sport 68 udp dport 67 accept")
-        out.append("udp sport 546 udp dport 547 accept")
-        inn.append("udp sport 67 udp dport 68 accept")
-        inn.append("udp sport 547 udp dport 546 accept")
-        inn.append("udp sport 68 udp dport 67 accept")          # a hotspot / shared connection hands out addresses
-        out.append("udp sport 67 udp dport 68 accept")
+        out.append("ip daddr 255.255.255.255 udp sport 68 udp dport 67 accept")
+        inn.append("ip daddr 255.255.255.255 udp sport 67 udp dport 68 accept")
+        out.append("ip6 daddr { fe80::/10, ff00::/8 } udp sport 546 udp dport 547 accept")
+        inn.append("ip6 saddr { fe80::/10, ff00::/8 } udp sport 547 udp dport 546 accept")
+        if spec.share:
+            inn.append("ip daddr { 0.0.0.0, 255.255.255.255 } udp sport 68 udp dport 67 accept")     # hotspot hands out addresses
+            out.append("ip daddr 255.255.255.255 udp sport 67 udp dport 68 accept")
     if spec.allow_ping:
         out.append("icmp type echo-request accept")
         out.append("icmpv6 type echo-request accept")
@@ -192,13 +193,15 @@ def ipt_commands(spec, v6=False):
             c.append(["-A", I, "-s", a, "-j", "ACCEPT"])
     if spec.allow_dhcp:
         if v6:
-            c.append(["-A", O, "-p", "udp", "--sport", "546", "--dport", "547", "-j", "ACCEPT"])
-            c.append(["-A", I, "-p", "udp", "--sport", "547", "--dport", "546", "-j", "ACCEPT"])
+            for a in ("fe80::/10", "ff00::/8"):
+                c.append(["-A", O, "-d", a, "-p", "udp", "--sport", "546", "--dport", "547", "-j", "ACCEPT"])
+                c.append(["-A", I, "-s", a, "-p", "udp", "--sport", "547", "--dport", "546", "-j", "ACCEPT"])
         else:
-            c.append(["-A", O, "-p", "udp", "--sport", "68", "--dport", "67", "-j", "ACCEPT"])
-            c.append(["-A", I, "-p", "udp", "--sport", "67", "--dport", "68", "-j", "ACCEPT"])
-            c.append(["-A", I, "-p", "udp", "--sport", "68", "--dport", "67", "-j", "ACCEPT"])     # hotspot: we are the server
-            c.append(["-A", O, "-p", "udp", "--sport", "67", "--dport", "68", "-j", "ACCEPT"])
+            c.append(["-A", O, "-d", "255.255.255.255/32", "-p", "udp", "--sport", "68", "--dport", "67", "-j", "ACCEPT"])
+            c.append(["-A", I, "-d", "255.255.255.255/32", "-p", "udp", "--sport", "67", "--dport", "68", "-j", "ACCEPT"])
+            if spec.share:
+                c.append(["-A", I, "-d", "255.255.255.255/32", "-p", "udp", "--sport", "68", "--dport", "67", "-j", "ACCEPT"])
+                c.append(["-A", O, "-d", "255.255.255.255/32", "-p", "udp", "--sport", "67", "--dport", "68", "-j", "ACCEPT"])
     if spec.allow_ping:
         icmp = "icmpv6" if v6 else "icmp"
         c.append(["-A", O, "-p", icmp, "--%s-type" % icmp, "echo-request", "-j", "ACCEPT"])
@@ -225,39 +228,51 @@ class IptFirewall:
             bins.append(plat.which("ip6tables"))
         return bins
 
-    def _teardown(self):
+    def _teardown(self, suffix=""):
         for b in self._bins():
-            for chain, parent in (("VPNMAN_OUT", "OUTPUT"), ("VPNMAN_IN", "INPUT"), ("VPNMAN_FWD", "FORWARD")):
+            for base, parent in (("VPNMAN_OUT", "OUTPUT"), ("VPNMAN_IN", "INPUT"), ("VPNMAN_FWD", "FORWARD")):
+                chain = base + suffix
                 while plat.run([b, "-w", "-D", parent, "-j", chain])[0] == 0:
                     pass
                 plat.run([b, "-w", "-F", chain])
                 plat.run([b, "-w", "-X", chain])
 
     def apply(self, spec):
-        self._teardown()
+        # Build staging chains (*_N) and insert jumps before removing old chains so there is no fail-open window.
+        suf = "_N"
+        self._teardown(suf)
         try:
             for b in self._bins():
                 v6 = "ip6" in os.path.basename(b)
                 for args in ipt_commands(spec, v6):
-                    rc, out = plat.run([b, "-w"] + args)
-                    if rc and args[0] != "-N":
-                        raise RuntimeError("%s %s: %s" % (os.path.basename(b), " ".join(args), out.strip()))
-                for chain, parent in (("VPNMAN_OUT", "OUTPUT"), ("VPNMAN_IN", "INPUT"), ("VPNMAN_FWD", "FORWARD")):
-                    if chain == "VPNMAN_FWD" and not spec.share:
+                    staged = [a + suf if a in ("VPNMAN_OUT", "VPNMAN_IN", "VPNMAN_FWD") else a for a in args]
+                    rc, out = plat.run([b, "-w"] + staged)
+                    if rc and staged[0] != "-N":
+                        raise RuntimeError("%s %s: %s" % (os.path.basename(b), " ".join(staged), out.strip()))
+                for base, parent in (("VPNMAN_OUT", "OUTPUT"), ("VPNMAN_IN", "INPUT"), ("VPNMAN_FWD", "FORWARD")):
+                    if base == "VPNMAN_FWD" and not spec.share:
                         continue
-                    rc, out = plat.run([b, "-w", "-I", parent, "1", "-j", chain])
+                    rc, out = plat.run([b, "-w", "-I", parent, "1", "-j", base + suf])
                     if rc:
                         raise RuntimeError(out.strip())
         except Exception:
-            self._teardown()
+            self._teardown(suf)
             raise
+        self._teardown()
+        for b in self._bins():
+            for base in ("VPNMAN_OUT", "VPNMAN_IN", "VPNMAN_FWD"):
+                plat.run([b, "-w", "-E", base + suf, base])
 
     def remove(self):
         self._teardown()
+        self._teardown("_N")
 
     def active(self):
-        rc, _ = plat.run([plat.which("iptables") or "iptables", "-w", "-n", "-L", "VPNMAN_OUT"])
-        return rc == 0
+        for b in self._bins():
+            rc, _ = plat.run([b, "-w", "-n", "-L", "VPNMAN_OUT"])
+            if rc == 0:
+                return True
+        return False
 
 
 # --------------------------------------------------------------------------- pf
@@ -284,12 +299,13 @@ def pf_ruleset(spec):
         r.append("pass out quick inet6 to { %s }" % " ".join(LAN6))
         r.append("pass in quick inet6 from { %s }" % " ".join(LAN6))
     if spec.allow_dhcp:
-        r.append("pass out quick inet proto udp from port 68 to port 67")
-        r.append("pass in quick inet proto udp from port 67 to port 68")
-        r.append("pass in quick inet proto udp from port 68 to port 67")
-        r.append("pass out quick inet proto udp from port 67 to port 68")
-        r.append("pass out quick inet6 proto udp from port 546 to port 547")
-        r.append("pass in quick inet6 proto udp from port 547 to port 546")
+        r.append("pass out quick inet proto udp to 255.255.255.255 from port 68 to port 67")
+        r.append("pass in quick inet proto udp to 255.255.255.255 port 67 to port 68")
+        if spec.share:
+            r.append("pass in quick inet proto udp to { 0.0.0.0 255.255.255.255 } port 68 to port 67")
+            r.append("pass out quick inet proto udp to 255.255.255.255 from port 67 to port 68")
+        r.append("pass out quick inet6 proto udp to { fe80::/10 ff00::/8 } from port 546 to port 547")
+        r.append("pass in quick inet6 proto udp from { fe80::/10 ff00::/8 } port 547 to port 546")
     if spec.allow_ping:
         r.append("pass quick inet proto icmp icmp-type echoreq")
         r.append("pass quick inet6 proto icmp6 icmp6-type echoreq")
@@ -312,10 +328,11 @@ class PfFirewall:
     def apply(self, spec):
         pfctl = plat.which("pfctl")
         os.makedirs(paths.run_dir(), mode=0o755, exist_ok=True)
-        if not os.path.exists(self._state_path()):
+        need_state = not os.path.exists(self._state_path())
+        was_enabled = "0"
+        if need_state:
             rc, out = plat.run([pfctl, "-s", "info"])
-            with open(self._state_path(), "w") as fh:
-                fh.write("1" if "Status: Enabled" in out else "0")
+            was_enabled = "1" if "Status: Enabled" in out else "0"
         rules = os.path.join(paths.run_dir(), "pf-lock.conf")
         fd = os.open(rules, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
@@ -323,6 +340,9 @@ class PfFirewall:
         rc, out = plat.run([pfctl, "-f", rules])
         if rc:
             raise RuntimeError("pfctl: " + out.strip())
+        if need_state:
+            with open(self._state_path(), "w") as fh:
+                fh.write(was_enabled)
         plat.run([pfctl, "-e"])
 
     def remove(self):

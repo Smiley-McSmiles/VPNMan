@@ -40,7 +40,7 @@ def nameservers(text):
     return out
 
 
-def dns_check(resolv_text, tunnel, dev_of, resolved_dns=None, forced=True):
+def dns_check(resolv_text, tunnel, dev_of, resolved_dns=None, forced=True, resolved_domains=None):
     """Do the resolvers in use sit behind the tunnel?  `dev_of(addr)` -> interface; `resolved_dns` maps
     link -> [servers] (systemd-resolved), used when /etc/resolv.conf only holds the local stub."""
     if not forced:
@@ -57,6 +57,13 @@ def dns_check(resolv_text, tunnel, dev_of, resolved_dns=None, forced=True):
     if remote and not local:
         return check("dns", "DNS servers", "ok", "%s: reached through %s" % (", ".join(remote), tunnel))
     if local:
+        non_tun = []
+        for lnk, doms in (resolved_domains or {}).items():
+            if lnk != tunnel and "~." in doms and (resolved_dns or {}).get(lnk):
+                non_tun.extend("%s (%s)" % (s, lnk) for s in resolved_dns[lnk])
+        if non_tun:
+            return check("dns", "DNS servers", "fail", "systemd-resolved has global (~.) DNS outside %s: %s (DNS leak)."
+                         % (tunnel, ", ".join(non_tun)))
         tun_dns = (resolved_dns or {}).get(tunnel)
         if tun_dns:
             return check("dns", "DNS servers", "ok", "systemd-resolved sends queries to %s on %s"
@@ -82,6 +89,9 @@ def ipv6_check(tunnel, dev_of6, reachable6, locked, blocked_by_lock):
     if dev == tunnel:
         return check("ipv6", "IPv6", "ok", "IPv6 traffic goes through the tunnel (%s)." % tunnel)
     if locked and blocked_by_lock:
+        if reachable6():
+            return check("ipv6", "IPv6", "fail", "IPv6 is routed via %s and still reachable even though the network "
+                         "lock is supposed to block IPv6." % dev)
         return check("ipv6", "IPv6", "ok", "IPv6 would leave via %s but the network lock blocks all IPv6." % dev)
     if reachable6():
         return check("ipv6", "IPv6", "fail", "IPv6 traffic leaves through %s, outside the VPN. Turn on 'Block IPv6' on "
@@ -167,6 +177,20 @@ def resolved_dns_map():
     if not exe:
         return {}
     rc, out = plat.run([exe, "dns"])
+    res = {}
+    for line in out.splitlines():
+        m = re.match(r"Link \d+ \((\S+)\):\s*(.*)", line.strip())
+        if m and m.group(2).strip():
+            res[m.group(1)] = m.group(2).split()
+    return res
+
+
+def resolved_domains_map():
+    """{link: [domains]} from `resolvectl domain`, or {}."""
+    exe = plat.which("resolvectl")
+    if not exe:
+        return {}
+    rc, out = plat.run([exe, "domain"])
     res = {}
     for line in out.splitlines():
         m = re.match(r"Link \d+ \((\S+)\):\s*(.*)", line.strip())
@@ -319,7 +343,8 @@ def run(status, settings, locked_blocks_ipv6, resolv_path="/etc/resolv.conf", pr
                     text = fh.read()
             except OSError:
                 text = ""
-            results.append(dns_check(text, tunnel, route_dev, resolved_dns_map(), settings.get("dns.force")))
+            results.append(dns_check(text, tunnel, route_dev, resolved_dns_map(), settings.get("dns.force"),
+                                     resolved_domains_map()))
             results.append(ipv6_check(tunnel, lambda a: route_dev(a, 6), lambda: connect_via(None, PROBE6),
                                       engaged, locked_blocks_ipv6))
         else:

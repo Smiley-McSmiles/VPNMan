@@ -84,9 +84,18 @@ class Backend:
         if not eps and profile.get("server"):
             host = profile["server"]
             host = re.sub(r"^[a-z]+://", "", host).split("/")[0]
-            if host.count(":") == 1:
-                host = host.split(":")[0]
-            eps = [(host, profile.get("port") or 0, profile.get("transport") or "")]
+            port = profile.get("port") or 0
+            if host.startswith("["):
+                h, _, tail = host[1:].partition("]")
+                host = h
+                if tail.startswith(":") and tail[1:].isdigit() and not port:
+                    port = int(tail[1:])
+            elif host.count(":") == 1:
+                h, _, p = host.partition(":")
+                host = h
+                if p.isdigit() and not port:
+                    port = int(p)
+            eps = [(host, port, profile.get("transport") or "")]
         return eps
 
     def validate(self, profile):

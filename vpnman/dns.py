@@ -38,14 +38,21 @@ class DnsManager:
             return "no DNS servers to apply"
         resolved = plat.which("resolvectl")
         rpath = _resolv()
+        resolved_warn = ""
         if resolved and iface and os.path.realpath(rpath).startswith("/run/systemd/resolve") \
                 and plat.iface_exists(iface):
             rc, out = plat.run([resolved, "dns", iface] + servers)
             if rc == 0:
-                plat.run([resolved, "domain", iface, "~."])
-                plat.run([resolved, "default-route", iface, "yes"])
+                rc_dom, _ = plat.run([resolved, "domain", iface, "~."])
+                rc_def, _ = plat.run([resolved, "default-route", iface, "yes"])
                 self.mode, self.iface = "resolved", iface
-                return "DNS set via systemd-resolved: " + ", ".join(servers)
+                msg = "DNS set via systemd-resolved: " + ", ".join(servers)
+                if rc_dom != 0 or rc_def != 0:
+                    msg += " (warning: could not set ~. / default-route on %s)" % iface
+                return msg
+            resolved_warn = " (warning: systemd-resolved failed; NSS resolve may bypass %s)" % rpath
+        elif nss_resolve(_nsswitch()):
+            resolved_warn = " (warning: NSS resolve is active in nsswitch.conf and may bypass %s)" % rpath
         os.makedirs(paths.run_dir(), mode=0o755, exist_ok=True)
         if not os.path.exists(_backup()) and not os.path.exists(_linkfile()):
             if os.path.islink(rpath):
@@ -65,7 +72,7 @@ class DnsManager:
         os.chmod(tmp, 0o644)
         os.replace(tmp, rpath)
         self.mode = "file"
-        return "DNS set in %s: %s" % (rpath, ", ".join(servers))
+        return "DNS set in %s: %s%s" % (rpath, ", ".join(servers), resolved_warn)
 
     def restore(self):
         if self.mode == "resolved" and self.iface:
@@ -98,6 +105,25 @@ def _nss_backup():
 _NSS_RESOLVE = re.compile(r"\bresolve\b(\s*\[[^\]]*\])?")
 
 
+def _atomic_write(target, text, mode=0o644):
+    """Write `text` to `target` atomically (resolving symlinks so a symlink target is updated in place)."""
+    real = os.path.realpath(target)
+    tmp = "%s.vpnman.%d" % (real, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+            fh.flush()
+        os.chmod(tmp, mode)
+        os.replace(tmp, real)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def nss_bypass(on):
     """Programs that ask systemd-resolved over its local socket (NSS module "resolve") cannot be steered to another
     resolver by the firewall: no DNS packet is sent.  While the apps that skip the VPN have a DNS server of their own,
@@ -112,8 +138,7 @@ def nss_bypass(on):
             try:
                 with open(backup) as fh:
                     text = fh.read()
-                with open(path, "w") as fh:
-                    fh.write(text)
+                _atomic_write(path, text)
                 os.unlink(backup)
             except OSError:
                 pass
@@ -137,10 +162,8 @@ def nss_bypass(on):
         return False
     try:
         os.makedirs(paths.run_dir(), mode=0o755, exist_ok=True)
-        with open(backup, "w") as fh:
-            fh.write(text)
-        with open(path, "w") as fh:
-            fh.write("".join(lines))
+        _atomic_write(backup, text)
+        _atomic_write(path, "".join(lines))
     except OSError:
         try:
             os.unlink(backup)

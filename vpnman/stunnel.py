@@ -24,6 +24,12 @@ CA_BUNDLES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundl
               "/usr/local/share/certs/ca-root-nss.crt", "/etc/ssl/certs/ca-certificates.pem")
 READY_RE = re.compile(r"Configuration successful")
 _SAFE = re.compile(r"^[A-Za-z0-9._:-]+$")
+_SAFE_CA = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _valid_ca(ca):
+    s = str(ca or "")
+    return bool(s and _SAFE_CA.match(s) and s not in (".", "..") and ".." not in s)
 
 
 def binary():
@@ -57,8 +63,13 @@ def validate(profile):
         problems.append("stunnel port is invalid")
     if st.get("sni") and not _SAFE.match(str(st["sni"])):
         problems.append("stunnel SNI is invalid")
-    if st.get("verify") == "ca" and not st.get("ca"):
+    verify = st.get("verify") or ("ca" if st.get("ca") else "none")
+    if st.get("ca") and not _valid_ca(st["ca"]):
+        problems.append("stunnel CA file name is invalid")
+    if verify == "ca" and not st.get("ca"):
         problems.append("stunnel verify=ca needs a CA file")
+    if verify == "system" and not any(os.path.exists(b) for b in CA_BUNDLES):
+        problems.append("no system CA bundle found for stunnel verify=system")
     return problems
 
 
@@ -85,14 +96,15 @@ def config(profile, profile_dir, workdir, local_port):
              "connect = %s:%d" % (host, port), "sslVersionMin = TLSv1.2", "sni = %s" % sni]
     verify = st.get("verify") or ("ca" if st.get("ca") else "none")
     if verify == "ca":
-        lines += ["CAfile = %s" % os.path.join(profile_dir, os.path.basename(st["ca"])),
+        if not _valid_ca(st.get("ca")):
+            raise ValueError("stunnel CA file name is invalid")
+        lines += ["CAfile = %s" % os.path.join(profile_dir, st["ca"]),
                   "verifyChain = yes", "checkHost = %s" % sni]
     elif verify == "system":
         bundle = next((b for b in CA_BUNDLES if os.path.exists(b)), None)
-        if bundle:
-            lines += ["CAfile = %s" % bundle, "verifyChain = yes", "checkHost = %s" % sni]
-        else:
-            warn.append("no system CA bundle found - stunnel will not verify the server certificate")
+        if not bundle:
+            raise ValueError("no system CA bundle found for stunnel verify=system")
+        lines += ["CAfile = %s" % bundle, "verifyChain = yes", "checkHost = %s" % sni]
     else:
         warn.append("stunnel is not verifying the server certificate (the tunnel inside is still authenticated "
                     "by OpenVPN); set a CA file for full verification")

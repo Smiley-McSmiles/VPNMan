@@ -38,6 +38,9 @@ def restricted(line):
     parts = st.split(None, 1)
     word = parts[0].lower().lstrip("-")
     arg = parts[1] if len(parts) > 1 else ""
+    if word in ("setenv", "setenv-safe"):
+        var = arg.split(None, 1)[0] if arg else ""
+        return not re.match(r"^UV_[A-Za-z0-9_]+$", var)
     return word in _EXEC or (word in _FILES and ("/" in arg or "\\" in arg))
 
 
@@ -168,7 +171,7 @@ class OpenVPN(Backend):
             ip = res.get(m.group(2))
             return m.group(1) + ip + m.group(3) if ip else m.group(0)
 
-        text = re.sub(r"^(\s*remote\s+)(\S+)(.*)$", sub, text, flags=re.M)
+        text = re.sub(r"^(\s*remote\s+)(\S+)(.*)$", sub, text, flags=re.M | re.I)
         text, notes = self.sanitize_hooks(text, ctx.profile_dir)
         ctx.state["notes"] = notes
         # DNS servers written into the config itself ("dhcp-option DNS x") and a filter that ignores the pushed ones

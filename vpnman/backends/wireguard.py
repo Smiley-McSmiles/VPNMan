@@ -151,7 +151,7 @@ class WireGuard(Backend):
             if "endpoint" in p:
                 h, port = split_endpoint(p["endpoint"])
                 pc += ["wgendpoint", h, str(port)]
-                if gw and _is_ip(h) and not h.startswith("127."):
+                if gw and _is_ip(h) and ":" not in h and not h.startswith("127."):
                     hostroutes.append(h)
                     cmds.append(["route", "-q", "add", "-host", h, gw])
             if "presharedkey" in p:
@@ -164,7 +164,7 @@ class WireGuard(Backend):
                     pc += ["wgaip", aip]
                     routes.append(aip)
             cmds.append(pc)
-        addr = None
+        addr = addr6 = None
         for a in iface.get("address", "").split(","):
             a = a.strip()
             if not a:
@@ -173,6 +173,8 @@ class WireGuard(Backend):
             cmds.append(["ifconfig", n, fam, a])
             if fam == "inet" and not addr:
                 addr = a.split("/")[0]
+            elif fam == "inet6" and not addr6:
+                addr6 = a.split("/")[0]
         if "mtu" in iface:
             cmds.append(["ifconfig", n, "mtu", iface["mtu"]])
         cmds.append(["ifconfig", n, "up"])
@@ -184,6 +186,12 @@ class WireGuard(Backend):
                     cmds.append(["route", "-q", "add", fam, "128.0.0.0/1", addr])
                 else:
                     cmds.append(["route", "-q", "add", fam, r, addr])
+            elif fam == "-inet6" and addr6:
+                if r.endswith("/0"):
+                    cmds.append(["route", "-q", "add", fam, "::/1", addr6])
+                    cmds.append(["route", "-q", "add", fam, "8000::/1", addr6])
+                else:
+                    cmds.append(["route", "-q", "add", fam, r, addr6])
         ctx.state["hostroutes"] = hostroutes
         ctx.iface = n
         return cmds

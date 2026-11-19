@@ -57,7 +57,7 @@ class OpenConnect(Backend):
 
 
 class OpenFortiVPN(Backend):
-    restricted_line = staticmethod(lambda line: bool(re.match(r"^\\s*(pppd-plugin|pppd-log|pppd-call|pppd-ipparam|user-cert|user-key|ca-file)\\s*=", line, re.I)))
+    restricted_line = staticmethod(lambda line: bool(re.match(r"^\s*(pppd-plugin|pppd-log|pppd-call|pppd-ipparam|user-cert|user-key|ca-file)\s*=", line, re.I)))
     id = "openfortivpn"
     label = "Fortinet SSL VPN"
     description = "FortiGate SSL-VPN via openfortivpn"
@@ -88,18 +88,24 @@ class OpenFortiVPN(Backend):
     def prepare(self, ctx):
         p = ctx.profile
         text = ""
+        one = lambda v: str(v).replace("\r", " ").replace("\n", " ")       # a field is one line, never a new option
         if p.get("config"):
             with open("%s/%s" % (ctx.profile_dir, p["config"]), errors="replace") as fh:
                 text = fh.read()
         else:
-            text = "host = %s\nport = %s\n" % (p["server"], p.get("port") or 443)
+            text = "host = %s\nport = %s\n" % (one(p["server"]), one(p.get("port") or 443))
         if p.get("username"):
-            one = lambda v: str(v).replace("\r", " ").replace("\n", " ")       # a field is one line, never a new option
             text += "\nusername = %s\npassword = %s\n" % (one(p["username"]), one(p.get("password", "")))
         ctx.state["path"] = ctx.write("forti.conf", text)
 
     def connect_cmd(self, ctx):
         return [self.binary(), "-c", ctx.state["path"]]
+
+
+def _ppp_quote(val):
+    """Quote a value for a pppd options file (double-quoted, no newlines)."""
+    s = str(val or "").replace("\r", "").replace("\n", "")
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 class SSTP(Backend):
@@ -114,8 +120,8 @@ class SSTP(Backend):
 
     def prepare(self, ctx):
         p = ctx.profile
-        opts = ["name %s" % shlex.quote(p.get("username", "")),
-                "password %s" % shlex.quote(p.get("password", "")),
+        opts = ["name %s" % _ppp_quote(p.get("username", "")),
+                "password %s" % _ppp_quote(p.get("password", "")),
                 "usepeerdns", "require-mschap-v2", "noauth", "refuse-eap", "defaultroute", "nodetach"]
         if ctx.ifname and plat.os_family() == "linux":
             opts.append("ifname %s" % ctx.ifname)
@@ -141,8 +147,8 @@ class PPTP(SSTP):
 
     def prepare(self, ctx):
         p = ctx.profile
-        opts = ["name %s" % shlex.quote(p.get("username", "")),
-                "password %s" % shlex.quote(p.get("password", "")),
+        opts = ["name %s" % _ppp_quote(p.get("username", "")),
+                "password %s" % _ppp_quote(p.get("password", "")),
                 "remotename PPTP", "require-mppe-128", "usepeerdns", "noauth", "defaultroute",
                 "nodetach", "logfd 1"]
         if ctx.ifname and plat.os_family() == "linux":
@@ -156,7 +162,7 @@ class PPTP(SSTP):
 
 
 class StrongSwan(Backend):
-    restricted_line = staticmethod(lambda line: bool(re.match(r"^\\s*(updown|include)\\b", line, re.I)))
+    restricted_line = staticmethod(lambda line: bool(re.match(r"^\s*(updown|include)\b", line, re.I)))
     id = "ikev2"
     label = "IKEv2 / IPsec"
     description = "IKEv2/IPsec through strongSwan (swanctl.conf)"
@@ -215,7 +221,7 @@ class StrongSwan(Backend):
 
 
 class VPNC(Backend):
-    restricted_line = staticmethod(lambda line: bool(re.match(r"^\\s*Script\\b", line, re.I)))
+    restricted_line = staticmethod(lambda line: bool(re.match(r"^\s*Script\b", line, re.I)))
     id = "vpnc"
     label = "Cisco IPsec (vpnc)"
     description = "Legacy Cisco IPsec/PSK concentrators via vpnc"
@@ -237,7 +243,7 @@ class VPNC(Backend):
 
 
 class Nebula(Backend):
-    restricted_line = staticmethod(lambda line: bool(re.match(r"^\\s*(\\S+:\\s*)?(ca|cert|key)\\s*:\\s*/", line, re.I)))
+    restricted_line = staticmethod(lambda line: bool(re.match(r"^\s*(\S+:\s*)?(ca|cert|key)\s*:\s*/", line, re.I)))
     id = "nebula"
     label = "Nebula"
     description = "Slack Nebula overlay network"

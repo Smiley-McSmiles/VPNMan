@@ -211,14 +211,23 @@ class Manager:
             return {}
 
     def _save_state(self, **kw):
-        st = self._load_state()
-        st.update(kw)
-        try:
-            os.makedirs(paths.config_dir(), mode=0o700, exist_ok=True)
-            with open(paths.state_file(), "w") as fh:
-                json.dump(st, fh)
-        except OSError:
-            pass
+        with self._mlock:
+            st = self._load_state()
+            st.update(kw)
+            path = paths.state_file()
+            tmp = "%s.tmp.%d" % (path, os.getpid())
+            try:
+                os.makedirs(paths.config_dir(), mode=0o700, exist_ok=True)
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(st, fh)
+                    fh.flush()
+                os.replace(tmp, path)
+            except OSError:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     # ------------------------------------------------------------- network lock
     def _firewall(self):
@@ -320,6 +329,15 @@ class Manager:
     # --------------------------------------------------------------- start / stop
     def startup(self):
         """Called once by the daemon: crash recovery and boot-time behaviour."""
+        shutil.rmtree(os.path.join(paths.run_dir(), "conn"), ignore_errors=True)
+        for p in self.store.list():
+            pdir = self.store.dir_of(p)
+            try:
+                for fn in os.listdir(pdir):
+                    if fn.startswith(".restricted-"):
+                        os.unlink(os.path.join(pdir, fn))
+            except OSError:
+                pass
         dns.restore_resolv_conf()
         if plat.os_family() == "linux":
             dns.restore_nsswitch()
@@ -436,7 +454,8 @@ class Manager:
             _terminate(proc)
         if t and t.is_alive() and t is not threading.current_thread():
             t.join(timeout=wait)
-        self._thread = None
+        if not (t and t.is_alive()):
+            self._thread = None
 
     def _wait_torn_down(self, thread, iface):
         """Switching servers: the old tunnel must be completely gone (its process stopped, `wg-quick down` finished,
@@ -600,25 +619,68 @@ class Manager:
             # --- endpoints & lock (before anything touches the network)
             ips = set()
             ctx.state["resolved"] = {}
-            for host, _port, _proto in backend.endpoints(profile):
+            eps = backend.endpoints(profile)
+            unresolved = []
+            for host, _port, _proto in eps:
                 got = resolve_host(host, self._ep_cache)
                 if not got:
-                    self.log.add("warn", "Could not resolve %s" % host)
+                    unresolved.append(host)
                 else:
                     ctx.state["resolved"][host] = got[0]
-                ips.update(got)
-            self._lock_endpoints = ips
-            if self.proxy.carrier_wanted():
-                # the VPN is reached through the proxy: the kill switch lets only the proxy server through
-                try:
-                    self._lock_endpoints = self.proxy.carrier_ips()
-                except xray.ProxyError as e:
-                    raise (FatalError if e.fatal else ConnectError)("Proxy: %s" % e)
-                carrier = True
+                    ips.update(got)
+            if unresolved and self.lock_engaged:
+                gw_now = plat.default_gateway()[0]
+                dns_ips = set(system_dns(gw_now))
+                for srvs in leaktest.resolved_dns_map().values():
+                    for srv in srvs:
+                        try:
+                            if not ipaddress.ip_address(srv).is_loopback:
+                                dns_ips.add(srv)
+                        except ValueError:
+                            pass
+                if dns_ips:
+                    with self._mlock:
+                        prev_eps = set(self._lock_endpoints)
+                        self._lock_endpoints = prev_eps | dns_ips
+                        try:
+                            self._lock_apply()
+                        except Exception:  # noqa: BLE001
+                            self._lock_endpoints = prev_eps
+                            dns_ips = set()
+                    if dns_ips:
+                        try:
+                            still = []
+                            for host in unresolved:
+                                got = resolve_host(host, self._ep_cache)
+                                if not got:
+                                    still.append(host)
+                                else:
+                                    ctx.state["resolved"][host] = got[0]
+                                    ips.update(got)
+                            unresolved = still
+                        finally:
+                            with self._mlock:
+                                self._lock_endpoints = prev_eps
+                                try:
+                                    self._lock_apply()
+                                except Exception:  # noqa: BLE001
+                                    pass
+            for host in unresolved:
+                self.log.add("warn", "Could not resolve %s" % host)
+            with self._mlock:
+                self._lock_endpoints = ips
+                if self.proxy.carrier_wanted():
+                    # the VPN is reached through the proxy: the kill switch lets only the proxy server through
+                    try:
+                        self._lock_endpoints = self.proxy.carrier_ips()
+                    except xray.ProxyError as e:
+                        raise (FatalError if e.fatal else ConnectError)("Proxy: %s" % e)
+                    carrier = True
             self._refresh_route_hosts(apply=False)       # names given as "skip the VPN" addresses, before the lock
             if self._lock_wanted():
                 try:
-                    self._lock_apply()
+                    with self._mlock:
+                        self._lock_apply()
                 except Exception as e:  # noqa: BLE001
                     raise FatalError("Network lock could not be engaged: %s - refusing to connect unprotected" % e)
             self._hook("pre_connect", ctx)
@@ -648,7 +710,7 @@ class Manager:
                     cmd = backend.connect_cmd(ctx)
             except CredentialsRequired as e:
                 raise FatalError("%s: %s" % (profile["name"], e), "auth")
-            except ValueError as e:
+            except (ValueError, OSError) as e:
                 raise FatalError("%s: %s" % (profile["name"], e))
             started = time.time()
             if oneshot:
@@ -715,15 +777,16 @@ class Manager:
             ifaces = {ctx.iface} if ctx.iface else new
             ifaces = {i for i in ifaces if i and i != "lo"}
             primary = sorted(ifaces)[0] if ifaces else None
-            self._lock_ifaces = ifaces
-            if self._lock_wanted():
-                if not ifaces:
-                    self.log.add("warn", "No tunnel interface detected - kill switch will only allow the VPN endpoint. %s"
-                                 % backend.lock_note)
-                try:
-                    self._lock_apply()
-                except Exception as e:  # noqa: BLE001
-                    raise ConnectError("Network lock update failed: %s" % e)
+            with self._mlock:
+                self._lock_ifaces = ifaces
+                if self._lock_wanted():
+                    if not ifaces:
+                        self.log.add("warn", "No tunnel interface detected - kill switch will only allow the VPN endpoint. %s"
+                                     % backend.lock_note)
+                    try:
+                        self._lock_apply()
+                    except Exception as e:  # noqa: BLE001
+                        raise ConnectError("Network lock update failed: %s" % e)
             self._apply_dns(ctx, primary)
             self._current = (ctx, primary)
             routes_added = self._apply_routes(gw)
@@ -778,14 +841,20 @@ class Manager:
             if reader:
                 reader.join(2)
             if proc is not None and proc.stdout:
-                proc.stdout.close()
+                try:
+                    proc.stdout.close()
+                except OSError:
+                    pass
             if tproc is not None:
                 if tproc.poll() is None:
                     _terminate(tproc)
                 if treader:
                     treader.join(2)
                 if tproc.stdout:
-                    tproc.stdout.close()
+                    try:
+                        tproc.stdout.close()
+                    except OSError:
+                        pass
             if oneshot or ctx.state:
                 try:
                     for cmd in backend.disconnect_cmds(ctx):
@@ -810,12 +879,13 @@ class Manager:
             self._dns.restore()
             if up:
                 self._hook("disconnected", ctx)
-            self._lock_ifaces = set()
-            if self._lock_wanted() and self.lock_engaged and not stop.is_set():
-                try:
-                    self._lock_apply()      # tunnel gone: drop iface allowance, keep endpoint for reconnect
-                except Exception as e:  # noqa: BLE001
-                    self.log.add("error", "Network lock update failed: %s" % e)
+            with self._mlock:
+                self._lock_ifaces = set()
+                if self._lock_wanted() and self.lock_engaged and not stop.is_set():
+                    try:
+                        self._lock_apply()      # tunnel gone: drop iface allowance, keep endpoint for reconnect
+                    except Exception as e:  # noqa: BLE001
+                        self.log.add("error", "Network lock update failed: %s" % e)
             shutil.rmtree(workdir, ignore_errors=True)
 
     def _start_stunnel(self, profile, ctx, stop):
@@ -857,9 +927,20 @@ class Manager:
                 return tproc, reader
             if tproc.poll() is not None:
                 reader.join(2)
+                if tproc.stdout:
+                    try:
+                        tproc.stdout.close()
+                    except OSError:
+                        pass
                 raise ConnectError("stunnel exited with status %s" % tproc.returncode)
             if time.time() > end:
                 _terminate(tproc)
+                reader.join(2)
+                if tproc.stdout:
+                    try:
+                        tproc.stdout.close()
+                    except OSError:
+                        pass
                 raise ConnectError("stunnel did not start in time")
             time.sleep(0.1)
         return tproc, reader
@@ -884,7 +965,12 @@ class Manager:
         s = self.settings
         if not s.get("dns.force"):
             return []
-        return list(s.get("dns.servers") or ctx.profile.get("dns") or ctx.dns)
+        servers = list(s.get("dns.servers") or ctx.profile.get("dns") or ctx.dns)
+        if self.lock_engaged and s.get("netlock.block_ipv6"):
+            v4 = [d for d in servers if ":" not in str(d)]
+            if v4:
+                return v4
+        return servers
 
     def _apply_dns(self, ctx, iface):
         servers = self._tunnel_dns(ctx)
@@ -1459,6 +1545,11 @@ class Manager:
         lines that make the VPN program run commands or touch files outside the profile.  Returns (profile, notes)."""
         import copy
         q = copy.deepcopy(profile)
+        if backend.id == "custom":
+            opts = q.get("options") or {}
+            opts.pop("connect_cmd", None)
+            opts.pop("disconnect_cmd", None)
+            raise FatalError("%s: custom command profiles cannot be run by non-administrators" % profile["name"])
         notes = []
         if (q.get("options") or {}).pop("extra_args", None):
             notes.append("extra program arguments")
@@ -1716,5 +1807,5 @@ def _safe_cmd(cmd):
             out.append("--authkey=***")
         else:
             out.append(a)
-            hide = a in ("--password", "--authkey", "--setup-key", "--passwd")
+            hide = a in ("--password", "--authkey", "--setup-key", "--passwd", "wgkey", "wgpsk")
     return " ".join(out)
