@@ -3,6 +3,7 @@
 import json
 import os
 import socket
+import stat
 
 from . import paths
 
@@ -23,27 +24,28 @@ class Client:
 
     def call(self, method, **params):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(self.timeout)
         try:
-            s.connect(self.path)
-        except FileNotFoundError:
-            raise DaemonUnavailable("the vpnman daemon is not running (socket %s not found)" % self.path)
-        except PermissionError:
-            raise DaemonUnavailable("permission denied on %s - join the 'vpnman' group (then log in again) or use sudo"
-                                    % self.path)
-        except (ConnectionRefusedError, OSError) as e:
-            raise DaemonUnavailable("cannot reach the vpnman daemon: %s" % e)
-        try:
-            self._n += 1
-            s.sendall((json.dumps({"id": self._n, "method": method, "params": params}) + "\n").encode())
-            buf = b""
-            while not buf.endswith(b"\n"):
-                chunk = s.recv(65536)
-                if not chunk:
-                    break
-                buf += chunk
-        except (socket.timeout, OSError) as e:
-            raise DaemonUnavailable("daemon did not answer: %s" % e)
+            s.settimeout(self.timeout)
+            try:
+                s.connect(self.path)
+            except FileNotFoundError:
+                raise DaemonUnavailable("the vpnman daemon is not running (socket %s not found)" % self.path)
+            except PermissionError:
+                raise DaemonUnavailable("permission denied on %s - join the 'vpnman' group (then log in again) or use sudo"
+                                        % self.path)
+            except (ConnectionRefusedError, OSError) as e:
+                raise DaemonUnavailable("cannot reach the vpnman daemon: %s" % e)
+            try:
+                self._n += 1
+                s.sendall((json.dumps({"id": self._n, "method": method, "params": params}) + "\n").encode())
+                buf = b""
+                while not buf.endswith(b"\n"):
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+            except (socket.timeout, OSError) as e:
+                raise DaemonUnavailable("daemon did not answer: %s" % e)
         finally:
             s.close()
         try:
@@ -66,8 +68,8 @@ def peer_uid(conn):
     """uid of the connecting process, or None where the kernel cannot tell us."""
     try:
         import struct
-        creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-        return struct.unpack("3i", creds)[1]
+        creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("i2I"))
+        return struct.unpack("i2I", creds)[1]
     except (AttributeError, OSError):
         return None
 
@@ -83,10 +85,14 @@ def secure_socket(path):
     daemon authorizes each connection (see access.py).  Elsewhere fall back to
     filesystem permissions: root plus the vpnman/wheel group.
     """
+    st = os.lstat(path)
+    if not stat.S_ISSOCK(st.st_mode):
+        raise OSError("refusing to chmod non-socket path: %s" % path)
     if peercred_supported():
         os.chmod(path, 0o666)
         return "authorized per connection"
     import grp
+    os.chmod(path, 0o600)
     for g in ("vpnman", "wheel", "sudo"):
         try:
             gid = grp.getgrnam(g).gr_gid

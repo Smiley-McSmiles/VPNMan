@@ -72,15 +72,16 @@ def _active_local_session(uid):
         return None
     rc, out = plat.run([lc, "list-sessions", "--no-legend"], timeout=5)
     if rc != 0:
-        return None
+        return False
     for line in out.splitlines():
         f = line.split()
         if len(f) < 2 or not f[1].isdigit() or int(f[1]) != uid:
             continue
         rc, o2 = plat.run([lc, "show-session", f[0], "-p", "Remote", "-p", "Active", "-p", "State"], timeout=5)
+        if rc != 0:
+            continue
         props = dict(l.split("=", 1) for l in o2.splitlines() if "=" in l)
-        if props.get("Remote", "no") == "no" and (props.get("Active") == "yes"
-                                                    or props.get("State") in ("active", "online")):
+        if props.get("Remote", "no") == "no" and props.get("Active") == "yes":
             return True
     return False
 

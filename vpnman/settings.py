@@ -136,15 +136,18 @@ class Settings:
         self.load()
 
     def load(self):
-        try:
-            with open(self.path) as fh:
-                self.data = _merge(DEFAULTS, json.load(fh))
-        except (OSError, ValueError):
-            self.data = copy.deepcopy(DEFAULTS)
+        with self._lock:
+            try:
+                with open(self.path) as fh:
+                    self.data = _merge(DEFAULTS, json.load(fh))
+            except (OSError, ValueError):
+                self.data = copy.deepcopy(DEFAULTS)
 
     def save(self):
         with self._lock:
-            os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
+            parent = os.path.dirname(self.path)
+            if parent:
+                os.makedirs(parent, mode=0o700, exist_ok=True)
             tmp = self.path + ".tmp"
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as fh:

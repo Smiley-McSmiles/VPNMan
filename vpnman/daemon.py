@@ -45,6 +45,10 @@ def _tree_keys(tree, prefix=""):
 
 class Handler(socketserver.StreamRequestHandler):
     def handle(self):
+        try:
+            self.request.settimeout(30.0)
+        except OSError:
+            pass
         mgr = self.server.manager
         access.set_caller(None)
         if ipc.peercred_supported() and plat.is_root():
@@ -124,6 +128,16 @@ def _import(m, **kw):
     return m.import_profile(**kw)
 
 
+def _update_settings(m, tree):
+    _check_admin(list(_tree_keys(tree)))
+    m.settings.update(tree)
+    if isinstance(tree, dict):
+        for section in ("dns", "split", "proxy", "netproxy"):
+            if section in tree:
+                _changed(m, section, None)
+    return _masked(m.settings.get())
+
+
 METHODS = {
     "ping": lambda m: "pong",
     "version": lambda m: __version__,
@@ -147,8 +161,7 @@ METHODS = {
     "netlock.disable": lambda m: m.netlock_disable(),
     "settings.get": lambda m, key=None: _masked(m.settings.get(key), key),
     "settings.set": lambda m, key, value: (_check_admin([key]), _changed(m, key, m.settings.set(key, value)))[1],
-    "settings.update": lambda m, tree: (_check_admin(list(_tree_keys(tree))), m.settings.update(tree),
-                                        _changed(m, "dns" if "dns" in tree else "", None), m.settings.get())[3],
+    "settings.update": _update_settings,
     "split.status": lambda m: m.split_status(),
     "split.set": lambda m, apps=None, enabled=None, mode=None, dns=None: m.split_set(apps, enabled, mode, dns),
     "routes.set": lambda m, entries: m.routes_set(entries),
@@ -205,11 +218,39 @@ def _fw_name():
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
     allow_reuse_address = True
+    max_threads = 64
 
     def __init__(self, path, manager):
         self.manager = manager
         self.methods = METHODS
+        self._sem = threading.BoundedSemaphore(self.max_threads)
+        self.socket_access = None
         super().__init__(path, Handler)
+
+    def server_bind(self):
+        old_umask = os.umask(0o177)
+        try:
+            super().server_bind()
+        finally:
+            os.umask(old_umask)
+        self.socket_access = ipc.secure_socket(self.server_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._sem.release()
+
+    def process_request(self, request, client_address):
+        if not self._sem.acquire(timeout=5.0):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._sem.release()
+            self.shutdown_request(request)
+            raise
 
 
 def run(foreground=True):
@@ -229,23 +270,51 @@ def run(foreground=True):
     mgr = Manager(settings=Settings())
     mgr.log.open_file(paths.log_file())
     server = Server(sock, mgr)
-    grp = ipc.secure_socket(sock)
+    grp = server.socket_access or ipc.secure_socket(sock)
     with open(paths.pidfile(), "w") as fh:
         fh.write(str(os.getpid()))
     mgr.log.add("info", "vpnmand %s started (%s, init: %s, access: %s)"
                 % (__version__, plat.distro()[1], plat.init_system(), grp))
 
-    def stop(signum, _frame):
-        mgr.log.add("info", "Signal %d received, shutting down" % signum)
-        threading.Thread(target=server.shutdown, daemon=True).start()
+    sig_r, sig_w = os.pipe()
+    os.set_blocking(sig_w, False)
 
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-    signal.signal(signal.SIGHUP, lambda *_: mgr.settings.load())
+    def _on_signal(signum, _frame):
+        try:
+            os.write(sig_w, bytes([signum & 0xFF]))
+        except OSError:
+            pass
+
+    def _signal_worker():
+        try:
+            while True:
+                data = os.read(sig_r, 64)
+                if not data:
+                    break
+                for b in data:
+                    if b == signal.SIGHUP:
+                        mgr.settings.load()
+                        mgr.log.add("info", "SIGHUP received, reloaded settings")
+                    elif b in (signal.SIGTERM, signal.SIGINT):
+                        mgr.log.add("info", "Signal %d received, shutting down" % b)
+                        threading.Thread(target=server.shutdown, daemon=True).start()
+                        return
+        except OSError:
+            pass
+
+    threading.Thread(target=_signal_worker, daemon=True).start()
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGHUP, _on_signal)
     threading.Thread(target=mgr.startup, daemon=True).start()
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
+        for fd in (sig_w, sig_r):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         mgr.shutdown()
         server.server_close()
         for f in (sock, paths.pidfile()):

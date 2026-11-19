@@ -1,8 +1,8 @@
 [Unit]
 Description=VPNMan VPN manager daemon
 Documentation=man:vpnman(1)
-Wants=network-online.target
-After=network-online.target
+Wants=network-pre.target
+Before=network-pre.target
 
 [Service]
 Type=simple
