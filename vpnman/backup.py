@@ -19,7 +19,7 @@ MANIFEST = "vpnman-backup.json"
 MAX_FILE = 8 * 1024 * 1024
 MAX_TOTAL = 64 * 1024 * 1024
 MAX_MEMBERS = 5000
-_PROFILE_FILE = re.compile(r"^(profiles|proxies)/([0-9a-f]{12})/([A-Za-z0-9._-]{1,128})$")
+_PROFILE_FILE = re.compile(r"^(profiles|proxies)/([0-9a-f]{12})/(?!\.\.?\Z)([A-Za-z0-9._-]{1,128})\Z")
 
 
 class BackupError(ValueError):
@@ -88,11 +88,14 @@ def read_archive(data, with_proxies=False):
             if total > MAX_TOTAL:
                 raise BackupError("the backup is too large")
             name = m.name[2:] if m.name.startswith("./") else m.name
-            body = tf.extractfile(m).read()
+            with tf.extractfile(m) as ef:
+                body = ef.read()
             if name == MANIFEST:
                 try:
                     manifest = json.loads(body)
                 except ValueError:
+                    raise BackupError("the backup manifest is damaged")
+                if not isinstance(manifest, dict):
                     raise BackupError("the backup manifest is damaged")
             elif name == "settings.json":
                 try:
@@ -106,7 +109,7 @@ def read_archive(data, with_proxies=False):
                 if not mt:
                     raise BackupError("unexpected file in the backup: %s" % name)
                 (proxies if mt.group(1) == "proxies" else profiles).setdefault(mt.group(2), {})[mt.group(3)] = body
-    if not manifest or manifest.get("format") != FORMAT:
+    if not isinstance(manifest, dict) or manifest.get("format") != FORMAT:
         raise BackupError("not a VPNMan backup (or from a newer version)")
     for pid, files in list(profiles.items()) + list(proxies.items()):
         try:

@@ -28,7 +28,7 @@ class History:
                  "duration": max(int(end - start), 0), "rx": int(rx), "tx": int(tx), "reason": reason}
         with self._lock:
             items = (self._read() + [entry])[-self.limit:]
-            os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
+            os.makedirs(os.path.dirname(self.path) or ".", mode=0o700, exist_ok=True)
             tmp = self.path + ".tmp"
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as fh:

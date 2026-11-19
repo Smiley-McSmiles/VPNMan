@@ -133,7 +133,7 @@ class Scheduler:
         closed = [e for e in entries if self.prev.get(e.get("id")) and not now.get(e.get("id"))]
         self.prev = now
         for e in opened:
-            self._open(e, state)
+            state = self._open(e, state)
         if self.owned and any(e["id"] == self.owned for e in closed):
             others = [e for e in entries if now.get(e.get("id")) and e.get("end")]
             if others:
@@ -148,14 +148,15 @@ class Scheduler:
         label = e.get("name") or "%s %s" % (describe_days(e["days"]), e["start"])
         if state in ("connected", "connecting", "reconnecting"):
             self.m.log.add("info", "Schedule '%s': already connected" % label)
-            return
+            return state
         prof = e.get("profile") or ""
         try:
             r = self.m.connect(None if prof in ("", "last") else prof, fastest=(prof == "fastest"),
                                last=(prof in ("", "last")), persistent=True)
         except Exception as ex:  # noqa: BLE001
             self.m.log.add("error", "Schedule '%s' could not connect: %s" % (label, ex))
-            return
+            return state
         self.m.log.add("info", "Schedule '%s': connecting to %s" % (label, r["profile"]))
         if e.get("end"):
             self.owned = e["id"]
+        return "connecting"

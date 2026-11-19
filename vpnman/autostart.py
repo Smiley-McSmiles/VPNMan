@@ -15,6 +15,12 @@ def is_enabled():
     return os.path.exists(path())
 
 
+def _quote_exec(exe):
+    if any(c in exe for c in ' \t\n"\\$`'):
+        return '"%s"' % exe.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    return exe
+
+
 def enable(exe=None):
     exe = exe or shutil.which("vpnman-gtk") or "vpnman-gtk"
     os.makedirs(os.path.dirname(path()), exist_ok=True)
@@ -23,7 +29,7 @@ def enable(exe=None):
                  "Comment=VPN manager (starts minimised to the system tray)\n"
                  "Exec=%s --background\nIcon=%s\nTerminal=false\n"
                  "X-GNOME-Autostart-enabled=true\nX-GNOME-Autostart-Delay=3\n"
-                 "X-KDE-autostart-after=panel\n" % (exe, APP_ID))
+                 "X-KDE-autostart-after=panel\n" % (_quote_exec(exe), APP_ID))
     return path()
 
 

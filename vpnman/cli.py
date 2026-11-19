@@ -298,7 +298,10 @@ class Cli:
             elif k == "dns":
                 v = [x.strip() for x in v.split(",") if x.strip()]
             elif k == "port":
-                v = int(v)
+                try:
+                    v = int(v)
+                except ValueError:
+                    raise RpcError("port must be a number, got %r" % v)
             ch[k] = v
         self.call("profiles.update", ident=a.profile, changes=ch)
         print("Updated.")
@@ -530,8 +533,7 @@ class Cli:
             if os.path.exists(a.file) and not a.force:
                 raise RpcError("%s exists - use --force to overwrite it" % a.file)
             res = self.call("backup.export")
-            fd = os.open(a.file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "wb") as fh:
+            with _open_private(a.file, a.force, binary=True) as fh:
                 fh.write(base64.b64decode(res["data"]))
             print("Backup written to %s (%s)." % (a.file, human_bytes(res["size"])))
             print(yellow("It contains your passwords and private keys - keep it somewhere safe."))
@@ -745,7 +747,9 @@ class Cli:
             if len(items) != 1:
                 raise RpcError("usage: vpnman proxy show NAME")
             pid = self._proxy_ident(items[0])
-            p = next(p for p in self.call("proxy.list") if p["id"] == pid)
+            p = next((p for p in self.call("proxy.list") if p["id"] == pid), None)
+            if p is None:
+                raise RpcError("no such proxy: %s" % items[0])
             info = self.call("proxy.info", ident=pid)
             if a.json:
                 print(json.dumps(dict(p, info=info), indent=2))
@@ -1097,7 +1101,7 @@ class Cli:
             return 0
         if os.path.exists(a.output) and not a.force:
             raise RpcError("%s exists (use --force to overwrite it)" % a.output)
-        with open(a.output, "w") as fh:
+        with _open_private(a.output, a.force, exists_msg="%s exists (use --force to overwrite it)" % a.output) as fh:
             fh.write(text)
         print("Saved %s. Read it before you share it - passwords, user names, server and network names and public "
               "addresses are removed, but check." % a.output)
@@ -1348,6 +1352,23 @@ def human_bytes(n):
         n /= 1024
 
 
+def _open_private(path, force, binary=False, exists_msg=None):
+    """Open ``path`` for writing with 0600 permissions, refusing symlinks and (unless ``force``) existing files."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | (0 if force else os.O_EXCL)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        raise RpcError(exists_msg or ("%s exists - use --force to overwrite it" % path))
+    except OSError as e:
+        raise RpcError("cannot write %s: %s" % (path, e.strerror or e))
+    try:
+        os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "wb" if binary else "w")
+    except Exception:
+        os.close(fd)
+        raise
+
+
 def _parse_days(text):
     from . import schedule as sch
     t = (text or "all").lower().replace(" ", "")
@@ -1356,11 +1377,14 @@ def _parse_days(text):
         return list(named[t])
     out = []
     for part in t.split(","):
-        if "-" in part:
-            lo, hi = (sch.DAYS.index(x[:3].capitalize()) for x in part.split("-", 1))
-            out += list(range(lo, hi + 1)) if lo <= hi else list(range(lo, 7)) + list(range(0, hi + 1))
-        else:
-            out.append(sch.DAYS.index(part[:3].capitalize()))
+        try:
+            if "-" in part:
+                lo, hi = (sch.DAYS.index(x[:3].capitalize()) for x in part.split("-", 1))
+                out += list(range(lo, hi + 1)) if lo <= hi else list(range(lo, 7)) + list(range(0, hi + 1))
+            else:
+                out.append(sch.DAYS.index(part[:3].capitalize()))
+        except ValueError:
+            raise RpcError("unknown day %r (use Mon..Sun, weekdays, weekends, all)" % part)
     return sorted(set(out))
 
 

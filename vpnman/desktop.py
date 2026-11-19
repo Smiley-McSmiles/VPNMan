@@ -2,6 +2,7 @@
 
 import glob
 import os
+import shlex
 import subprocess
 import sys
 
@@ -45,7 +46,13 @@ def check():
         with open(desktop) as fh:
             for line in fh:
                 if line.startswith("Exec="):
-                    exe = line.split("=", 1)[1].split()[0]
+                    val = line.split("=", 1)[1].strip()
+                    try:
+                        argv = shlex.split(val)
+                    except ValueError:
+                        argv = val.split()
+                    if argv:
+                        exe = argv[0]
     except OSError:
         pass
     if exe:

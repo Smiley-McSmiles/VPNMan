@@ -66,8 +66,10 @@ def exec_names(exec_line, desktop_id="", wm_class=""):
             if rest:
                 names.append(rest[0])
             break
-        if base == "snap" and argv[i + 1:i + 2] == ["run"]:
-            names.append(argv[i + 2] if len(argv) > i + 2 else "")
+        if base == "snap" and "run" in argv[i + 1:]:
+            rest = [x for x in argv[i + 1:] if not x.startswith("-") and x != "run"]
+            if rest:
+                names.append(rest[0])
             break
         names.append(base)
         break
@@ -113,6 +115,6 @@ def discover(extra_dirs=()):
 def custom_entry(text):
     """Whitelist entry for a bare executable/process name typed by the user."""
     name = os.path.basename(text.strip())
-    if not name or "\x00" in name or "/" in name:
+    if not name or name in (".", "..") or "\x00" in name or "/" in name:
         raise ValueError("enter a program name such as 'firefox'")
     return {"id": "custom:" + name, "name": name, "match": [name], "icon": ""}

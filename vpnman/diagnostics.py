@@ -18,7 +18,7 @@ import time
 from . import __version__, backends, netlock, xray
 from . import platform as plat
 
-SECRET_KEYS = re.compile(r"pass|secret|token|auth|private|psk|key|link|cookie|sub(?:scription)?_?url", re.I)
+SECRET_KEYS = re.compile(r"pass|secret|token|auth|private|psk|key|link|cookie|sub(?:scription)?_?url|user|openvpn_args|^events(?:\.|$)", re.I)
 _IPV4 = re.compile(r"(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\w.])")
 _IPV6 = re.compile(r"(?<![\w:.])([0-9a-fA-F]{0,4}(?::[0-9a-fA-F]{0,4}){2,7})(?![\w:.])")     # candidates; ipaddress decides
 _URL_CRED = re.compile(r"(\w+://)[^/\s:@]+:[^/\s@]+@")
@@ -50,8 +50,12 @@ def _mask_v6(m):
 def redact(text, names=None):
     """``names``: {private text: placeholder} - replaced literally (longest first) before the patterns run."""
     for secret, repl in sorted((names or {}).items(), key=lambda kv: -len(kv[0])):
-        if secret and len(secret) >= 3:
+        if not secret:
+            continue
+        if len(secret) >= 3:
             text = re.sub(re.escape(secret), repl, text, flags=re.I)
+        elif len(secret) == 2 and not secret.isdigit():
+            text = re.sub(r"(?<!\w)" + re.escape(secret) + r"(?!\w)", repl, text, flags=re.I)
     text = _LINK.sub("<share link removed>", text)
     text = _URL_CRED.sub(r"\1<user>:<password>@", text)
     text = _EMAIL.sub("<email>", text)
@@ -63,8 +67,16 @@ def redact(text, names=None):
 def scrub(obj):
     """A copy of a settings tree with every secret-looking value blanked."""
     if isinstance(obj, dict):
-        return {k: ("<removed>" if SECRET_KEYS.search(str(k)) and v not in (None, "", [], {}, False, True) else scrub(v))
-                for k, v in obj.items()}
+        out = {}
+        for k, v in obj.items():
+            if k == "events" and isinstance(v, dict):
+                out[k] = {ek: ("<removed>" if ev not in (None, "", [], {}, False, True) else ev)
+                          for ek, ev in v.items()}
+            elif SECRET_KEYS.search(str(k)) and v not in (None, "", [], {}, False, True):
+                out[k] = "<removed>"
+            else:
+                out[k] = scrub(v)
+        return out
     if isinstance(obj, list):
         return [scrub(x) for x in obj]
     return obj
@@ -105,6 +117,7 @@ def _names(m):
         for p in m.proxy.store.list():
             add(p.get("server"), "proxy-server")
             add(p.get("name"), "proxy")
+            add(p.get("source"), "proxy-source")
     except Exception:  # noqa: BLE001
         pass
     cfg = m.settings.get("netproxy") or {}

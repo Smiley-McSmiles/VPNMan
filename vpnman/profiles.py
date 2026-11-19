@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import shutil
 import time
 import uuid
@@ -112,6 +113,7 @@ class ProfileStore:
     def save(self, p, files=None):
         d = self._dir(p["id"])
         os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
         os.chmod(self.root, 0o700)
         for name, data in (files or {}).items():
             fn = safe_filename(name)
@@ -156,6 +158,9 @@ _OVPN_FILE_DIRECTIVES = ("ca", "cert", "key", "dh", "pkcs12", "crl-verify", "tls
                          "http-proxy-user-pass")
 
 
+MAX_IMPORT_FILE = 5 * 1024 * 1024
+
+
 def collect_files(path):
     """Read a config file plus the files it references (client side).
 
@@ -164,13 +169,15 @@ def collect_files(path):
     profile is self-contained once it is stored by the root daemon.
     """
     with open(path, "rb") as fh:
-        raw = fh.read()
+        raw = fh.read(MAX_IMPORT_FILE + 1)
+    if len(raw) > MAX_IMPORT_FILE:
+        raise ProfileError("config file is too large (limit %d bytes)" % MAX_IMPORT_FILE)
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         text = raw.decode("latin-1")
     files = {}
-    base = os.path.dirname(os.path.abspath(path))
+    base = os.path.realpath(os.path.dirname(os.path.abspath(path)))
     if not looks_like_openvpn(text):
         return text, files
     out = []
@@ -187,22 +194,38 @@ def collect_files(path):
             inline = m.group(1)
             out.append(line)
             continue
-        parts = s.split(None, 2)
-        if parts and parts[0] in _OVPN_FILE_DIRECTIVES and len(parts) >= 2 and not s.startswith(("#", ";")):
-            ref = parts[1].strip("\"'")
-            full = ref if os.path.isabs(ref) else os.path.join(base, ref)
-            if os.path.isfile(full) and ref != "[inline]":
-                bn = os.path.basename(full)
-                if bn in files and files[bn][0] != full:
-                    bn = "%d-%s" % (len(files), bn)
+        if s and not s.startswith(("#", ";")):
+            try:
+                parts = shlex.split(s, comments=False)
+            except ValueError:
+                parts = s.split()
+        else:
+            parts = []
+        if parts and parts[0] in _OVPN_FILE_DIRECTIVES and len(parts) >= 2:
+            ref = parts[1]
+            if ref != "[inline]":
+                full = os.path.realpath(ref if os.path.isabs(ref) else os.path.join(base, ref))
                 try:
-                    with open(full, "rb") as fh:
-                        files[bn] = (full, base64.b64encode(fh.read()).decode())
-                    rest = (" " + parts[2]) if len(parts) > 2 else ""
-                    out.append("%s %s%s" % (parts[0], bn, rest))
-                    continue
-                except OSError:
-                    pass
+                    confined = os.path.commonpath([base, full]) == base
+                except ValueError:
+                    confined = False
+                if not confined:
+                    raise ProfileError("file reference outside config directory: %s" % ref)
+                if os.path.isfile(full):
+                    bn = safe_filename(os.path.basename(full))
+                    if bn in files and files[bn][0] != full:
+                        bn = "%d-%s" % (len(files), bn)
+                    try:
+                        with open(full, "rb") as fh:
+                            data = fh.read(MAX_IMPORT_FILE + 1)
+                        if len(data) > MAX_IMPORT_FILE:
+                            raise ProfileError("referenced file is too large: %s" % bn)
+                        files[bn] = (full, base64.b64encode(data).decode())
+                        rest = (" " + " ".join(shlex.quote(x) for x in parts[2:])) if len(parts) > 2 else ""
+                        out.append("%s %s%s" % (parts[0], shlex.quote(bn), rest))
+                        continue
+                    except OSError:
+                        pass
         out.append(line)
     return "\n".join(out) + "\n", {k: v[1] for k, v in files.items()}
 
