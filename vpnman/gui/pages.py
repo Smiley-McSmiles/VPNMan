@@ -225,7 +225,7 @@ class SchedulePage(Adw.PreferencesPage):
 
     def _save(self, entries):
         keys = ("id", "name", "enabled", "days", "start", "end", "profile")
-        self.rpc("schedule.set", lambda st: (self.update(st), self.win.toast("Schedule saved")), self.win._fail,
+        self.rpc("schedule.set", lambda st: (self.update(st), self.win.toast("Schedule saved"), False)[2], self.win._fail,
                  entries=[{k: e[k] for k in keys if k in e} for e in entries])
 
 
@@ -528,8 +528,8 @@ class BypassPage(Adw.PreferencesPage):
             self._save_routes(self.routes + [x.strip() for x in text.replace(";", ",").split(",") if x.strip()])
 
     def _save_routes(self, routes):
-        self.rpc("routes.set", lambda _res: (self.win.toast("Saved"), self.win.refresh(full=True)), self.win._fail,
-                 entries=routes)
+        self.rpc("routes.set", lambda _res: (self.win.toast("Saved"), self.win.refresh(full=True), False)[2],
+                 self.win._fail, entries=routes)
 
     def _on_enabled(self, row, _p):
         if not self._quiet:
@@ -544,7 +544,8 @@ class BypassPage(Adw.PreferencesPage):
                   lambda picked: self._save(self.state["apps"] + picked)).present()
 
     def _save(self, apps):
-        self.rpc("split.set", lambda st: (self.update(st), self.win.toast("App list saved")), self.win._fail, apps=apps)
+        self.rpc("split.set", lambda st: (self.update(st), self.win.toast("App list saved"), False)[2],
+                 self.win._fail, apps=apps)
 
 
 # ----------------------------------------------------------------- traffic graph & history

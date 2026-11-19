@@ -646,7 +646,7 @@ class BlockedWindow(Adw.Window):
 
     def _on_enforce(self, row, _p):
         if not self._quiet and row.get_active() != self.status.get("enabled"):
-            self.rpc("blocks.set", lambda *_: (self.reload(), self.group.refresh_blocked()),
+            self.rpc("blocks.set", lambda *_: (self.reload(), self.group.refresh_blocked(), False)[2],
                      lambda msg, *_: self.toast(msg), enabled=row.get_active())
 
     def _on_entry_switch(self, ident, active):

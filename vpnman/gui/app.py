@@ -408,7 +408,7 @@ class ProfileDialog(Adw.Window):
             self.st_host.set_text("%s:%s" % (st.get("host", ""), st.get("port", 443)) if st.get("host") else "")
             self.st_sni.set_text(st.get("sni", ""))
             if st.get("ca"):
-                self.st_ca.set_subtitle("Stored: %s" % st["ca"])
+                self.st_ca.set_subtitle(GLib.markup_escape_text("Stored: %s" % st["ca"]))
         self.err = Adw.Banner(revealed=False)
         view.add_top_bar(self.err)
 
@@ -418,7 +418,8 @@ class ProfileDialog(Adw.Window):
     def _failover_subtitle(self):
         names = {p["id"]: p["name"] for p in self.parent_win.profiles}
         shown = [names[i] for i in self.failover if i in names]
-        self.fo_row.set_subtitle(" → ".join(shown) if shown else "None chosen: its group, then your favourites")
+        self.fo_row.set_subtitle(GLib.markup_escape_text(" → ".join(shown)) if shown
+                                 else "None chosen: its group, then your favourites")
 
     def _pick_failover(self, *_):
         others = [p for p in self.parent_win.profiles if not self.profile or p["id"] != self.profile["id"]]
@@ -430,13 +431,13 @@ class ProfileDialog(Adw.Window):
 
     def _set_files(self, files):
         self.files = files
-        self.file_row.set_subtitle(", ".join(os.path.basename(f) for f in files))
+        self.file_row.set_subtitle(GLib.markup_escape_text(", ".join(os.path.basename(f) for f in files)))
         if len(files) == 1 and not self.name.get_text():
             self.name.set_text(os.path.splitext(os.path.basename(files[0]))[0])
 
     def _set_ca(self, files):
         self.st_ca_path = files[0]
-        self.st_ca.set_subtitle(os.path.basename(files[0]))
+        self.st_ca.set_subtitle(GLib.markup_escape_text(os.path.basename(files[0])))
 
     def _stunnel(self):
         """Return (options dict or None, {filename: b64} extra files); raises ValueError when invalid."""
@@ -457,8 +458,14 @@ class ProfileDialog(Adw.Window):
         old = (self.profile or {}).get("options", {}).get("stunnel", {})
         if self.st_ca_path:
             import base64
-            with open(self.st_ca_path, "rb") as fh:
-                files["stunnel-ca.pem"] = base64.b64encode(fh.read()).decode()
+            try:
+                with open(self.st_ca_path, "rb") as fh:
+                    raw = fh.read(1024 * 1024 + 1)
+            except OSError as e:
+                raise ValueError("Could not read CA certificate: %s" % e) from e
+            if len(raw) > 1024 * 1024:
+                raise ValueError("CA certificate file is too large (max 1 MiB)")
+            files["stunnel-ca.pem"] = base64.b64encode(raw).decode()
             st.update(ca="stunnel-ca.pem", verify="ca")
         elif old.get("ca"):
             st.update(ca=old["ca"], verify=old.get("verify", "ca"))
@@ -965,7 +972,7 @@ class MainWindow(Adw.ApplicationWindow):
         return [x.strip() for x in text.replace(";", ",").replace(" ", ",").split(",") if x.strip()]
 
     def _save_dns(self, force, servers):
-        rpc("settings.update", lambda *_: (self.toast("DNS updated"), self.refresh(full=True)), self._fail,
+        rpc("settings.update", lambda *_: (self.toast("DNS updated"), self.refresh(full=True), False)[2], self._fail,
             tree={"dns": {"force": force, "servers": servers}})
 
     def _on_dns_choice(self, row, _p):
@@ -1546,7 +1553,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _update_result(self, res, silent):
         app = self.get_application()
-        if "error" not in res:
+        if "error" not in res and app is not None:
             app.userconfig.set("update_last", int(time.time()))
         if "error" in res:
             if not silent:
@@ -1560,13 +1567,18 @@ class MainWindow(Adw.ApplicationWindow):
             d.add_response("later", "Later")
             d.add_response("open", "View Release")
             d.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
-            d.connect("response", lambda _d, r: Gtk.show_uri(self, res["url"], Gdk.CURRENT_TIME) if r == "open" else None)
+
+            def open_url(_d, r):
+                url = res.get("url") or ""
+                if r == "open" and url.startswith(("https://", "http://")):
+                    Gtk.show_uri(self, url, Gdk.CURRENT_TIME)
+            d.connect("response", open_url)
             d.present()
         return False
 
     def _auto_update_check(self):
         app = self.get_application()
-        if app.userconfig.get("update_check") and time.time() - (app.userconfig.get("update_last") or 0) > 86400:
+        if app is not None and app.userconfig.get("update_check") and time.time() - (app.userconfig.get("update_last") or 0) > 86400:
             self.on_check_updates(silent=True)
         return False
 
@@ -1625,7 +1637,13 @@ class MainWindow(Adw.ApplicationWindow):
         def chosen(path):
             def write(res):
                 try:
-                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+                    fd = os.open(path, flags, 0o600)
+                    try:
+                        os.fchmod(fd, 0o600)
+                    except OSError:
+                        os.close(fd)
+                        raise
                     with os.fdopen(fd, "wb") as fh:
                         fh.write(base64.b64decode(res["data"]))
                     self.toast("Backup saved")
@@ -1690,7 +1708,11 @@ class MainWindow(Adw.ApplicationWindow):
             self._update_latency()
             self.listbox.invalidate_sort()
             self._last_ping = time.monotonic()
-        rpc("latency", done, self._fail)
+        def fail(msg, daemon_down=False):
+            self.ping_btn.set_sensitive(True)
+            self.ping_btn.set_label("Test Latency")
+            self._fail(msg, daemon_down)
+        rpc("latency", done, fail)
 
     def _update_latency(self):
         for pid, row in self._rows.items():
@@ -1996,8 +2018,8 @@ class MainWindow(Adw.ApplicationWindow):
             self.graph.reset()
         if state == "connected":
             r = self.stat_rows
-            r["ip"].set_subtitle(st.get("public_ip") or "checking…")
-            r["iface"].set_subtitle(st.get("iface") or "–")
+            r["ip"].set_subtitle(GLib.markup_escape_text(st.get("public_ip") or "checking…"))
+            r["iface"].set_subtitle(GLib.markup_escape_text(st.get("iface") or "–"))
             r["uptime"].set_subtitle(hms(st.get("uptime", 0)))
             r["down"].set_subtitle("%s  (%s/s)" % (human(st["rx"]), human(st["rx_rate"])))
             r["up"].set_subtitle("%s  (%s/s)" % (human(st["tx"]), human(st["tx_rate"])))

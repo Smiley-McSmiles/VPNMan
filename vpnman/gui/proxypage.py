@@ -166,7 +166,7 @@ class ProxyEditDialog(Adw.Window):
         name = self.name.get_text().strip()
         if not name:
             return
-        self.rpc("proxy.update", lambda *_: (self.on_done(), self.close()), None, ident=self.proxy["id"],
+        self.rpc("proxy.update", lambda *_: (self.on_done(), self.close(), False)[2], None, ident=self.proxy["id"],
                  changes={"name": name, "group": self.group.get_text().strip(), "notes": self.notes.get_text()})
 
 
@@ -555,6 +555,8 @@ class ProxyPage(Gtk.Box):
     def _copy(self, kind):
         st = self.status
         port = st.get(kind) or st.get(kind + "_port")
+        if port is None:
+            return
         text = ("socks5://127.0.0.1:%d" if kind == "socks" else "http://127.0.0.1:%d") % port
         disp = Gdk.Display.get_default()
         if disp:
@@ -569,7 +571,7 @@ class ProxyPage(Gtk.Box):
             for pid, row in self._rows.items():
                 row.lat.set_label(self._lat_text(pid))
             self.ping.set_sensitive(True)
-        self.rpc("proxy.latency", done, lambda *a: (self.ping.set_sensitive(True), self.win.toast(a[0])))
+        self.rpc("proxy.latency", done, lambda *a: (self.ping.set_sensitive(True), self.win.toast(a[0]), False)[2])
 
     def _announce(self, text):
         """A toast when the window is in front, else a desktop notification (unless they are switched off)."""
@@ -595,7 +597,7 @@ class ProxyPage(Gtk.Box):
                 self._rows[p["id"]].lat.set_label(self._lat_text(p["id"]))
             self.win.toast("Using %s (%d ms)" % (p["name"], p["latency"]))
             self.rpc("proxy.status", self.update_status, None)
-        self.rpc("proxy.fastest", done, lambda msg, *_: (self.fastest.set_sensitive(True), self.win.toast(msg)))
+        self.rpc("proxy.fastest", done, lambda msg, *_: (self.fastest.set_sensitive(True), self.win.toast(msg), False)[2])
 
     def share(self, p):
         def got(res):
@@ -621,7 +623,7 @@ class ProxyPage(Gtk.Box):
                 msg = "Subscriptions refreshed: %(added)d new, %(updated)d updated, %(removed)d removed" % tot
             except Exception as e:  # noqa: BLE001
                 msg = "Refresh failed: %s" % e
-            GLib.idle_add(lambda: (self.refresh_btn.set_sensitive(True), self.win.toast(msg), self.reload()))
+            GLib.idle_add(lambda: (self.refresh_btn.set_sensitive(True), self.win.toast(msg), self.reload(), False)[3])
         threading.Thread(target=work, daemon=True).start()
 
     # ---- selection / bulk actions

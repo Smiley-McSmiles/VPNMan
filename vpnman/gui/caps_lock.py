@@ -8,6 +8,7 @@ Works on X11 and Wayland through Gdk's keyboard device state (no key-event guess
 
 from __future__ import annotations
 
+import weakref
 from typing import Callable
 
 import gi
@@ -55,21 +56,33 @@ def watch_caps_lock(widget: Gtk.Widget, on_change: Callable[[bool], None]) -> No
     focus = Gtk.EventControllerFocus.new()
     widget.add_controller(focus)
     last = {"state": None}
+    wref = weakref.ref(widget)
+    fref = weakref.ref(focus)
+    handler = 0
+
+    def disconnect(*_args):
+        if handler and keyboard.handler_is_connected(handler):
+            keyboard.disconnect(handler)
 
     def update(*_args):
-        state = bool(keyboard.get_caps_lock_state()) and bool(focus.contains_focus())
+        w = wref()
+        f = fref()
+        if w is None or f is None:
+            disconnect()
+            return
+        state = bool(keyboard.get_caps_lock_state()) and bool(f.contains_focus())
         if state != last["state"]:
             last["state"] = state
             if state:
-                widget.add_css_class(WARN_CLASS)
+                w.add_css_class(WARN_CLASS)
             else:
-                widget.remove_css_class(WARN_CLASS)
+                w.remove_css_class(WARN_CLASS)
             on_change(state)
 
     handler = keyboard.connect("notify::caps-lock-state", update)
     focus.connect("notify::contains-focus", update)
     # Don't keep a dead widget alive through the long-lived keyboard device.
-    widget.connect("destroy", lambda _w: keyboard.disconnect(handler))
+    widget.connect("unrealize", disconnect)
     update()
 
 

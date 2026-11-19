@@ -120,6 +120,11 @@ class Tray:
         self._watcher = None
         self._registered = False
         self._name_owned = False
+        self._reg_ids = []
+        self._owner_id = 0
+        self._watch_ids = []
+        self._sub_id = 0
+        self._wake_timer = 0
         self._name = "org.kde.StatusNotifierItem-%d-1" % os.getpid()
         self._sni = Gio.DBusNodeInfo.new_for_xml(SNI_XML).interfaces[0]
         self._menu = Gio.DBusNodeInfo.new_for_xml(MENU_XML).interfaces[0]
@@ -131,26 +136,51 @@ class Tray:
             self._conn = bus or Gio.bus_get_sync(Gio.BusType.SESSION, None)
         except GLib.Error:
             return False
-        self._conn.register_object(ITEM_PATH, self._sni, self._sni_call, self._sni_get, None)
-        self._conn.register_object(MENU_PATH, self._menu, self._menu_call, self._menu_get, None)
+        self._reg_ids = [
+            self._conn.register_object(ITEM_PATH, self._sni, self._sni_call, self._sni_get, None),
+            self._conn.register_object(MENU_PATH, self._menu, self._menu_call, self._menu_get, None),
+        ]
         # register with a watcher only once the name is really ours: watchers read our properties immediately
-        Gio.bus_own_name_on_connection(self._conn, self._name, Gio.BusNameOwnerFlags.NONE,
-                                       self._name_acquired, None)
-        for w in WATCHERS:
+        self._owner_id = Gio.bus_own_name_on_connection(self._conn, self._name, Gio.BusNameOwnerFlags.NONE,
+                                                        self._name_acquired, None)
+        self._watch_ids = [
             Gio.bus_watch_name_on_connection(self._conn, w, Gio.BusNameWatcherFlags.NONE,
                                              self._watcher_appeared, self._watcher_vanished)
-        GLib.timeout_add_seconds(2, self._wake_xapp_watcher)
+            for w in WATCHERS
+        ]
+        self._wake_timer = GLib.timeout_add_seconds(2, self._wake_xapp_watcher)
         return True
 
     def _wake_xapp_watcher(self):
         """Cinnamon's bridge (xapp-sn-watcher) is D-Bus activatable; start it if autostart did not."""
-        if not self._watcher and "cinnamon" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower():
+        self._wake_timer = 0
+        if self._conn and not self._watcher and "cinnamon" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower():
             self._conn.call("org.x.StatusNotifierWatcher", "/org/x/StatusNotifierWatcher",
                             "org.freedesktop.Application", "Activate", GLib.Variant("(a{sv})", ({},)), None,
                             Gio.DBusCallFlags.NONE, 5000, None, lambda *_: None)
         return False
 
     def stop(self):
+        if self._wake_timer:
+            GLib.source_remove(self._wake_timer)
+            self._wake_timer = 0
+        if self._conn:
+            if self._sub_id:
+                self._conn.signal_unsubscribe(self._sub_id)
+                self._sub_id = 0
+            for wid in self._watch_ids:
+                Gio.bus_unwatch_name(wid)
+            self._watch_ids.clear()
+            if self._owner_id:
+                Gio.bus_unown_name(self._owner_id)
+                self._owner_id = 0
+            for rid in self._reg_ids:
+                self._conn.unregister_object(rid)
+            self._reg_ids.clear()
+            self._conn = None
+        self._watcher = None
+        self._registered = False
+        self._name_owned = False
         self._set_available(False)
 
     def _name_acquired(self, conn, name):
@@ -159,9 +189,12 @@ class Tray:
 
     def _watcher_appeared(self, conn, name, owner):
         self._watcher = name
+        if self._sub_id:
+            self._conn.signal_unsubscribe(self._sub_id)
+            self._sub_id = 0
         # hosts can appear after the watcher
-        self._conn.signal_subscribe(name, name, "StatusNotifierHostRegistered", WATCHER_PATH, None,
-                                    Gio.DBusSignalFlags.NONE, lambda *_: self._check_host())
+        self._sub_id = self._conn.signal_subscribe(name, name, "StatusNotifierHostRegistered", WATCHER_PATH, None,
+                                                   Gio.DBusSignalFlags.NONE, lambda *_: self._check_host())
         self._register()
 
     def _register(self):
@@ -173,6 +206,9 @@ class Tray:
 
     def _watcher_vanished(self, conn, name):
         if self._watcher == name:
+            if self._sub_id and self._conn:
+                self._conn.signal_unsubscribe(self._sub_id)
+                self._sub_id = 0
             self._watcher = None
             self._registered = False
             self._set_available(False)
@@ -371,6 +407,7 @@ class HelperTray:
         self._buf = b""
         self._items = {}
         self._watch = None
+        self._startup_timer = 0
         self._ready = False
 
     def start(self):
@@ -387,10 +424,11 @@ class HelperTray:
         os.set_blocking(self._proc.stdout.fileno(), False)
         self._watch = GLib.io_add_watch(self._proc.stdout.fileno(), GLib.PRIORITY_DEFAULT,
                                         GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR, self._on_data)
-        GLib.timeout_add_seconds(6, self._startup_check)
+        self._startup_timer = GLib.timeout_add_seconds(6, self._startup_check)
         return True
 
     def _startup_check(self):
+        self._startup_timer = 0
         if not self._ready:                       # the helper never said hello (GTK 3 missing, crashed, ...)
             self._failed()
         return False
@@ -418,6 +456,7 @@ class HelperTray:
         except OSError:
             chunk = b""
         if not chunk:
+            self._watch = None
             if self._proc and not self._ready:
                 self._failed()
             else:
@@ -444,6 +483,7 @@ class HelperTray:
                 if cb:
                     GLib.idle_add(lambda cb=cb: (cb(), False)[1])
             elif ev == "error":
+                self._watch = None
                 self._failed()
                 return False
         return True
@@ -473,15 +513,20 @@ class HelperTray:
         self._send({"cmd": "menu", "items": items})
 
     def stop(self):
+        if self._startup_timer:
+            GLib.source_remove(self._startup_timer)
+            self._startup_timer = 0
         if self._watch:
             GLib.source_remove(self._watch)
             self._watch = None
         if self._proc:
             self._send({"cmd": "quit"})
-            try:
-                self._proc.stdin.close()
-            except OSError:
-                pass
+            for pipe in (self._proc.stdin, self._proc.stdout):
+                if pipe:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
             try:
                 self._proc.wait(timeout=2)
             except Exception:  # noqa: BLE001

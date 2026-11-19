@@ -167,7 +167,8 @@ class ProxyPreferences:
 
     def _on_kill(self, *_):
         if not self._quiet:
-            self.model.set(fail=lambda msg, *_: (self.toast(msg), self.model.refresh()), killswitch=self.kill.get_active())
+            self.model.set(fail=lambda msg, *_: (self.toast(msg), self.model.refresh(), False)[2],
+                           killswitch=self.kill.get_active())
 
     def _run_test(self, *_):
         self.test_btn.set_sensitive(False)
@@ -183,7 +184,7 @@ class ProxyPreferences:
             self.test.set_subtitle(GLib.markup_escape_text("\n".join("%s %s: %s" % (mark.get(c["status"], "?"), c["name"], c["detail"])
                                                                      for c in rows)))
         self.model.rpc("leaktest", done, lambda msg, *_: (self.test_btn.set_sensitive(True), self.test.set_subtitle(
-            GLib.markup_escape_text(msg))))
+            GLib.markup_escape_text(msg)), False)[2])
 
     # ---- model -> widgets
     def sync(self, st):
@@ -245,7 +246,7 @@ class ProxyPreferences:
         ch = self.changes()
         self._dirty = {k for k, _t in KINDS if k in self._dirty and k not in ch}     # still waiting for a port
         if ch:
-            self.model.set(fail=lambda msg, *_: (self.toast(msg), self.model.refresh()), **ch)
+            self.model.set(fail=lambda msg, *_: (self.toast(msg), self.model.refresh(), False)[2], **ch)
         return False
 
     def flush(self):

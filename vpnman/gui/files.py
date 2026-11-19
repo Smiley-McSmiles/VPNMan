@@ -13,17 +13,26 @@ def choose_files(parent, title, callback, multiple=True):
             try:
                 if multiple:
                     model = d.open_multiple_finish(res)
-                    files = [model.get_item(i).get_path() for i in range(model.get_n_items())]
+                    files = [p for p in (model.get_item(i).get_path() for i in range(model.get_n_items())) if p]
                 else:
-                    files = [d.open_finish(res).get_path()]
+                    f = d.open_finish(res)
+                    p = f.get_path() if f else None
+                    files = [p] if p else []
             except GLib.Error:
                 return
-            callback(files)
+            if files:
+                callback(files)
         (dlg.open_multiple if multiple else dlg.open)(parent, None, done)
     else:  # pragma: no cover - GTK < 4.10
         dlg = Gtk.FileChooserNative(title=title, transient_for=parent, action=Gtk.FileChooserAction.OPEN,
                                     select_multiple=multiple)
-        dlg.connect("response", lambda d, r: callback([f.get_path() for f in d.get_files()]) if r == Gtk.ResponseType.ACCEPT else None)
+
+        def on_resp(d, r):
+            if r == Gtk.ResponseType.ACCEPT:
+                files = [p for p in (f.get_path() for f in d.get_files()) if p]
+                if files:
+                    callback(files)
+        dlg.connect("response", on_resp)
         dlg.show()
         parent._native = dlg
 
@@ -34,13 +43,23 @@ def save_file(parent, title, name, callback):
 
         def done(d, res):
             try:
-                callback(d.save_finish(res).get_path())
+                f = d.save_finish(res)
+                path = f.get_path() if f else None
             except GLib.Error:
                 return
+            if path:
+                callback(path)
         dlg.save(parent, None, done)
     else:  # pragma: no cover - GTK < 4.10
         dlg = Gtk.FileChooserNative(title=title, transient_for=parent, action=Gtk.FileChooserAction.SAVE)
         dlg.set_current_name(name)
-        dlg.connect("response", lambda d, r: callback(d.get_file().get_path()) if r == Gtk.ResponseType.ACCEPT else None)
+
+        def on_resp(d, r):
+            if r == Gtk.ResponseType.ACCEPT:
+                f = d.get_file()
+                path = f.get_path() if f else None
+                if path:
+                    callback(path)
+        dlg.connect("response", on_resp)
         dlg.show()
         parent._native = dlg
