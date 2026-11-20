@@ -69,6 +69,7 @@ build_tar() {
     find "$t" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
     # normalise modes so the archive installs correctly whatever the packager's umask was
     chmod -R u+rwX,go+rX,go-w "$t"
+    find "$t/data/init" -type f -exec chmod 644 {} +
     chmod 755 "$t/install.sh" "$t/package.sh"
     tar -C "$BUILD" -czf "$DIST/$SRCNAME.tar.gz" "$SRCNAME"
     log "  -> dist/$SRCNAME.tar.gz"

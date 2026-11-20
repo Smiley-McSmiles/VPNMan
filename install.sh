@@ -513,6 +513,7 @@ find "$D$LIBDIR" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null 
 mkdir -p "$D/etc/vpnman" && chmod 700 "$D/etc/vpnman"
 mkdir -p "$D$SHAREDIR/vpnman"
 cp -R "$SRC/data/init" "$D$SHAREDIR/vpnman/init"
+find "$D$SHAREDIR/vpnman/init" -type f -exec chmod 644 {} +
 
 wrapper "$D$BINDIR/vpnman"
 wrapper "$D$BINDIR/vpnmand" daemon
@@ -689,6 +690,9 @@ if [ "$DO_POST" -eq 1 ] && [ -z "$DESTDIR" ]; then
         *":$SHAREDIR:"*) ;;
         *) warn "$SHAREDIR is not in XDG_DATA_DIRS, so your desktop may not show the VPNMan launcher/icon. Reinstall with --prefix /usr, or add it to XDG_DATA_DIRS" ;;
     esac
+    if [ "$PREFIX" != "/usr" ] && { [ -x /usr/bin/vpnman ] || [ -d /usr/lib/vpnman ]; }; then
+        warn "another VPNMan installation exists in /usr (likely an older distro package) which can shadow $PREFIX; remove the package or reinstall with --prefix /usr"
+    fi
 fi
 
 if [ "$INSTALL_XRAY" -eq 1 ] && [ -z "$DESTDIR" ]; then install_xray || true; fi
